@@ -68,7 +68,7 @@ function AuthGate() {
   if (authLoading) return <div className="auth-loading"><Leaf size={32} /><strong>VITIMAX</strong><span>Verificando sesión...</span></div>
   if (guest) return <App guest onSignOut={() => { sessionStorage.removeItem('vitimax-guest'); setGuest(false) }} />
   if (!firebaseConfigured) return <AuthScreen configured={false} onGuest={() => { sessionStorage.setItem('vitimax-guest', 'true'); setGuest(true) }} />
-  if (!user) return <AuthScreen onAuthenticated={setUser} />
+  if (!user) return <AuthScreen configured onAuthenticated={setUser} onGuest={() => { sessionStorage.setItem('vitimax-guest', 'true'); setGuest(true) }} />
   return <App user={user} onSignOut={() => signOut(firebaseAuth)} />
 }
 
@@ -97,7 +97,17 @@ function AuthScreen({ configured, onAuthenticated, onGuest }) {
     if (!firebaseAuth) return
     setBusy(true)
     try { await signInWithPopup(firebaseAuth, provider) }
-    catch (authError) { setError(authError.code === 'auth/popup-closed-by-user' ? 'Se cerró la ventana de inicio de sesión.' : 'No se pudo conectar con el proveedor seleccionado.') }
+    catch (authError) {
+      setError(
+        authError.code === 'auth/popup-closed-by-user'
+          ? 'Se cerró la ventana de inicio de sesión.'
+          : authError.code === 'auth/unauthorized-domain'
+            ? 'Firebase no autoriza este dominio. Agrega 127.0.0.1 y localhost en Authentication → Settings → Authorized domains.'
+            : authError.code === 'auth/operation-not-allowed'
+              ? 'Activa este proveedor en Firebase → Authentication → Sign-in method.'
+              : 'No se pudo conectar con el proveedor seleccionado.'
+      )
+    }
     finally { setBusy(false) }
   }
   return <main className="auth-screen"><section className="auth-card"><div className="auth-brand"><div className="brand-mark"><Leaf size={23} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div></div>{!configured ? <div className="auth-setup"><CircleHelp size={28} /><h1>Accede a VITIMAX</h1><p>El acceso de administrador necesita configurar Firebase. Mientras tanto puedes entrar como invitado para consultar la aplicación.</p><small>El modo invitado es solo de lectura: no permite editar productos, importar Excel ni cambiar la configuración.</small><button className="btn primary auth-guest" onClick={onGuest}>Entrar como invitado</button></div> : <><p className="eyebrow">ACCESO DE ADMINISTRADOR</p><h1>{mode === 'login' ? 'Iniciar sesión' : 'Crear cuenta'}</h1><p className="auth-muted">Accede al centro de gestión de VITIMAX.</p><div className="social-actions"><button className="social-btn google" disabled={busy} onClick={() => providerLogin(new GoogleAuthProvider())}><span className="provider-logo">G</span> Continuar con Google</button><button className="social-btn microsoft" disabled={busy} onClick={() => providerLogin(new OAuthProvider('microsoft.com'))}><span className="provider-logo ms">⊞</span> Continuar con Microsoft</button></div><div className="auth-divider"><span>o con correo</span></div><form onSubmit={submit} className="auth-form"><label>Correo electrónico<input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" /></label><label>Contraseña<input type="password" required minLength="6" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} /></label>{error && <p className="auth-error">{error}</p>}<button className="btn primary auth-submit" disabled={busy}>{busy ? 'Conectando...' : mode === 'login' ? 'Iniciar sesión' : 'Registrarme'}</button></form><button className="auth-switch" onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError('') }}>{mode === 'login' ? 'Crear cuenta de administrador' : 'Ya tengo una cuenta'}</button><button className="auth-guest-link" onClick={onGuest}>Continuar como invitado</button></>}</section></main>
