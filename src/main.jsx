@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import * as XLSX from 'xlsx'
 import { Html5Qrcode } from 'html5-qrcode'
-import { GoogleAuthProvider, OAuthProvider, createUserWithEmailAndPassword, getRedirectResult, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, signInWithEmailAndPassword, signInWithPopup, signInWithRedirect, signOut, updateProfile } from 'firebase/auth'
+import { GoogleAuthProvider, OAuthProvider, createUserWithEmailAndPassword, getRedirectResult, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, signInWithEmailAndPassword, signInWithRedirect, signOut, updateProfile } from 'firebase/auth'
 import { doc, onSnapshot, setDoc } from 'firebase/firestore'
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage'
 import { httpsCallable } from 'firebase/functions'
@@ -154,9 +154,7 @@ function AuthScreen({ configured, initialError = '', onAuthenticated, onGuest })
     setBusy(true)
     try {
       provider.setCustomParameters?.({ prompt: 'select_account' })
-      const mobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.matchMedia?.('(pointer: coarse)').matches || Boolean(window.Capacitor)
-      if (mobile) await signInWithRedirect(firebaseAuth, provider)
-      else await signInWithPopup(firebaseAuth, provider)
+      await signInWithRedirect(firebaseAuth, provider)
     } catch (authError) { setError(authErrorMessage(authError.code)) }
     finally { setBusy(false) }
   }
@@ -222,9 +220,7 @@ function AuthScreenV2({ configured, initialError = '', onAuthenticated, onGuest 
     setBusy(true)
     try {
       provider.setCustomParameters?.({ prompt: 'select_account' })
-      const mobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.matchMedia?.('(pointer: coarse)').matches || Boolean(window.Capacitor)
-      if (mobile) await signInWithRedirect(firebaseAuth, provider)
-      else await signInWithPopup(firebaseAuth, provider)
+      await signInWithRedirect(firebaseAuth, provider)
     } catch (authError) { setError(authErrorMessage(authError.code)); setBusy(false) }
   }
 
