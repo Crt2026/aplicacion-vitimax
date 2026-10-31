@@ -34,6 +34,10 @@ npx firebase-tools deploy --only functions
 El catálogo, perfil y preferencias se sincronizan por usuario en Firestore. Las
 fotografías de productos se guardan en Storage bajo `users/{uid}/products/`.
 Si Firebase no está configurado, la aplicación mantiene un modo local/invitado.
+El modo local también permite importar Excel, adjuntar archivos al asistente,
+leer archivos de texto/CSV/JSON y descargar páginas HTML generadas desde el
+catálogo. Los análisis avanzados de PDF, Word e imágenes con Gemini requieren
+Cloud Functions y, por tanto, el plan Blaze.
 
 Para Microsoft, registra una aplicación en Microsoft Entra ID, copia el Client
 ID en el proveedor Microsoft de Firebase y agrega el dominio de producción a

@@ -220,10 +220,22 @@ function App({ user, onSignOut, guest = false }) {
     reader.readAsArrayBuffer(file)
   }
   async function uploadProductImage(file, productId) {
-    if (!firebaseStorage || !user) return URL.createObjectURL(file)
+    const readLocal = () => new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result)
+      reader.onerror = reject
+      reader.readAsDataURL(file)
+    })
+    if (!firebaseStorage || !user) {
+      return readLocal()
+    }
     const storageRef = ref(firebaseStorage, `users/${user.uid}/products/${productId}/${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`)
-    await uploadBytes(storageRef, file, { contentType: file.type })
-    return getDownloadURL(storageRef)
+    try {
+      await uploadBytes(storageRef, file, { contentType: file.type })
+      return getDownloadURL(storageRef)
+    } catch {
+      return readLocal()
+    }
   }
   async function saveProduct(product, imageFile) {
     setSaving(true)
@@ -269,9 +281,10 @@ function App({ user, onSignOut, guest = false }) {
     const pageTerms = promptNormalized.split(/\s+/).filter((term) => term.length > 3 && !['crear', 'pagina', 'web', 'promocional', 'promocion'].includes(term))
     const pageProduct = pageRequested && (products.length === 1 ? products[0] : products.find((item) => pageTerms.some((term) => normalize(item.name).includes(term))))
     if (pageProduct) downloadProductPage(pageProduct)
+    let remoteAnswered = false
     if (firebaseFunctions && !guest) {
       const requestId = makeId()
-      setMessages((items) => [...items, { role: 'user', text }, { role: 'assistant', text: 'Estoy consultando Gemini con los datos reales del catálogo...', requestId }])
+      setMessages((items) => [...items, { role: 'user', text, requestId }, { role: 'assistant', text: 'Estoy consultando Gemini con los datos reales del catálogo...', requestId }])
       try {
         let attachment
         if (attachmentFile) {
@@ -287,12 +300,26 @@ function App({ user, onSignOut, guest = false }) {
         }
         const { data } = await httpsCallable(firebaseFunctions, 'vitimaxAssistant')({ message: text, products, attachment })
         setMessages((items) => items.map((item) => item.requestId === requestId ? { ...item, text: data.text } : item))
+        remoteAnswered = true
       } catch {
-        setMessages((items) => items.map((item) => item.requestId === requestId ? { ...item, text: 'No pude analizar ese archivo. Comprueba que pese menos de 8 MB y que Firebase Functions esté desplegado.' } : item))
+        setMessages((items) => items.filter((item) => item.requestId !== requestId))
       }
-      return
     }
+    if (remoteAnswered) return
     const normalized = normalize(text)
+    let attachmentNote = ''
+    if (attachmentFile) {
+      if (attachmentFile.size > 25 * 1024 * 1024) {
+        attachmentNote = `El archivo "${attachmentFile.name}" supera el límite local de 25 MB.`
+      } else if (attachmentFile.type.startsWith('text/') || /\.(txt|md|json|csv)$/i.test(attachmentFile.name)) {
+        try {
+          const content = await attachmentFile.text()
+          attachmentNote = `ARCHIVO RECIBIDO: ${attachmentFile.name}\n\nPrimeros datos del archivo:\n${content.slice(0, 1800)}${content.length > 1800 ? '\n\n[Contenido recortado]' : ''}`
+        } catch { attachmentNote = `Recibí "${attachmentFile.name}", pero no pude leer su contenido localmente.` }
+      } else {
+        attachmentNote = `ARCHIVO RECIBIDO: ${attachmentFile.name}\n\nTipo: ${attachmentFile.type || 'desconocido'}\nTamaño: ${Math.ceil(attachmentFile.size / 1024)} KB\n\nPuedo conservarlo en esta sesión. Para analizar el contenido de PDF, Word o imágenes con IA necesitas activar Gemini/Functions; mientras tanto puedo ayudarte con Excel, imágenes del catálogo y archivos de texto.`
+      }
+    }
     const terms = normalized.split(/\s+/).filter((term) => term.length > 2)
     const matches = products.filter((p) => {
       const haystack = normalize(Object.values(p).join(' '))
@@ -324,7 +351,7 @@ function App({ user, onSignOut, guest = false }) {
     } else {
       response = `Encontré ${matches.length} coincidencia(s) en los datos registrados. Solo recomiendo productos existentes en VITIMAX.${matches.length ? `\n\n${matches.slice(0, 5).map((item) => `• ${item.name || 'Sin nombre'} · ${money(item.price)} · Stock: ${item.stock === '' ? 'Pendiente' : item.stock}`).join('\n')}` : '\n\nNo encontré coincidencias. Prueba con el nombre, categoría, uso o problema registrado.'}`
     }
-    setMessages((items) => [...items, { role: 'user', text }, { role: 'assistant', text: response }])
+    setMessages((items) => [...items, { role: 'user', text: attachmentFile ? `${text}\n📎 ${attachmentFile.name}` : text }, { role: 'assistant', text: attachmentNote ? `${response}\n\n${attachmentNote}` : response }])
   }
   function handleQrResult(value) {
     setQrOpen(false)
