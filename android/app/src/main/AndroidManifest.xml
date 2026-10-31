@@ -34,6 +34,7 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
     <supports-screens
         android:anyDensity="true"
         android:largeScreens="true"

@@ -649,21 +649,49 @@ function ProductModal({ product, onClose, onSave, saving }) {
 
 function QrScanner({ onClose, onResult }) {
   const scannerRef = useRef(null)
+  const resultRef = useRef(onResult)
+  const activeRef = useRef(true)
   const [error, setError] = useState('')
+  const [cameraReady, setCameraReady] = useState(false)
+  useEffect(() => { resultRef.current = onResult }, [onResult])
   useEffect(() => {
     const scanner = new Html5Qrcode('vitimax-qr-reader')
     scannerRef.current = scanner
-    scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 220, height: 220 } }, (decodedText) => {
+    activeRef.current = true
+    const cameraError = (scannerError) => {
+      const name = scannerError?.name || ''
+      if (name === 'NotAllowedError' || /permission|not allowed/i.test(scannerError?.message || '')) return 'Permiso de cámara rechazado. Actívalo en los ajustes del navegador o usa “Leer imagen QR”.'
+      if (name === 'NotFoundError') return 'No se encontró una cámara disponible en este dispositivo.'
+      if (name === 'NotReadableError') return 'La cámara está siendo usada por otra aplicación. Ciérrala e inténtalo otra vez.'
+      if (window.location.protocol !== 'https:' && !['localhost', '127.0.0.1'].includes(window.location.hostname)) return 'El lector necesita una conexión HTTPS para usar la cámara.'
+      return 'No se pudo abrir la cámara. Revisa el permiso del navegador o usa “Leer imagen QR”.'
+    }
+    scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 220, height: 220 }, aspectRatio: 1 }, (decodedText) => {
+      if (!activeRef.current) return
+      activeRef.current = false
       scanner.stop().catch(() => undefined)
-      onResult(decodedText)
-    }, () => undefined).catch((scannerError) => {
-      setError(scannerError?.message || 'No se pudo acceder a la cámara. Revisa el permiso del navegador.')
-    })
+      resultRef.current(decodedText)
+    }, () => undefined).then(() => setCameraReady(true)).catch((scannerError) => setError(cameraError(scannerError)))
     return () => {
+      activeRef.current = false
       if (scanner.isScanning) scanner.stop().catch(() => undefined)
     }
-  }, [onResult])
-  return <div className="modal-backdrop"><div className="modal qr-modal"><div className="modal-head"><div><p className="eyebrow">LECTOR DE ENVASES</p><h2>Escanea el código QR</h2></div><button className="icon-btn" aria-label="Cerrar escáner" onClick={onClose}><X size={19} /></button></div><p className="modal-note"><QrCode size={15} /> El QR debe identificar un producto registrado en el catálogo de VITIMAX.</p><div id="vitimax-qr-reader" className="qr-reader" />{error && <p className="auth-error">{error}</p>}<button className="btn secondary qr-close" onClick={onClose}>Cerrar escáner</button></div></div>
+  }, [])
+  async function scanImage(event) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file || !scannerRef.current) return
+    setError('')
+    activeRef.current = false
+    if (scannerRef.current.isScanning) await scannerRef.current.stop().catch(() => undefined)
+    try {
+      const decodedText = await scannerRef.current.scanFile(file, true)
+      resultRef.current(decodedText)
+    } catch {
+      setError('No encontré un código QR legible en esa imagen. Prueba con una foto más clara.')
+    }
+  }
+  return <div className="modal-backdrop"><div className="modal qr-modal"><div className="modal-head"><div><p className="eyebrow">LECTOR DE ENVASES</p><h2>Escanea el código QR</h2></div><button className="icon-btn" aria-label="Cerrar escáner" onClick={onClose}><X size={19} /></button></div><p className="modal-note"><QrCode size={15} /> Enfoca el código dentro del recuadro. Debe identificar un producto registrado en el catálogo de VITIMAX.</p><div id="vitimax-qr-reader" className="qr-reader" />{cameraReady && <p className="qr-status">Cámara lista · apunta al código QR</p>}{error && <p className="auth-error">{error}</p>}<label className="qr-file-btn">Leer imagen QR<input type="file" accept="image/*" capture="environment" onChange={scanImage} /></label><small className="field-help qr-help">Si la cámara no funciona, toma o selecciona una foto del código QR.</small><button className="btn secondary qr-close" onClick={onClose}>Cerrar escáner</button></div></div>
 }
 
 function Assistant({ messages, onClose, onAsk }) { const [text, setText] = useState(''); const [attachment, setAttachment] = useState(null); const submit = (e) => { e.preventDefault(); if (!text.trim() && !attachment) return; onAsk(text.trim() || 'Analiza el archivo adjunto y dime qué información adicional necesitas.', attachment); setText(''); setAttachment(null) }; return <div className="assistant-panel"><div className="assistant-head"><div className="assistant-title"><div className="bot-avatar"><Bot size={19} /></div><div><strong>Asistente VITIMAX</strong><span>Catálogo, archivos, páginas y asesoría</span></div></div><button className="icon-btn" onClick={onClose}><X size={18} /></button></div><div className="assistant-body">{messages.map((m, i) => <div className={`chat ${m.role}`} key={i}><div>{m.text}</div></div>)}</div><div className="quick-prompts"><button onClick={() => onAsk('Crea paso a paso una página web promocional usando el producto registrado que corresponda.')}>Crear página web</button><button onClick={() => onAsk('Ayúdame a organizar y analizar mi Excel de productos.')}>Ayuda con Excel</button></div><form className="assistant-input" onSubmit={submit}><input value={text} onChange={(e) => setText(e.target.value)} placeholder="Pregunta o pide crear algo..." /><label className="assistant-photo" title="Subir archivo">📎<input type="file" accept="image/*,.pdf,.txt,.md,.json,.csv,.xlsx,.xls,.doc,.docx" hidden onChange={(e) => setAttachment(e.target.files?.[0] || null)} /></label><button type="submit"><ArrowUpToLine size={17} /></button></form>{attachment && <small className="assistant-file">Archivo listo: {attachment.name} ({Math.ceil(attachment.size / 1024)} KB)</small>}<small>Los archivos para análisis deben pesar menos de 8 MB. Verifica diagnósticos y aplicaciones con un especialista.</small></div> }
