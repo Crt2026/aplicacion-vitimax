@@ -81,7 +81,11 @@ function authErrorMessage(code) {
                   : code === 'auth/account-exists-with-different-credential' ? 'Ese correo ya existe con otro método de acceso.'
                     : code === 'auth/network-request-failed' ? 'No hay conexión con Firebase. Revisa internet e inténtalo nuevamente.'
                       : code === 'auth/too-many-requests' ? 'Demasiados intentos. Espera unos minutos y vuelve a intentarlo.'
-                  : 'No se pudo completar la operación. Revisa tu conexión y los datos.'
+                        : code === 'auth/popup-blocked' ? 'El navegador bloqueó la ventana. Usaremos redirección; si vuelve a fallar, agrega este dominio en Firebase.'
+                          : code === 'auth/cancelled-popup-request' || code === 'auth/redirect-cancelled-by-user' ? 'Se canceló el inicio de sesión.'
+                            : code === 'auth/invalid-api-key' ? 'La clave de Firebase no es válida. Revisa la configuración del proyecto.'
+                              : code === 'auth/internal-error' ? 'Firebase rechazó temporalmente el acceso. Revisa proveedores y dominios autorizados.'
+                                : 'No se pudo completar la operación. Revisa tu conexión y los datos.'
 }
 
 function AuthGate() {
@@ -150,7 +154,7 @@ function AuthScreen({ configured, initialError = '', onAuthenticated, onGuest })
     setBusy(true)
     try {
       provider.setCustomParameters?.({ prompt: 'select_account' })
-      const mobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+      const mobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.matchMedia?.('(pointer: coarse)').matches || Boolean(window.Capacitor)
       if (mobile) await signInWithRedirect(firebaseAuth, provider)
       else await signInWithPopup(firebaseAuth, provider)
     } catch (authError) { setError(authErrorMessage(authError.code)) }
@@ -218,7 +222,7 @@ function AuthScreenV2({ configured, initialError = '', onAuthenticated, onGuest 
     setBusy(true)
     try {
       provider.setCustomParameters?.({ prompt: 'select_account' })
-      const mobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+      const mobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.matchMedia?.('(pointer: coarse)').matches || Boolean(window.Capacitor)
       if (mobile) await signInWithRedirect(firebaseAuth, provider)
       else await signInWithPopup(firebaseAuth, provider)
     } catch (authError) { setError(authErrorMessage(authError.code)); setBusy(false) }
