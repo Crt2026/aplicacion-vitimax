@@ -1,16 +1,20 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import * as XLSX from 'xlsx'
+import { Html5Qrcode } from 'html5-qrcode'
 import { GoogleAuthProvider, OAuthProvider, createUserWithEmailAndPassword, onAuthStateChanged, signInWithEmailAndPassword, signInWithPopup, signOut } from 'firebase/auth'
+import { doc, onSnapshot, setDoc } from 'firebase/firestore'
+import { getDownloadURL, ref, uploadBytes } from 'firebase/storage'
+import { httpsCallable } from 'firebase/functions'
 import {
   ArrowDownToLine, ArrowUpToLine, Bell, Bot, Boxes, ChevronRight,
   CircleHelp, ClipboardList, FileSpreadsheet, Filter,
   LayoutDashboard, Leaf, Menu, MessageSquare, MoreHorizontal, PackageCheck,
   Plus, Search, Settings2, ShoppingBag, Sparkles, Sprout, Tags, Upload,
-  UserRound, Users, X, Zap
+  UserRound, Users, X, Zap, QrCode
 } from 'lucide-react'
 import './styles.css'
-import { firebaseAuth, firebaseConfigured } from './firebase'
+import { firebaseAuth, firebaseConfigured, firebaseDb, firebaseFunctions, firebaseStorage } from './firebase'
 
 const STORAGE_KEY = 'vitimax-products-v1'
 const PROFILE_KEY = 'vitimax-profile-v1'
@@ -127,15 +131,39 @@ function App({ user, onSignOut, guest = false }) {
   const [showProduct, setShowProduct] = useState(false)
   const [editing, setEditing] = useState(null)
   const [assistantOpen, setAssistantOpen] = useState(false)
+  const [qrOpen, setQrOpen] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [overlay, setOverlay] = useState(null)
   const [importReport, setImportReport] = useState(null)
   const [messages, setMessages] = useState([{ role: 'assistant', text: 'Hola. Soy el asistente de VITIMAX. Puedo ayudarte a encontrar información del catálogo cargado o preparar una importación.' }])
+  const [cloudReady, setCloudReady] = useState(!user || !firebaseDb)
+  const [saving, setSaving] = useState(false)
   const fileRef = useRef(null)
 
-  useEffect(() => localStorage.setItem(STORAGE_KEY, JSON.stringify(products)), [products])
-  useEffect(() => localStorage.setItem(PROFILE_KEY, JSON.stringify(profile)), [profile])
-  useEffect(() => localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)), [settings])
+  useEffect(() => {
+    if (!user || !firebaseDb) return undefined
+    const workspace = doc(firebaseDb, 'users', user.uid)
+    setCloudReady(false)
+    return onSnapshot(workspace, (snapshot) => {
+      const data = snapshot.data() || {}
+      if (Array.isArray(data.products)) setProducts(data.products)
+      if (data.profile) setProfile((current) => ({ ...current, ...data.profile }))
+      if (data.settings) setSettings((current) => ({ ...current, ...data.settings }))
+      setCloudReady(true)
+    }, () => { setCloudReady(true); setNotice('No se pudo sincronizar la nube; se usará una copia local.') })
+  }, [user])
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(products))
+    if (user && firebaseDb && cloudReady) setDoc(doc(firebaseDb, 'users', user.uid), { products }, { merge: true }).catch(() => setNotice('No se pudo guardar el catálogo en la nube.'))
+  }, [products, user, cloudReady])
+  useEffect(() => {
+    localStorage.setItem(PROFILE_KEY, JSON.stringify(profile))
+    if (user && firebaseDb && cloudReady) setDoc(doc(firebaseDb, 'users', user.uid), { profile: { name: profile.name, email: profile.email, phone: profile.phone, photo: profile.photo } }, { merge: true }).catch(() => setNotice('No se pudo guardar el perfil en la nube.'))
+  }, [profile, user, cloudReady])
+  useEffect(() => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
+    if (user && firebaseDb && cloudReady) setDoc(doc(firebaseDb, 'users', user.uid), { settings }, { merge: true }).catch(() => setNotice('No se pudo guardar la configuración en la nube.'))
+  }, [settings, user, cloudReady])
   useEffect(() => { if (notice) { const timer = setTimeout(() => setNotice(''), 3500); return () => clearTimeout(timer) } }, [notice])
 
   const categories = useMemo(() => ['Todas', ...new Set(products.map((p) => p.category).filter(Boolean))], [products])
@@ -191,15 +219,29 @@ function App({ user, onSignOut, guest = false }) {
     }
     reader.readAsArrayBuffer(file)
   }
-  function saveProduct(product) {
-    const clean = { ...product, id: product.id || makeId() }
-    setProducts((current) => {
-      const index = current.findIndex((p) => p.id === clean.id)
-      if (index < 0) return [...current, clean]
-      return current.map((p, i) => i === index ? clean : p)
-    })
-    setShowProduct(false)
-    setNotice(product.id ? 'Producto actualizado' : 'Producto creado como pendiente de completar')
+  async function uploadProductImage(file, productId) {
+    if (!firebaseStorage || !user) return URL.createObjectURL(file)
+    const storageRef = ref(firebaseStorage, `users/${user.uid}/products/${productId}/${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`)
+    await uploadBytes(storageRef, file, { contentType: file.type })
+    return getDownloadURL(storageRef)
+  }
+  async function saveProduct(product, imageFile) {
+    setSaving(true)
+    const id = product.id || makeId()
+    let image = product.image
+    try {
+      if (imageFile) image = await uploadProductImage(imageFile, id)
+      const clean = { ...product, id, image }
+      setProducts((current) => {
+        const index = current.findIndex((p) => p.id === clean.id)
+        if (index < 0) return [...current, clean]
+        return current.map((p, i) => i === index ? clean : p)
+      })
+      setShowProduct(false)
+      setNotice(product.id ? 'Producto actualizado' : 'Producto creado correctamente')
+    } catch {
+      setNotice('No se pudo subir la imagen. Revisa la configuración de Firebase Storage.')
+    } finally { setSaving(false) }
   }
   function deleteProduct(id) {
     if (window.confirm('¿Eliminar este producto del catálogo local?')) {
@@ -209,14 +251,75 @@ function App({ user, onSignOut, guest = false }) {
   }
   function saveProfile(next) { setProfile(next); setOverlay(null); setNotice('Perfil guardado correctamente') }
   function saveSettings(next) { setSettings(next); setOverlay(null); setNotice('Configuración guardada correctamente') }
-  function askAssistant(text) {
+  async function askAssistant(text, imageFile = null) {
+    if (firebaseFunctions && !guest) {
+      const requestId = makeId()
+      setMessages((items) => [...items, { role: 'user', text }, { role: 'assistant', text: 'Estoy consultando Gemini con los datos reales del catálogo...', requestId }])
+      try {
+        let image
+        if (imageFile) {
+          const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onload = () => resolve(reader.result)
+            reader.onerror = reject
+            reader.readAsDataURL(imageFile)
+          })
+          const [header, data] = String(dataUrl).split(',')
+          image = { mimeType: header.match(/data:(.*);base64/)?.[1] || imageFile.type, data }
+        }
+        const { data } = await httpsCallable(firebaseFunctions, 'vitimaxAssistant')({ message: text, products, image })
+        setMessages((items) => items.map((item) => item.requestId === requestId ? { ...item, text: data.text } : item))
+      } catch {
+        setMessages((items) => items.map((item) => item.requestId === requestId ? { ...item, text: 'No pude conectar con el servicio de IA. Puedes continuar usando el asistente local mientras se revisa el backend.' } : item))
+      }
+      return
+    }
     const normalized = normalize(text)
-    const matches = products.filter((p) => Object.values(p).join(' ').toLowerCase().includes(normalized))
+    const terms = normalized.split(/\s+/).filter((term) => term.length > 2)
+    const matches = products.filter((p) => {
+      const haystack = normalize(Object.values(p).join(' '))
+      return !terms.length || terms.some((term) => haystack.includes(term))
+    })
     const low = products.filter((p) => Number(p.stock) > 0 && Number(p.stock) <= Number(settings.lowStock))
-    let response = products.length ? `Hay ${matches.length} coincidencia(s) exacta(s) para tu consulta. Solo puedo recomendar productos registrados en VITIMAX.` : 'Todavía no hay productos reales cargados. Importa el Excel de VITIMAX para que pueda recomendar productos sin inventar información.'
-    if (normalized.includes('inventario') || normalized.includes('stock')) response = `Inventario registrado: ${products.length} productos y ${low.length} con stock bajo. No crearé datos que no estén en el catálogo.`
-    if (matches.length) response += ` Producto(s): ${matches.slice(0, 3).map((p) => p.name || 'Sin nombre').join(', ')}.`
+    let response = ''
+    const product = matches[0]
+    if (!products.length) {
+      response = 'Todavía no hay productos reales cargados. Importa el Excel oficial para que pueda recomendar, crear páginas o redactar contenido sin inventar productos, precios, stock ni características.'
+    } else if (normalized.includes('inventario') || normalized.includes('stock') || normalized.includes('reporte')) {
+      response = `INFORME DE INVENTARIO\n\nProductos registrados: ${products.length}\nUnidades contabilizadas: ${products.reduce((sum, item) => sum + (Number(item.stock) || 0), 0)}\nStock bajo: ${low.length}\n\n${low.length ? `Requieren atención: ${low.map((item) => `${item.name || 'Sin nombre'} (${item.stock})`).join(', ')}` : 'No hay productos dentro del umbral configurado.'}`
+    } else if (normalized.includes('excel') || normalized.includes('import') || normalized.includes('plantilla')) {
+      response = 'AYUDA CON EXCEL\n\nPuedes descargar la plantilla desde Resumen o Catálogo, completar los campos oficiales y usar Importar productos. Las filas sin nombre se reportan como error, los nombres repetidos actualizan el producto existente y los campos sin información quedan pendientes.'
+    } else if (normalized.includes('crear pagina') || normalized.includes('pagina web') || normalized.includes('landing') || normalized.includes('promocion')) {
+      if (!product) {
+        response = 'Puedo crear la estructura de una página promocional, pero necesito que indiques el nombre de un producto registrado o cargues primero el catálogo.'
+      } else {
+        response = `PÁGINA PROMOCIONAL: ${product.name || 'Producto pendiente'}\n\nTítulo: ${product.name || 'Producto pendiente'}\n\nDescripción: ${product.description || 'Descripción pendiente en el catálogo.'}\n\nInformación disponible: ${[product.category && `Categoría: ${product.category}`, product.format && `Formato: ${product.format}`, product.features && `Características: ${product.features}`].filter(Boolean).join(' · ') || 'Pendiente de completar.'}\n\nUso: ${product.usage || 'Pendiente de completar con la ficha técnica oficial.'}\n\nPrecio: ${money(product.price)}\nDisponibilidad: ${product.stock === '' ? 'Stock pendiente' : `${product.stock} unidades registradas`}\n\nCTA: Solicitar información sobre ${product.name || 'este producto'}\n\nNo se publicaron datos que no estén registrados. Revisa la ficha técnica antes de publicar recomendaciones.`
+      }
+    } else if (normalized.includes('descripcion') || normalized.includes('publicacion') || normalized.includes('redes') || normalized.includes('contenido')) {
+      response = product
+        ? `BORRADOR DE CONTENIDO\n\n${product.name || 'Producto pendiente'}\n\n${product.description || 'La descripción todavía está pendiente de completar.'}\n\nDatos confirmados: ${[product.category, product.format, product.features].filter(Boolean).join(' · ') || 'No hay características registradas.'}\n\nPrecio: ${money(product.price)} · Stock: ${product.stock === '' ? 'Pendiente' : product.stock}\n\nCompleta los campos pendientes antes de publicar.`
+        : 'Indica el nombre de un producto registrado y crearé un borrador utilizando solamente sus datos.'
+    } else if (normalized.includes('dosis') || normalized.includes('aplicar') || normalized.includes('tratamiento') || normalized.includes('sirve')) {
+      response = product
+        ? `INFORMACIÓN REGISTRADA DE ${product.name || 'PRODUCTO'}\n\nModo de uso: ${product.usage || 'Pendiente de ficha técnica.'}\nRecomendaciones: ${product.recommendations || 'Pendientes de ficha técnica.'}\n\nNo puedo calcular ni inventar una dosis. Confirma la etiqueta oficial y consulta a un especialista de VITIMAX antes de aplicar cualquier producto.`
+        : 'Necesito el nombre de un producto registrado. No entregaré dosis ni tratamientos que no estén en una ficha técnica oficial.'
+    } else {
+      response = `Encontré ${matches.length} coincidencia(s) en los datos registrados. Solo recomiendo productos existentes en VITIMAX.${matches.length ? `\n\n${matches.slice(0, 5).map((item) => `• ${item.name || 'Sin nombre'} · ${money(item.price)} · Stock: ${item.stock === '' ? 'Pendiente' : item.stock}`).join('\n')}` : '\n\nNo encontré coincidencias. Prueba con el nombre, categoría, uso o problema registrado.'}`
+    }
     setMessages((items) => [...items, { role: 'user', text }, { role: 'assistant', text: response }])
+  }
+  function handleQrResult(value) {
+    setQrOpen(false)
+    const match = products.find((product) => normalize(product.id) === normalize(value) || normalize(product.name) === normalize(value) || String(product.qr || '') === value)
+    if (match) {
+      setActive('Catálogo')
+      setQuery(match.name)
+      setMessages((items) => [...items, { role: 'assistant', text: `Encontré ${match.name} en el catálogo. La ficha muestra únicamente la información registrada en VITIMAX.` }])
+      setAssistantOpen(true)
+      return
+    }
+    askAssistant(`Producto escaneado: ${value}`)
+    setAssistantOpen(true)
   }
 
   const nav = [
@@ -238,7 +341,7 @@ function App({ user, onSignOut, guest = false }) {
       <div className="sidebar-bottom">{canManage && <button className="nav-item" onClick={() => { setOverlay('settings'); setMobileMenuOpen(false) }}><Settings2 size={18} /><span>Configuración</span></button>}<button className="profile profile-button" onClick={() => canManage && setOverlay('profile')}><div className="avatar">{profile.name?.[0] || 'V'}</div><div><strong>{profile.name || 'Invitado'}</strong><span>{profile.email || 'Acceso de invitado'}</span></div><MoreHorizontal size={17} /></button></div>
     </aside>
     <main className="main">
-      <header className="topbar"><button className="mobile-menu" aria-label="Abrir menú" onClick={() => setMobileMenuOpen(true)}><Menu size={21} /></button><div className="crumb">VITIMAX <ChevronRight size={14} /> <b>{active}</b></div><div className="top-actions"><button className="icon-btn" title="Notificaciones" aria-label="Notificaciones" onClick={() => setOverlay('notifications')}><Bell size={18} /><i /></button><button className="user-chip" onClick={() => setOverlay('profile')}><div className="avatar small">{profile.name?.[0] || 'V'}</div><span>{profile.name || 'Administrador'}</span><ChevronRight size={15} /></button></div></header>
+      <header className="topbar"><button className="mobile-menu" aria-label="Abrir menú" onClick={() => setMobileMenuOpen(true)}><Menu size={21} /></button><div className="crumb">VITIMAX <ChevronRight size={14} /> <b>{active}</b></div><div className="top-actions"><button className="icon-btn" title="Escanear código QR" aria-label="Escanear código QR" onClick={() => setQrOpen(true)}><QrCode size={18} /></button><button className="icon-btn" title="Notificaciones" aria-label="Notificaciones" onClick={() => setOverlay('notifications')}><Bell size={18} /><i /></button><button className="user-chip" onClick={() => setOverlay('profile')}><div className="avatar small">{profile.name?.[0] || 'V'}</div><span>{profile.name || 'Administrador'}</span><ChevronRight size={15} /></button></div></header>
       <div className="content">
         {active === 'Resumen' && <Dashboard products={products} lowStock={lowStock} missingData={missingData} onImport={canManage ? () => fileRef.current?.click() : undefined} onTemplate={canManage ? downloadTemplate : undefined} onNavigate={navigate} />}
         {active === 'Catálogo' && <Catalog products={filtered} allProducts={products} categories={categories} query={query} setQuery={setQuery} category={category} setCategory={setCategory} onImport={canManage ? () => fileRef.current?.click() : undefined} onExport={canManage ? exportProducts : undefined} onTemplate={canManage ? downloadTemplate : undefined} onCreate={canManage ? () => { setEditing(null); setShowProduct(true) } : undefined} onEdit={canManage ? (p) => { setEditing(p); setShowProduct(true) } : undefined} onDelete={canManage ? (id) => setProducts((all) => all.filter((p) => p.id !== id)) : undefined} readOnly={guest} />}
@@ -255,7 +358,8 @@ function App({ user, onSignOut, guest = false }) {
     {importReport && <ImportReport report={importReport} onClose={() => setImportReport(null)} />}
     <button className="assistant-fab" onClick={() => setAssistantOpen(true)}><Bot size={20} /><span>Asistente VITIMAX</span></button>
     {assistantOpen && <Assistant messages={messages} onClose={() => setAssistantOpen(false)} onAsk={askAssistant} />}
-    {showProduct && canManage && <ProductModal product={editing || emptyProduct} onClose={() => setShowProduct(false)} onSave={saveProduct} />}
+    {qrOpen && <QrScanner onClose={() => setQrOpen(false)} onResult={handleQrResult} />}
+    {showProduct && canManage && <ProductModal product={editing || emptyProduct} onClose={() => setShowProduct(false)} onSave={saveProduct} saving={saving} />}
   </div>
 }
 
@@ -292,7 +396,7 @@ function ProfileModal({ profile, onClose, onSave, onSignOut }) {
   const update = (key, value) => setForm((current) => ({ ...current, [key]: value }))
   return <ModalShell title="Mi perfil" eyebrow="CUENTA" onClose={onClose} actions={<><button className="btn secondary" onClick={onSignOut}>Cerrar sesión</button><button className="btn secondary" onClick={onClose}>Cancelar</button><button className="btn primary" onClick={() => onSave(form)}>Guardar cambios</button></>}>
     <div className="profile-preview">{form.photo ? <img className="profile-photo" src={form.photo} alt="" /> : <div className="avatar profile-avatar">{form.name?.[0] || 'V'}</div>}<div><strong>{form.name || 'Administrador'}</strong><span>Administrador de VITIMAX</span></div></div>
-    <div className="form-grid"><label>Nombre<input value={form.name} onChange={(e) => update('name', e.target.value)} /></label><label>Correo electrónico<input type="email" value={form.email} onChange={(e) => update('email', e.target.value)} placeholder="Pendiente" /></label><label>Teléfono<input value={form.phone} onChange={(e) => update('phone', e.target.value)} placeholder="Pendiente" /></label><label>Foto de perfil (URL)<input value={form.photo} onChange={(e) => update('photo', e.target.value)} placeholder="Pendiente" /></label><label className="full">Nueva contraseña<input type="password" value={form.password || ''} onChange={(e) => update('password', e.target.value)} placeholder="No se modifica si queda vacío" /></label></div>
+    <div className="form-grid"><label>Nombre<input value={form.name} onChange={(e) => update('name', e.target.value)} /></label><label>Correo electrónico<input type="email" value={form.email} onChange={(e) => update('email', e.target.value)} placeholder="Pendiente" readOnly /></label><label>Teléfono<input value={form.phone} onChange={(e) => update('phone', e.target.value)} placeholder="Pendiente" /></label><label>Foto de perfil (URL)<input value={form.photo} onChange={(e) => update('photo', e.target.value)} placeholder="Pendiente" /></label></div>
   </ModalShell>
 }
 
@@ -312,8 +416,32 @@ function ImportReport({ report, onClose }) {
   return <ModalShell title="Resultado de importación" eyebrow="EXCEL VALIDADO" onClose={onClose}><div className="import-summary"><Metric icon={FileSpreadsheet} label="Filas leídas" value={report.rows} detail="primera hoja" color="blue" /><Metric icon={Plus} label="Agregados" value={report.added} detail="nuevos registros" color="green" /><Metric icon={PackageCheck} label="Actualizados" value={report.updated} detail="sin duplicar" color="purple" /><Metric icon={CircleHelp} label="Pendientes" value={report.missing + report.invalid} detail={`${report.invalid} con error`} color="orange" /></div><p className="modal-note"><CircleHelp size={15} /> Los productos con precio o stock faltante permanecen marcados como pendientes. No se inventaron datos.</p><div className="modal-actions"><button className="btn primary" onClick={onClose}>Continuar</button></div></ModalShell>
 }
 
-function ProductModal({ product, onClose, onSave }) { const [form, setForm] = useState(product); const update = (key, value) => setForm((current) => ({ ...current, [key]: value })); return <div className="modal-backdrop"><div className="modal"><div className="modal-head"><div><p className="eyebrow">FICHA DE PRODUCTO</p><h2>{product.id ? 'Editar producto' : 'Nuevo producto'}</h2></div><button className="icon-btn" onClick={onClose}><X size={19} /></button></div><p className="modal-note"><CircleHelp size={15} /> Los campos sin información quedarán marcados como pendientes.</p><div className="form-grid">{[['name','Nombre del producto'],['category','Categoría'],['price','Precio'],['previousPrice','Precio anterior'],['stock','Stock disponible'],['format','Formato o tamaño'],['image','URL de fotografía']].map(([key, label]) => <label key={key}>{label}<input value={form[key] ?? ''} onChange={(e) => update(key, e.target.value)} placeholder="Pendiente" /></label>)}<label className="full">Descripción<textarea value={form.description ?? ''} onChange={(e) => update('description', e.target.value)} placeholder="Pendiente de completar" /></label><label>Modo de uso<textarea value={form.usage ?? ''} onChange={(e) => update('usage', e.target.value)} placeholder="Pendiente" /></label><label>Recomendaciones<textarea value={form.recommendations ?? ''} onChange={(e) => update('recommendations', e.target.value)} placeholder="Pendiente" /></label></div><div className="modal-actions"><button className="btn secondary" onClick={onClose}>Cancelar</button><button className="btn primary" onClick={() => onSave(form)}><PackageCheck size={16} /> Guardar producto</button></div></div></div> }
+function ProductModal({ product, onClose, onSave, saving }) {
+  const [form, setForm] = useState(product)
+  const [imageFile, setImageFile] = useState(null)
+  const update = (key, value) => setForm((current) => ({ ...current, [key]: value }))
+  return <div className="modal-backdrop"><div className="modal"><div className="modal-head"><div><p className="eyebrow">FICHA DE PRODUCTO</p><h2>{product.id ? 'Editar producto' : 'Nuevo producto'}</h2></div><button className="icon-btn" onClick={onClose}><X size={19} /></button></div><p className="modal-note"><CircleHelp size={15} /> Los campos sin información quedarán marcados como pendientes.</p><div className="form-grid">{[['name','Nombre del producto'],['category','Categoría'],['price','Precio'],['previousPrice','Precio anterior'],['stock','Stock disponible'],['format','Formato o tamaño'],['image','URL de fotografía']].map(([key, label]) => <label key={key}>{label}<input value={form[key] ?? ''} onChange={(e) => update(key, e.target.value)} placeholder="Pendiente" /></label>)}<label className="full">Subir fotografía<input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />{imageFile && <small>{imageFile.name}</small>}</label><label className="full">Descripción<textarea value={form.description ?? ''} onChange={(e) => update('description', e.target.value)} placeholder="Pendiente de completar" /></label><label>Modo de uso<textarea value={form.usage ?? ''} onChange={(e) => update('usage', e.target.value)} placeholder="Pendiente" /></label><label>Recomendaciones<textarea value={form.recommendations ?? ''} onChange={(e) => update('recommendations', e.target.value)} placeholder="Pendiente" /></label></div><div className="modal-actions"><button className="btn secondary" onClick={onClose} disabled={saving}>Cancelar</button><button className="btn primary" onClick={() => onSave(form, imageFile)} disabled={saving}><PackageCheck size={16} /> {saving ? 'Subiendo...' : 'Guardar producto'}</button></div></div></div>
+}
 
-function Assistant({ messages, onClose, onAsk }) { const [text, setText] = useState(''); const submit = (e) => { e.preventDefault(); if (!text.trim()) return; onAsk(text.trim()); setText('') }; return <div className="assistant-panel"><div className="assistant-head"><div className="assistant-title"><div className="bot-avatar"><Bot size={19} /></div><div><strong>Asistente VITIMAX</strong><span>Basado en tu catálogo real</span></div></div><button className="icon-btn" onClick={onClose}><X size={18} /></button></div><div className="assistant-body">{messages.map((m, i) => <div className={`chat ${m.role}`} key={i}><div>{m.text}</div></div>)}</div><div className="quick-prompts"><button onClick={() => onAsk('¿Qué productos hay disponibles?')}>Ver productos</button><button onClick={() => onAsk('Analiza mi inventario')}>Analizar inventario</button></div><form className="assistant-input" onSubmit={submit}><input value={text} onChange={(e) => setText(e.target.value)} placeholder="Escribe una consulta..." /><button type="submit"><ArrowUpToLine size={17} /></button></form><small>La IA no inventa información. Verifica las recomendaciones con un especialista.</small></div> }
+function QrScanner({ onClose, onResult }) {
+  const scannerRef = useRef(null)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    const scanner = new Html5Qrcode('vitimax-qr-reader')
+    scannerRef.current = scanner
+    scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 220, height: 220 } }, (decodedText) => {
+      scanner.stop().catch(() => undefined)
+      onResult(decodedText)
+    }, () => undefined).catch((scannerError) => {
+      setError(scannerError?.message || 'No se pudo acceder a la cámara. Revisa el permiso del navegador.')
+    })
+    return () => {
+      if (scanner.isScanning) scanner.stop().catch(() => undefined)
+    }
+  }, [onResult])
+  return <div className="modal-backdrop"><div className="modal qr-modal"><div className="modal-head"><div><p className="eyebrow">LECTOR DE ENVASES</p><h2>Escanea el código QR</h2></div><button className="icon-btn" aria-label="Cerrar escáner" onClick={onClose}><X size={19} /></button></div><p className="modal-note"><QrCode size={15} /> El QR debe identificar un producto registrado en el catálogo de VITIMAX.</p><div id="vitimax-qr-reader" className="qr-reader" />{error && <p className="auth-error">{error}</p>}<button className="btn secondary qr-close" onClick={onClose}>Cerrar escáner</button></div></div>
+}
+
+function Assistant({ messages, onClose, onAsk }) { const [text, setText] = useState(''); const [image, setImage] = useState(null); const submit = (e) => { e.preventDefault(); if (!text.trim() && !image) return; onAsk(text.trim() || 'Analiza esta fotografía de mi planta y dime qué información adicional necesitas.', image); setText(''); setImage(null) }; return <div className="assistant-panel"><div className="assistant-head"><div className="assistant-title"><div className="bot-avatar"><Bot size={19} /></div><div><strong>Asistente VITIMAX</strong><span>Catálogo, páginas, Excel y asesoría</span></div></div><button className="icon-btn" onClick={onClose}><X size={18} /></button></div><div className="assistant-body">{messages.map((m, i) => <div className={`chat ${m.role}`} key={i}><div>{m.text}</div></div>)}</div><div className="quick-prompts"><button onClick={() => onAsk('Crea paso a paso una página web promocional usando el producto registrado que corresponda.')}>Crear página web</button><button onClick={() => onAsk('Ayúdame a organizar y analizar mi Excel de productos.')}>Ayuda con Excel</button></div><form className="assistant-input" onSubmit={submit}><input value={text} onChange={(e) => setText(e.target.value)} placeholder="Pregunta o pide crear algo..." /><label className="assistant-photo" title="Subir foto de planta">📷<input type="file" accept="image/*" hidden onChange={(e) => setImage(e.target.files?.[0] || null)} /></label><button type="submit"><ArrowUpToLine size={17} /></button></form>{image && <small className="assistant-file">Foto lista: {image.name}</small>}<small>La IA usa el catálogo real. Verifica diagnósticos y aplicaciones con un especialista.</small></div> }
 
 createRoot(document.getElementById('root')).render(<AuthGate />)

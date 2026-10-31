@@ -14,7 +14,31 @@ npm run dev
 
 1. Copia `.env.example` como `.env`.
 2. Completa las variables con la configuración de tu proyecto Firebase.
-3. Activa los proveedores de autenticación que quieras utilizar.
+3. En Firebase activa Authentication con Email/Password, Google y Microsoft.
+4. Crea Firestore y Storage, y publica sus reglas desde la raíz:
+
+```powershell
+npx firebase-tools login
+npx firebase-tools use TU_PROJECT_ID
+npx firebase-tools deploy --only firestore:rules,storage
+```
+
+5. Para el asistente, crea el secreto del backend y despliega las funciones:
+
+```powershell
+npx firebase-tools functions:secrets:set GEMINI_API_KEY
+npm --prefix functions install
+npx firebase-tools deploy --only functions
+```
+
+El catálogo, perfil y preferencias se sincronizan por usuario en Firestore. Las
+fotografías de productos se guardan en Storage bajo `users/{uid}/products/`.
+Si Firebase no está configurado, la aplicación mantiene un modo local/invitado.
+
+Para Microsoft, registra una aplicación en Microsoft Entra ID, copia el Client
+ID en el proveedor Microsoft de Firebase y agrega el dominio de producción a
+los dominios autorizados de Firebase Authentication. Nunca pongas secretos de
+Microsoft o Gemini en `VITE_*` ni en el frontend.
 
 No subas `.env` al repositorio. Ese archivo está excluido por `.gitignore`.
 
