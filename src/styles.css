@@ -28,3 +28,47 @@ button,.btn,.nav-item,.icon-btn,.user-chip{touch-action:manipulation}
 .auth-form-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.auth-success{color:#3f8759;background:#e8f5ea;border-radius:7px;padding:9px;font-size:10px;margin:0}.auth-forgot{display:block;margin:14px auto 0;color:var(--green);font-size:11px;font-weight:700}
 .field-help{font-size:10px;color:var(--muted);font-weight:400;line-height:1.4}.birth-date-input{min-height:42px;accent-color:var(--green)}
 .chat>div{white-space:pre-wrap}
+@media (max-width:650px){
+  body{padding:0}
+  .app-shell{min-height:100dvh}
+  .topbar{height:calc(60px + env(safe-area-inset-top,0px));padding:env(safe-area-inset-top,0px) 8px 0}
+  .crumb{min-width:0;gap:6px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .crumb svg{display:none}
+  .top-actions{flex-shrink:0;gap:0}
+  .top-actions .icon-btn{width:44px}
+  .user-chip{max-width:48px}
+  .content{padding:24px 12px calc(130px + env(safe-area-inset-bottom,0px))}
+  .page-heading h1{font-size:23px;line-height:1.2}
+  .page-heading .muted{font-size:12px;line-height:1.5}
+  .heading-actions,.module-actions{display:grid;grid-template-columns:1fr;gap:8px}
+  .heading-actions .btn,.module-actions .btn{width:100%}
+  .hero-card{padding:22px 18px;border-radius:13px}
+  .hero-card h2{font-size:21px}
+  .hero-card p{font-size:12px}
+  .toolbar-actions{width:100%;display:grid;grid-template-columns:1fr 1fr}
+  .toolbar-actions .btn{width:100%;padding-inline:8px}
+  .panel{padding:16px}
+  .table-wrap{margin-inline:-16px;padding-inline:16px}
+  .modal-backdrop{padding: max(8px,env(safe-area-inset-top,0px)) 8px max(8px,env(safe-area-inset-bottom,0px))}
+  .modal{max-height:calc(100dvh - 16px);padding:16px;border-radius:12px}
+  .modal h2{font-size:19px}
+  .modal-actions{display:flex;flex-direction:column-reverse;gap:8px}
+  .modal-actions .btn{width:100%;min-height:46px}
+  .assistant-panel{left:8px;right:8px;width:auto;bottom:calc(76px + env(safe-area-inset-bottom,0px))!important;max-height:calc(100dvh - 96px);display:flex;flex-direction:column}
+  .assistant-body{height:min(38dvh,280px);min-height:150px}
+  .assistant-input input{min-width:0}
+  .auth-screen{align-items:start;padding: max(14px,env(safe-area-inset-top,0px)) 12px max(14px,env(safe-area-inset-bottom,0px));overflow:auto}
+  .auth-card{padding:22px 18px;border-radius:14px;margin:auto 0}
+  .auth-brand{margin-bottom:24px}
+  .auth-card h1{font-size:23px}
+  .auth-form input{min-height:44px;font-size:16px}
+  .auth-form-row{grid-template-columns:1fr}
+  .social-btn,.auth-submit{min-height:48px}
+}
+@media (max-width:380px){
+  .metrics{grid-template-columns:1fr}
+  .metric{display:flex;align-items:center}
+  .top-actions .icon-btn{width:40px}
+  .user-chip{display:none}
+  .content{padding-inline:10px}
+}
