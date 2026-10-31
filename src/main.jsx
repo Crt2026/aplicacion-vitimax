@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import * as XLSX from 'xlsx'
 import { Html5Qrcode } from 'html5-qrcode'
-import { GoogleAuthProvider, OAuthProvider, createUserWithEmailAndPassword, onAuthStateChanged, signInWithEmailAndPassword, signInWithPopup, signOut, updateProfile } from 'firebase/auth'
+import { GoogleAuthProvider, OAuthProvider, createUserWithEmailAndPassword, getRedirectResult, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, signInWithEmailAndPassword, signInWithPopup, signInWithRedirect, signOut, updateProfile } from 'firebase/auth'
 import { doc, onSnapshot, setDoc } from 'firebase/firestore'
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage'
 import { httpsCallable } from 'firebase/functions'
@@ -70,60 +70,165 @@ function imageFileToDataUrl(file) {
   })
 }
 
+function authErrorMessage(code) {
+  return code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found' ? 'Correo o contraseña incorrectos.'
+    : code === 'auth/email-already-in-use' ? 'Ese correo ya está registrado.'
+      : code === 'auth/weak-password' ? 'La contraseña debe tener al menos 6 caracteres.'
+        : code === 'auth/invalid-email' ? 'Escribe un correo electrónico válido.'
+          : code === 'auth/popup-closed-by-user' ? 'Se cerró la ventana de inicio de sesión.'
+            : code === 'auth/unauthorized-domain' ? 'Firebase no autoriza este dominio. Agrega el dominio actual en Authentication → Settings → Authorized domains.'
+              : code === 'auth/operation-not-allowed' ? 'Activa este proveedor en Firebase → Authentication → Sign-in method.'
+                  : code === 'auth/account-exists-with-different-credential' ? 'Ese correo ya existe con otro método de acceso.'
+                    : code === 'auth/network-request-failed' ? 'No hay conexión con Firebase. Revisa internet e inténtalo nuevamente.'
+                      : code === 'auth/too-many-requests' ? 'Demasiados intentos. Espera unos minutos y vuelve a intentarlo.'
+                  : 'No se pudo completar la operación. Revisa tu conexión y los datos.'
+}
+
 function AuthGate() {
   const [user, setUser] = useState(null)
   const [guest, setGuest] = useState(() => sessionStorage.getItem('vitimax-guest') === 'true')
   const [authLoading, setAuthLoading] = useState(Boolean(firebaseAuth))
+  const [authError, setAuthError] = useState('')
   useEffect(() => {
     if (!firebaseAuth) return undefined
-    return onAuthStateChanged(firebaseAuth, (nextUser) => { setUser(nextUser); setAuthLoading(false) })
+    const unsubscribe = onAuthStateChanged(firebaseAuth, (nextUser) => { setUser(nextUser); setAuthLoading(false) })
+    getRedirectResult(firebaseAuth).catch((error) => setAuthError(authErrorMessage(error.code)))
+    return unsubscribe
   }, [])
   if (authLoading) return <div className="auth-loading"><Leaf size={32} /><strong>VITIMAX</strong><span>Verificando sesión...</span></div>
   if (guest) return <App guest onSignOut={() => { sessionStorage.removeItem('vitimax-guest'); setGuest(false) }} />
-  if (!firebaseConfigured) return <AuthScreen configured={false} onGuest={() => { sessionStorage.setItem('vitimax-guest', 'true'); setGuest(true) }} />
-  if (!user) return <AuthScreen configured onAuthenticated={setUser} onGuest={() => { sessionStorage.setItem('vitimax-guest', 'true'); setGuest(true) }} />
+  if (!firebaseConfigured) return <AuthScreenV2 configured={false} onGuest={() => { sessionStorage.setItem('vitimax-guest', 'true'); setGuest(true) }} />
+  if (!user) return <AuthScreenV2 configured initialError={authError} onAuthenticated={setUser} onGuest={() => { sessionStorage.setItem('vitimax-guest', 'true'); setGuest(true) }} />
   return <App user={user} onSignOut={() => signOut(firebaseAuth)} />
 }
 
-function AuthScreen({ configured, onAuthenticated, onGuest }) {
+function AuthScreen({ configured, initialError = '', onAuthenticated, onGuest }) {
   const [mode, setMode] = useState('login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [firstName, setFirstName] = useState('')
+  const [lastName, setLastName] = useState('')
+  const [birthDate, setBirthDate] = useState('')
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
+  useEffect(() => { if (initialError) setError(initialError) }, [initialError])
   async function submit(event) {
     event.preventDefault()
     setError('')
     if (!firebaseAuth) return
     setBusy(true)
     try {
+      if (mode === 'reset') {
+        await sendPasswordResetEmail(firebaseAuth, email.trim())
+        setNotice('Te enviamos un enlace para cambiar tu contraseña. Revisa tu correo y la carpeta de spam.')
+        setMode('login')
+        return
+      }
+      if (mode === 'register' && (!firstName.trim() || !lastName.trim() || !birthDate)) {
+        setError('Completa nombre, apellido y fecha de nacimiento.')
+        return
+      }
       const result = mode === 'login'
-        ? await signInWithEmailAndPassword(firebaseAuth, email, password)
-        : await createUserWithEmailAndPassword(firebaseAuth, email, password)
+        ? await signInWithEmailAndPassword(firebaseAuth, email.trim(), password)
+        : await createUserWithEmailAndPassword(firebaseAuth, email.trim(), password)
+      if (mode === 'register') {
+        const fullName = `${firstName.trim()} ${lastName.trim()}`
+        await updateProfile(result.user, { displayName: fullName })
+        await setDoc(doc(firebaseDb, 'users', result.user.uid), { profile: { name: fullName, firstName: firstName.trim(), lastName: lastName.trim(), email: email.trim(), birthDate, phone: '', photo: '' } }, { merge: true })
+        await sendEmailVerification(result.user)
+        setNotice('Cuenta creada. Te enviamos un correo de verificación.')
+      }
       onAuthenticated?.(result.user)
     } catch (authError) {
-      setError(authError.code === 'auth/invalid-credential' ? 'Correo o contraseña incorrectos.' : authError.code === 'auth/email-already-in-use' ? 'Ese correo ya está registrado.' : 'No se pudo completar la operación. Revisa los datos.')
+      setError(authErrorMessage(authError.code))
     } finally { setBusy(false) }
   }
   async function providerLogin(provider) {
     setError('')
     if (!firebaseAuth) return
     setBusy(true)
-    try { await signInWithPopup(firebaseAuth, provider) }
-    catch (authError) {
-      setError(
-        authError.code === 'auth/popup-closed-by-user'
-          ? 'Se cerró la ventana de inicio de sesión.'
-          : authError.code === 'auth/unauthorized-domain'
-            ? 'Firebase no autoriza este dominio. Agrega 127.0.0.1 y localhost en Authentication → Settings → Authorized domains.'
-            : authError.code === 'auth/operation-not-allowed'
-              ? 'Activa este proveedor en Firebase → Authentication → Sign-in method.'
-              : 'No se pudo conectar con el proveedor seleccionado.'
-      )
-    }
+    try {
+      provider.setCustomParameters?.({ prompt: 'select_account' })
+      const mobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+      if (mobile) await signInWithRedirect(firebaseAuth, provider)
+      else await signInWithPopup(firebaseAuth, provider)
+    } catch (authError) { setError(authErrorMessage(authError.code)) }
     finally { setBusy(false) }
   }
   return <main className="auth-screen"><section className="auth-card"><div className="auth-brand"><div className="brand-mark"><Leaf size={23} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div></div>{!configured ? <div className="auth-setup"><CircleHelp size={28} /><h1>Accede a VITIMAX</h1><p>El acceso de administrador necesita configurar Firebase. Mientras tanto puedes entrar como invitado para consultar la aplicación.</p><small>El modo invitado es solo de lectura: no permite editar productos, importar Excel ni cambiar la configuración.</small><button className="btn primary auth-guest" onClick={onGuest}>Entrar como invitado</button></div> : <><p className="eyebrow">ACCESO DE ADMINISTRADOR</p><h1>{mode === 'login' ? 'Iniciar sesión' : 'Crear cuenta'}</h1><p className="auth-muted">Accede al centro de gestión de VITIMAX.</p><div className="social-actions"><button className="social-btn google" disabled={busy} onClick={() => providerLogin(new GoogleAuthProvider())}><GoogleBrandIcon /> Continuar con Google</button><button className="social-btn microsoft" disabled={busy} onClick={() => providerLogin(new OAuthProvider('microsoft.com'))}><MicrosoftBrandIcon /> Continuar con Microsoft</button></div><div className="auth-divider"><span>o con correo</span></div><form onSubmit={submit} className="auth-form"><label>Correo electrónico<input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" /></label><label>Contraseña<input type="password" required minLength="6" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} /></label>{error && <p className="auth-error">{error}</p>}<button className="btn primary auth-submit" disabled={busy}>{busy ? 'Conectando...' : mode === 'login' ? 'Iniciar sesión' : 'Registrarme'}</button></form><button className="auth-switch" onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError('') }}>{mode === 'login' ? 'Crear cuenta de administrador' : 'Ya tengo una cuenta'}</button><button className="auth-guest-link" onClick={onGuest}>Continuar como invitado</button></>}</section></main>
+}
+
+function AuthScreenV2({ configured, initialError = '', onAuthenticated, onGuest }) {
+  const [mode, setMode] = useState('login')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [firstName, setFirstName] = useState('')
+  const [lastName, setLastName] = useState('')
+  const [birthDate, setBirthDate] = useState('')
+  const [error, setError] = useState(initialError)
+  const [notice, setNotice] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { if (initialError) setError(initialError) }, [initialError])
+
+  async function submit(event) {
+    event.preventDefault()
+    setError('')
+    setNotice('')
+    if (!firebaseAuth) return
+    setBusy(true)
+    try {
+      if (mode === 'reset') {
+        await sendPasswordResetEmail(firebaseAuth, email.trim())
+        setNotice('Te enviamos un enlace para cambiar tu contraseña. Revisa tu correo y la carpeta de spam.')
+        setMode('login')
+        return
+      }
+      if (mode === 'register' && (!firstName.trim() || !lastName.trim() || !birthDate)) {
+        setError('Completa nombre, apellido y fecha de nacimiento.')
+        return
+      }
+      const result = mode === 'login'
+        ? await signInWithEmailAndPassword(firebaseAuth, email.trim(), password)
+        : await createUserWithEmailAndPassword(firebaseAuth, email.trim(), password)
+      if (mode === 'register') {
+        const cleanFirstName = firstName.trim()
+        const cleanLastName = lastName.trim()
+        const fullName = `${cleanFirstName} ${cleanLastName}`
+        await updateProfile(result.user, { displayName: fullName })
+        if (firebaseDb) {
+          setDoc(doc(firebaseDb, 'users', result.user.uid), { profile: { name: fullName, firstName: cleanFirstName, lastName: cleanLastName, email: email.trim(), birthDate, phone: '', photo: '' } }, { merge: true }).catch(() => undefined)
+        }
+        try {
+          await sendEmailVerification(result.user)
+          setNotice('Cuenta creada. Te enviamos un correo de verificación.')
+        } catch {
+          setNotice('Cuenta creada. No pudimos enviar el correo de verificación todavía; podrás solicitarlo después.')
+        }
+      }
+      onAuthenticated?.(result.user)
+    } catch (authError) {
+      setError(authErrorMessage(authError.code))
+    } finally { setBusy(false) }
+  }
+
+  async function providerLogin(provider) {
+    setError('')
+    if (!firebaseAuth) return
+    setBusy(true)
+    try {
+      provider.setCustomParameters?.({ prompt: 'select_account' })
+      const mobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+      if (mobile) await signInWithRedirect(firebaseAuth, provider)
+      else await signInWithPopup(firebaseAuth, provider)
+    } catch (authError) { setError(authErrorMessage(authError.code)); setBusy(false) }
+  }
+
+  if (!configured) return <main className="auth-screen"><section className="auth-card"><div className="auth-brand"><div className="brand-mark"><Leaf size={23} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div></div><div className="auth-setup"><CircleHelp size={28} /><h1>Accede a VITIMAX</h1><p>El acceso de administrador necesita configurar Firebase. Mientras tanto puedes entrar como invitado para consultar la aplicación.</p><small>El modo invitado es solo de lectura.</small><button className="btn primary auth-guest" onClick={onGuest}>Entrar como invitado</button></div></section></main>
+
+  const register = mode === 'register'
+  const reset = mode === 'reset'
+  return <main className="auth-screen"><section className="auth-card"><div className="auth-brand"><div className="brand-mark"><Leaf size={23} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div></div><p className="eyebrow">ACCESO DE ADMINISTRADOR</p><h1>{reset ? 'Cambiar contraseña' : register ? 'Crear cuenta' : 'Iniciar sesión'}</h1><p className="auth-muted">{reset ? 'Te enviaremos un enlace seguro a tu correo.' : 'Accede al centro de gestión de VITIMAX.'}</p>{!reset && <><div className="social-actions"><button type="button" className="social-btn google" disabled={busy} onClick={() => providerLogin(new GoogleAuthProvider())}><GoogleBrandIcon /> Continuar con Google</button><button type="button" className="social-btn microsoft" disabled={busy} onClick={() => providerLogin(new OAuthProvider('microsoft.com'))}><MicrosoftBrandIcon /> Continuar con Microsoft</button></div><div className="auth-divider"><span>o con correo</span></div></>}<form onSubmit={submit} className="auth-form">{register && <div className="auth-form-row"><label>Nombre<input type="text" required value={firstName} onChange={(e) => setFirstName(e.target.value)} autoComplete="given-name" /></label><label>Apellido<input type="text" required value={lastName} onChange={(e) => setLastName(e.target.value)} autoComplete="family-name" /></label></div>}<label>Correo electrónico<input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" /></label>{register && <label>Fecha de nacimiento<input type="date" required value={birthDate} onChange={(e) => setBirthDate(e.target.value)} autoComplete="bday" /></label>}{!reset && <label>Contraseña<input type="password" required minLength="6" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={register ? 'new-password' : 'current-password'} /></label>}{error && <p className="auth-error">{error}</p>}{notice && <p className="auth-success">{notice}</p>}<button className="btn primary auth-submit" disabled={busy}>{busy ? 'Procesando...' : reset ? 'Enviar enlace' : register ? 'Crear mi cuenta' : 'Iniciar sesión'}</button></form>{!reset && !register && <button type="button" className="auth-forgot" onClick={() => { setMode('reset'); setError(''); setNotice('') }}>¿Olvidaste tu contraseña?</button>}<button type="button" className="auth-switch" onClick={() => { setMode(reset || register ? 'login' : 'register'); setError(''); setNotice('') }}>{reset || register ? 'Volver a iniciar sesión' : 'Crear cuenta de administrador'}</button><button type="button" className="auth-guest-link" onClick={onGuest}>Continuar como invitado</button></section></main>
 }
 
 function GoogleBrandIcon() { return <svg className="provider-logo" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.35 12.27c0-.72-.06-1.42-.18-2.09H12v3.96h5.24a4.48 4.48 0 0 1-1.94 2.94v2.45h3.14c1.84-1.69 2.91-4.18 2.91-7.26Z"/><path fill="#34A853" d="M12 21.7c2.63 0 4.84-.87 6.45-2.36l-3.14-2.45c-.87.58-1.98.93-3.31.93-2.54 0-4.7-1.72-5.47-4.03H3.29v2.53A9.74 9.74 0 0 0 12 21.7Z"/><path fill="#FBBC05" d="M6.53 13.79A5.85 5.85 0 0 1 6.23 12c0-.62.11-1.23.3-1.79V7.68H3.29A9.74 9.74 0 0 0 2.25 12c0 1.57.38 3.05 1.04 4.32l3.24-2.53Z"/><path fill="#EA4335" d="M12 6.18c1.43 0 2.71.49 3.72 1.46l2.79-2.79C16.83 3.28 14.63 2.3 12 2.3a9.74 9.74 0 0 0-8.71 5.38l3.24 2.53C7.3 7.9 9.46 6.18 12 6.18Z"/></svg> }
