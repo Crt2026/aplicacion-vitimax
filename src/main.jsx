@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import * as XLSX from 'xlsx'
 import { Html5Qrcode } from 'html5-qrcode'
-import { GoogleAuthProvider, OAuthProvider, createUserWithEmailAndPassword, onAuthStateChanged, signInWithEmailAndPassword, signInWithPopup, signOut } from 'firebase/auth'
+import { GoogleAuthProvider, OAuthProvider, createUserWithEmailAndPassword, onAuthStateChanged, signInWithEmailAndPassword, signInWithPopup, signOut, updateProfile } from 'firebase/auth'
 import { doc, onSnapshot, setDoc } from 'firebase/firestore'
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage'
 import { httpsCallable } from 'firebase/functions'
@@ -261,7 +261,16 @@ function App({ user, onSignOut, guest = false }) {
       setNotice('Producto eliminado')
     }
   }
-  function saveProfile(next) { setProfile(next); setOverlay(null); setNotice('Perfil guardado correctamente') }
+  async function saveProfile(next) {
+    try {
+      if (firebaseAuth && user && !guest) await updateProfile(user, { displayName: next.name || null, photoURL: next.photo || null })
+      setProfile(next)
+      setOverlay(null)
+      setNotice('Perfil guardado correctamente')
+    } catch {
+      setNotice('No se pudo actualizar el perfil de Firebase. Revisa la sesión e inténtalo de nuevo.')
+    }
+  }
   function saveSettings(next) { setSettings(next); setOverlay(null); setNotice('Configuración guardada correctamente') }
   function downloadProductPage(product) {
     const slug = normalize(product.name || 'producto').replace(/\s+/g, '-') || 'producto'
