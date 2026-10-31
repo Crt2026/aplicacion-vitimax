@@ -1,3 +1,14 @@
-/build/*
-!/build/.npmkeep
-node_modules
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+
+android/.gradle/
+android/build/
+android/app/build/
+android/capacitor-cordova-android-plugins/build/
+android/local.properties
+
+*.log
+.DS_Store
