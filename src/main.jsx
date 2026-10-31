@@ -251,26 +251,44 @@ function App({ user, onSignOut, guest = false }) {
   }
   function saveProfile(next) { setProfile(next); setOverlay(null); setNotice('Perfil guardado correctamente') }
   function saveSettings(next) { setSettings(next); setOverlay(null); setNotice('Configuración guardada correctamente') }
-  async function askAssistant(text, imageFile = null) {
+  function downloadProductPage(product) {
+    const slug = normalize(product.name || 'producto').replace(/\s+/g, '-') || 'producto'
+    const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${product.name || 'Producto VITIMAX'}</title><style>body{font-family:Arial,sans-serif;margin:0;background:#f4f7f2;color:#173524}main{max-width:900px;margin:auto;padding:48px 24px}article{background:white;border-radius:24px;padding:32px;box-shadow:0 12px 40px #17352418}img{max-width:100%;max-height:360px;object-fit:contain;border-radius:16px}h1{font-size:clamp(2rem,5vw,4rem);margin:16px 0 8px}.tag{color:#4e8a52;text-transform:uppercase;font-weight:bold;letter-spacing:.12em}.price{font-size:1.6rem;font-weight:bold;margin:24px 0}a{display:inline-block;padding:14px 20px;border-radius:999px;background:#276b3b;color:#fff;text-decoration:none}</style></head><body><main><article>${product.image ? `<img src="${product.image}" alt="${product.name || 'Producto'}">` : ''}<div class="tag">${product.category || 'VITIMAX'}</div><h1>${product.name || 'Producto pendiente'}</h1><p>${product.description || 'Descripción pendiente de completar.'}</p><div class="price">${money(product.price)}</div><p><strong>Formato:</strong> ${product.format || 'Pendiente'}</p><p><strong>Modo de uso:</strong> ${product.usage || 'Pendiente de ficha técnica.'}</p><p><strong>Disponibilidad:</strong> ${product.stock === '' ? 'Pendiente' : `${product.stock} unidades`}</p><a href="mailto:${profile.email || ''}">Solicitar información</a></article></main></body></html>`
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `pagina-${slug}.html`
+    link.click()
+    URL.revokeObjectURL(url)
+    setNotice('Página web creada y descargada')
+  }
+  async function askAssistant(text, attachmentFile = null) {
+    const promptNormalized = normalize(text)
+    const pageRequested = promptNormalized.includes('crear pagina') || promptNormalized.includes('pagina web') || promptNormalized.includes('landing')
+    const pageTerms = promptNormalized.split(/\s+/).filter((term) => term.length > 3 && !['crear', 'pagina', 'web', 'promocional', 'promocion'].includes(term))
+    const pageProduct = pageRequested && (products.length === 1 ? products[0] : products.find((item) => pageTerms.some((term) => normalize(item.name).includes(term))))
+    if (pageProduct) downloadProductPage(pageProduct)
     if (firebaseFunctions && !guest) {
       const requestId = makeId()
       setMessages((items) => [...items, { role: 'user', text }, { role: 'assistant', text: 'Estoy consultando Gemini con los datos reales del catálogo...', requestId }])
       try {
-        let image
-        if (imageFile) {
+        let attachment
+        if (attachmentFile) {
+          if (attachmentFile.size > 8 * 1024 * 1024) throw new Error('El archivo supera el límite de 8 MB para análisis.')
           const dataUrl = await new Promise((resolve, reject) => {
             const reader = new FileReader()
             reader.onload = () => resolve(reader.result)
             reader.onerror = reject
-            reader.readAsDataURL(imageFile)
+            reader.readAsDataURL(attachmentFile)
           })
           const [header, data] = String(dataUrl).split(',')
-          image = { mimeType: header.match(/data:(.*);base64/)?.[1] || imageFile.type, data }
+          attachment = { name: attachmentFile.name, mimeType: header.match(/data:(.*);base64/)?.[1] || attachmentFile.type || 'application/octet-stream', data }
         }
-        const { data } = await httpsCallable(firebaseFunctions, 'vitimaxAssistant')({ message: text, products, image })
+        const { data } = await httpsCallable(firebaseFunctions, 'vitimaxAssistant')({ message: text, products, attachment })
         setMessages((items) => items.map((item) => item.requestId === requestId ? { ...item, text: data.text } : item))
       } catch {
-        setMessages((items) => items.map((item) => item.requestId === requestId ? { ...item, text: 'No pude conectar con el servicio de IA. Puedes continuar usando el asistente local mientras se revisa el backend.' } : item))
+        setMessages((items) => items.map((item) => item.requestId === requestId ? { ...item, text: 'No pude analizar ese archivo. Comprueba que pese menos de 8 MB y que Firebase Functions esté desplegado.' } : item))
       }
       return
     }
@@ -442,6 +460,6 @@ function QrScanner({ onClose, onResult }) {
   return <div className="modal-backdrop"><div className="modal qr-modal"><div className="modal-head"><div><p className="eyebrow">LECTOR DE ENVASES</p><h2>Escanea el código QR</h2></div><button className="icon-btn" aria-label="Cerrar escáner" onClick={onClose}><X size={19} /></button></div><p className="modal-note"><QrCode size={15} /> El QR debe identificar un producto registrado en el catálogo de VITIMAX.</p><div id="vitimax-qr-reader" className="qr-reader" />{error && <p className="auth-error">{error}</p>}<button className="btn secondary qr-close" onClick={onClose}>Cerrar escáner</button></div></div>
 }
 
-function Assistant({ messages, onClose, onAsk }) { const [text, setText] = useState(''); const [image, setImage] = useState(null); const submit = (e) => { e.preventDefault(); if (!text.trim() && !image) return; onAsk(text.trim() || 'Analiza esta fotografía de mi planta y dime qué información adicional necesitas.', image); setText(''); setImage(null) }; return <div className="assistant-panel"><div className="assistant-head"><div className="assistant-title"><div className="bot-avatar"><Bot size={19} /></div><div><strong>Asistente VITIMAX</strong><span>Catálogo, páginas, Excel y asesoría</span></div></div><button className="icon-btn" onClick={onClose}><X size={18} /></button></div><div className="assistant-body">{messages.map((m, i) => <div className={`chat ${m.role}`} key={i}><div>{m.text}</div></div>)}</div><div className="quick-prompts"><button onClick={() => onAsk('Crea paso a paso una página web promocional usando el producto registrado que corresponda.')}>Crear página web</button><button onClick={() => onAsk('Ayúdame a organizar y analizar mi Excel de productos.')}>Ayuda con Excel</button></div><form className="assistant-input" onSubmit={submit}><input value={text} onChange={(e) => setText(e.target.value)} placeholder="Pregunta o pide crear algo..." /><label className="assistant-photo" title="Subir foto de planta">📷<input type="file" accept="image/*" hidden onChange={(e) => setImage(e.target.files?.[0] || null)} /></label><button type="submit"><ArrowUpToLine size={17} /></button></form>{image && <small className="assistant-file">Foto lista: {image.name}</small>}<small>La IA usa el catálogo real. Verifica diagnósticos y aplicaciones con un especialista.</small></div> }
+function Assistant({ messages, onClose, onAsk }) { const [text, setText] = useState(''); const [attachment, setAttachment] = useState(null); const submit = (e) => { e.preventDefault(); if (!text.trim() && !attachment) return; onAsk(text.trim() || 'Analiza el archivo adjunto y dime qué información adicional necesitas.', attachment); setText(''); setAttachment(null) }; return <div className="assistant-panel"><div className="assistant-head"><div className="assistant-title"><div className="bot-avatar"><Bot size={19} /></div><div><strong>Asistente VITIMAX</strong><span>Catálogo, archivos, páginas y asesoría</span></div></div><button className="icon-btn" onClick={onClose}><X size={18} /></button></div><div className="assistant-body">{messages.map((m, i) => <div className={`chat ${m.role}`} key={i}><div>{m.text}</div></div>)}</div><div className="quick-prompts"><button onClick={() => onAsk('Crea paso a paso una página web promocional usando el producto registrado que corresponda.')}>Crear página web</button><button onClick={() => onAsk('Ayúdame a organizar y analizar mi Excel de productos.')}>Ayuda con Excel</button></div><form className="assistant-input" onSubmit={submit}><input value={text} onChange={(e) => setText(e.target.value)} placeholder="Pregunta o pide crear algo..." /><label className="assistant-photo" title="Subir archivo">📎<input type="file" accept="image/*,.pdf,.txt,.md,.json,.csv,.xlsx,.xls,.doc,.docx" hidden onChange={(e) => setAttachment(e.target.files?.[0] || null)} /></label><button type="submit"><ArrowUpToLine size={17} /></button></form>{attachment && <small className="assistant-file">Archivo listo: {attachment.name} ({Math.ceil(attachment.size / 1024)} KB)</small>}<small>Los archivos para análisis deben pesar menos de 8 MB. Verifica diagnósticos y aplicaciones con un especialista.</small></div> }
 
 createRoot(document.getElementById('root')).render(<AuthGate />)

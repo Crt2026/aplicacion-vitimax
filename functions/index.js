@@ -19,7 +19,7 @@ exports.vitimaxAssistant = onCall(
   { region: 'us-central1', secrets: [geminiApiKey], enforceAppCheck: false },
   async (request) => {
     if (!request.auth) throw new HttpsError('unauthenticated', 'Debes iniciar sesión para usar la IA.')
-    const { message, products = [], image } = request.data || {}
+    const { message, products = [], attachment } = request.data || {}
     if (typeof message !== 'string' || !message.trim()) {
       throw new HttpsError('invalid-argument', 'La consulta está vacía.')
     }
@@ -35,8 +35,9 @@ exports.vitimaxAssistant = onCall(
       id, name, category, price, stock, format, description, usage, recommendations, features
     })))
     const parts = [{ text: `CATÁLOGO REAL DE VITIMAX:\n${catalog}\n\nCONSULTA DEL USUARIO:\n${message.trim()}` }]
-    if (image && typeof image.data === 'string' && typeof image.mimeType === 'string' && image.data.length < 8_000_000) {
-      parts.push({ inlineData: { mimeType: image.mimeType, data: image.data } })
+    if (attachment && typeof attachment.data === 'string' && typeof attachment.mimeType === 'string' && attachment.data.length < 8_000_000) {
+      parts.push({ text: `ARCHIVO ADJUNTO: ${String(attachment.name || 'archivo').slice(0, 120)}` })
+      parts.push({ inlineData: { mimeType: attachment.mimeType, data: attachment.data } })
     }
     const result = await model.generateContent(parts)
     return { text: result.response.text() }
