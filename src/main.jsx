@@ -61,6 +61,15 @@ function money(value) {
   return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', maximumFractionDigits: 0 }).format(Number(value))
 }
 
+function imageFileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(new Error('No se pudo leer la imagen.'))
+    reader.readAsDataURL(file)
+  })
+}
+
 function AuthGate() {
   const [user, setUser] = useState(null)
   const [guest, setGuest] = useState(() => sessionStorage.getItem('vitimax-guest') === 'true')
@@ -264,9 +273,22 @@ function App({ user, onSignOut, guest = false }) {
       setNotice('Producto eliminado')
     }
   }
-  async function saveProfile(next) {
-    const normalized = { ...next, name: next.name?.trim() || (guest ? 'Invitado' : 'Administrador'), phone: next.phone?.trim() || '', photo: next.photo?.trim() || '' }
+  async function saveProfile(next, photoFile) {
+    let normalized = { ...next, name: next.name?.trim() || (guest ? 'Invitado' : 'Administrador'), phone: next.phone?.trim() || '', photo: next.photo?.trim() || '' }
     try {
+      if (photoFile) {
+        if (!photoFile.type.startsWith('image/')) throw new Error('El archivo seleccionado no es una imagen.')
+        if (photoFile.size > 5 * 1024 * 1024) throw new Error('La foto debe pesar menos de 5 MB.')
+        if (firebaseStorage && user && !guest) {
+          try {
+            const photoRef = ref(firebaseStorage, `users/${user.uid}/profile/avatar-${Date.now()}`)
+            const uploaded = await uploadBytes(photoRef, photoFile, { contentType: photoFile.type })
+            normalized = { ...normalized, photo: await getDownloadURL(uploaded.ref) }
+          } catch {
+            normalized = { ...normalized, photo: await imageFileToDataUrl(photoFile) }
+          }
+        } else normalized = { ...normalized, photo: await imageFileToDataUrl(photoFile) }
+      }
       if (firebaseAuth && user && !guest) await updateProfile(user, { displayName: normalized.name || null, photoURL: normalized.photo || null })
       localStorage.setItem(PROFILE_KEY, JSON.stringify(normalized))
       if (user && firebaseDb && cloudReady) setDoc(doc(firebaseDb, 'users', user.uid), { profile: normalized }, { merge: true }).catch(() => setNotice('Perfil guardado localmente; no se pudo sincronizar la nube.'))
@@ -454,10 +476,13 @@ function ModalShell({ title, eyebrow, children, onClose, actions }) {
 
 function ProfileModal({ profile, onClose, onSave, onSignOut }) {
   const [form, setForm] = useState(profile)
+  const [photoFile, setPhotoFile] = useState(null)
+  const [photoPreview, setPhotoPreview] = useState(profile.photo || '')
   const update = (key, value) => setForm((current) => ({ ...current, [key]: value }))
-  return <ModalShell title="Mi perfil" eyebrow="CUENTA" onClose={onClose} actions={<><button className="btn secondary" onClick={onSignOut}>Cerrar sesión</button><button className="btn secondary" onClick={onClose}>Cancelar</button><button className="btn primary" onClick={() => onSave(form)}>Guardar cambios</button></>}>
-    <div className="profile-preview">{form.photo ? <img className="profile-photo" src={form.photo} alt="" /> : <div className="avatar profile-avatar">{form.name?.[0] || 'V'}</div>}<div><strong>{form.name || 'Administrador'}</strong><span>Administrador de VITIMAX</span></div></div>
-    <div className="form-grid"><label>Nombre<input value={form.name} onChange={(e) => update('name', e.target.value)} /></label><label>Correo electrónico<input type="email" value={form.email} onChange={(e) => update('email', e.target.value)} placeholder="Pendiente" readOnly /></label><label>Teléfono<input value={form.phone} onChange={(e) => update('phone', e.target.value)} placeholder="Pendiente" /></label><label>Foto de perfil (URL)<input value={form.photo} onChange={(e) => update('photo', e.target.value)} placeholder="Pendiente" /></label></div>
+  const choosePhoto = (event) => { const file = event.target.files?.[0]; if (!file) return; setPhotoFile(file); setPhotoPreview(URL.createObjectURL(file)) }
+  return <ModalShell title="Mi perfil" eyebrow="CUENTA" onClose={onClose} actions={<><button className="btn secondary" onClick={onSignOut}>Cerrar sesión</button><button className="btn secondary" onClick={onClose}>Cancelar</button><button className="btn primary" onClick={() => onSave(form, photoFile)}>Guardar cambios</button></>}>
+    <div className="profile-preview">{photoPreview ? <img className="profile-photo" src={photoPreview} alt="Vista previa de la foto de perfil" /> : <div className="avatar profile-avatar">{form.name?.[0] || 'V'}</div>}<div><strong>{form.name || 'Administrador'}</strong><span>Administrador de VITIMAX</span></div></div>
+    <div className="form-grid"><label>Nombre<input value={form.name} onChange={(e) => update('name', e.target.value)} /></label><label>Correo electrónico<input type="email" value={form.email} onChange={(e) => update('email', e.target.value)} placeholder="Pendiente" readOnly /></label><label>Teléfono<input value={form.phone} onChange={(e) => update('phone', e.target.value)} placeholder="Pendiente" /></label><label>Foto de perfil (URL)<input value={form.photo} onChange={(e) => { update('photo', e.target.value); setPhotoPreview(e.target.value) }} placeholder="Opcional: URL pública" /></label><label className="full">Subir foto desde celular o computadora<input type="file" accept="image/*" capture="user" onChange={choosePhoto} />{photoFile && <small>Foto seleccionada: {photoFile.name} · {Math.ceil(photoFile.size / 1024)} KB</small>}</label></div>
   </ModalShell>
 }
 
