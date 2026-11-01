@@ -28,7 +28,7 @@ exports.vitimaxAssistant = onCall(
     }
 
     const model = new GoogleGenerativeAI(geminiApiKey.value()).getGenerativeModel({
-      model: 'gemini-1.5-flash',
+      model: 'gemini-2.0-flash',
       systemInstruction
     })
     const catalog = JSON.stringify(products.map(({ id, name, category, price, stock, format, description, usage, recommendations, features }) => ({

@@ -13,10 +13,14 @@
     "android:apk": "npm run android:sync && cd android && .\\gradlew.bat assembleDebug"
   },
   "dependencies": {
+    "@capacitor-firebase/authentication": "^7.5.0",
     "@capacitor/android": "^7.4.3",
     "@capacitor/core": "^7.4.3",
+    "docx": "^9.15.1",
     "html5-qrcode": "^2.3.8",
+    "jspdf": "^4.2.1",
     "lucide-react": "^0.468.0",
+    "pptxgenjs": "^4.0.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "xlsx": "^0.18.5"

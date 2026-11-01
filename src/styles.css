@@ -75,3 +75,27 @@ button,.btn,.nav-item,.icon-btn,.user-chip{touch-action:manipulation}
   .user-chip{display:none}
   .content{padding-inline:10px}
 }
+.assistant-fab{background:linear-gradient(135deg,#d8f55f 0%,#a8e46d 48%,#63c59a 100%)!important;color:#123d2b!important;box-shadow:0 12px 30px #123d2b35,0 0 0 4px #d8f55f35!important;border:1px solid #ffffff80!important;font-weight:800!important;transition:transform .2s ease,box-shadow .2s ease,filter .2s ease}
+.assistant-fab:hover{transform:translateY(-3px) scale(1.02);filter:saturate(1.1);box-shadow:0 16px 34px #123d2b45,0 0 0 5px #d8f55f55!important}
+.assistant-fab:focus-visible{outline:3px solid #4d9dff;outline-offset:3px}
+.assistant-logo{position:relative;width:34px;height:34px;display:grid;place-items:center;border-radius:11px;background:#123d2b;color:#d8f55f;box-shadow:inset 0 0 0 1px #ffffff40;flex:0 0 34px}
+.assistant-bot-image{width:42px;height:42px;object-fit:cover;border-radius:50%;border:2px solid #d8f55f;box-shadow:0 3px 10px #123d2b45;flex:0 0 42px}
+.assistant-fab>.assistant-bot-image{width:38px;height:38px;flex-basis:38px}
+.panel-bot-image{width:58px;height:58px;flex-basis:58px;border:0}
+.assistant-emoji{font-size:28px;line-height:1;filter:drop-shadow(0 2px 2px #123d2b55)}
+.assistant-fab>.assistant-logo{width:24px;height:24px;border-radius:8px;flex-basis:24px}
+.assistant-fab>.assistant-logo svg{width:18px;height:18px}
+.bot-avatar .assistant-emoji{font-size:25px}
+.bot-avatar>.assistant-logo{position:absolute;right:-5px;bottom:-4px;width:20px;height:20px;flex-basis:20px;border:2px solid #fff}
+.bot-avatar>.assistant-logo svg{width:14px;height:14px}
+.assistant-logo svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round;stroke-width:2}
+.assistant-logo .assistant-antenna{stroke:#fff}
+.assistant-logo .assistant-ear{stroke:#a8e46d}
+.assistant-logo b{position:absolute;right:-8px;top:-7px;background:#1f7451;color:#fff;border:2px solid #d8f55f;border-radius:7px;padding:1px 3px;font-size:8px;line-height:11px;letter-spacing:.2px}
+.bot-avatar{position:relative;background:linear-gradient(145deg,#d8f55f,#6fce9c)!important;color:#123d2b!important;box-shadow:0 6px 16px #123d2b25}
+.bot-avatar .assistant-logo{background:#123d2b}
+.bot-avatar{width:62px!important;height:62px!important;display:grid;place-items:center;overflow:visible}
+.product-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.danger-button{background:#fff1ef!important;border:1px solid #efc5bf!important;color:#b24b44!important;margin-right:auto}
+.danger-button:hover{background:#ffe5e1!important}
+.danger-link{color:#b24b44!important}

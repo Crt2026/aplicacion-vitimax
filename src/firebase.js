@@ -1,5 +1,5 @@
 import { getApps, initializeApp } from 'firebase/app'
-import { getAuth } from 'firebase/auth'
+import { browserLocalPersistence, browserPopupRedirectResolver, getAuth, indexedDBLocalPersistence, initializeAuth } from 'firebase/auth'
 import { getFirestore } from 'firebase/firestore'
 import { getStorage } from 'firebase/storage'
 import { getFunctions } from 'firebase/functions'
@@ -14,10 +14,22 @@ const config = {
 }
 
 export const firebaseConfigured = Object.values(config).every(Boolean)
-export const firebaseAuth = firebaseConfigured
-  ? getAuth(getApps().length ? getApps()[0] : initializeApp(config))
+const firebaseApp = firebaseConfigured
+  ? (getApps().length ? getApps()[0] : initializeApp(config))
   : null
-const firebaseApp = firebaseConfigured ? getApps()[0] : null
+let auth = null
+if (firebaseApp) {
+  try {
+    auth = initializeAuth(firebaseApp, {
+      persistence: [indexedDBLocalPersistence, browserLocalPersistence],
+      popupRedirectResolver: browserPopupRedirectResolver
+    })
+  } catch (error) {
+    if (error?.code !== 'auth/already-initialized') throw error
+    auth = getAuth(firebaseApp)
+  }
+}
+export const firebaseAuth = auth
 export const firebaseDb = firebaseApp ? getFirestore(firebaseApp) : null
 export const firebaseStorage = firebaseApp ? getStorage(firebaseApp) : null
 export const firebaseFunctions = firebaseApp ? getFunctions(firebaseApp) : null

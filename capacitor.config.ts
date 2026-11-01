@@ -7,6 +7,11 @@ const config: CapacitorConfig = {
   bundledWebRuntime: false,
   android: {
     backgroundColor: '#f6f8f6'
+  },
+  plugins: {
+    FirebaseAuthentication: {
+      providers: ['google.com', 'microsoft.com']
+    }
   }
 }
 

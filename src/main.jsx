@@ -1,8 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import * as XLSX from 'xlsx'
+import { jsPDF } from 'jspdf'
+import { Document, HeadingLevel, Packer, Paragraph } from 'docx'
+import pptxgen from 'pptxgenjs'
 import { Html5Qrcode } from 'html5-qrcode'
-import { GoogleAuthProvider, OAuthProvider, createUserWithEmailAndPassword, getRedirectResult, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, signInWithEmailAndPassword, signInWithPopup, signInWithRedirect, signOut, updateProfile } from 'firebase/auth'
+import { GoogleAuthProvider, OAuthProvider, createUserWithEmailAndPassword, getRedirectResult, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, signInWithCredential, signInWithEmailAndPassword, signInWithPopup, signOut, updateProfile } from 'firebase/auth'
+import { FirebaseAuthentication } from '@capacitor-firebase/authentication'
 import { doc, onSnapshot, setDoc } from 'firebase/firestore'
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage'
 import { httpsCallable } from 'firebase/functions'
@@ -10,7 +14,7 @@ import {
   ArrowDownToLine, ArrowUpToLine, Bell, Bot, Boxes, ChevronRight,
   CircleHelp, ClipboardList, FileSpreadsheet, Filter,
   LayoutDashboard, Leaf, Menu, MessageSquare, MoreHorizontal, PackageCheck,
-  Plus, Search, Settings2, ShoppingBag, Sparkles, Sprout, Tags, Upload,
+  Plus, Search, Settings2, ShoppingBag, Sparkles, Sprout, Tags, Trash2, Upload,
   UserRound, Users, X, Zap, QrCode, CalendarDays
 } from 'lucide-react'
 import './styles.css'
@@ -70,6 +74,19 @@ function imageFileToDataUrl(file) {
   })
 }
 
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+function escapeHtml(value) {
+  return String(value || '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]))
+}
+
 function authErrorMessage(code) {
   return code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found' ? 'Correo o contraseña incorrectos.'
     : code === 'auth/email-already-in-use' ? 'Ese correo ya está registrado.'
@@ -79,17 +96,33 @@ function authErrorMessage(code) {
             : code === 'auth/unauthorized-domain' ? 'Firebase no autoriza este dominio. Agrega el dominio actual en Authentication → Settings → Authorized domains.'
               : code === 'auth/operation-not-allowed' ? 'Activa este proveedor en Firebase → Authentication → Sign-in method.'
                   : code === 'auth/account-exists-with-different-credential' ? 'Ese correo ya existe con otro método de acceso.'
-                    : code === 'auth/network-request-failed' ? 'No hay conexión con Firebase. Revisa internet e inténtalo nuevamente.'
+                    : code === 'auth/network-request-failed' ? (navigator.onLine
+                      ? 'El celular tiene internet, pero Firebase no respondió. Revisa fecha y hora automáticas, VPN/bloqueadores e inténtalo otra vez.'
+                      : 'El celular aparece sin conexión. Activa Wi-Fi o datos móviles e inténtalo otra vez.')
                       : code === 'auth/too-many-requests' ? 'Demasiados intentos. Espera unos minutos y vuelve a intentarlo.'
-                        : code === 'auth/popup-blocked' ? 'El navegador bloqueó la ventana. Usaremos redirección; si vuelve a fallar, agrega este dominio en Firebase.'
+                        : code === 'auth/user-disabled' ? 'Esta cuenta fue deshabilitada en Firebase. Contacta al administrador.'
+                        : code === 'auth/popup-blocked' ? 'El celular bloqueó la ventana de Google/Microsoft. Permite ventanas emergentes e inténtalo otra vez.'
+                          : code === 'auth/popup-timeout' ? 'El inicio con Google/Microsoft tardó demasiado. Comprueba internet e inténtalo otra vez.'
                           : code === 'auth/cancelled-popup-request' || code === 'auth/redirect-cancelled-by-user' ? 'Se canceló el inicio de sesión.'
                             : code === 'auth/invalid-api-key' ? 'La clave de Firebase no es válida. Revisa la configuración del proyecto.'
                               : code === 'auth/internal-error' ? 'Firebase rechazó temporalmente el acceso. Revisa proveedores y dominios autorizados.'
-                                : 'No se pudo completar la operación. Revisa tu conexión y los datos.'
+                                : code === 'auth/invalid-continue-uri' || code === 'auth/unauthorized-continue-uri' ? 'Firebase bloqueó el regreso de Google/Microsoft. Agrega el dominio de la app en Authentication → Settings → Authorized domains.'
+                                : code ? `Firebase no pudo completar el acceso (${code}). Revisa la configuración y vuelve a intentar.` : 'Firebase no devolvió un error identificable. Cierra y abre la aplicación nuevamente.'
 }
 
 function isNativeApp() {
   return Boolean(globalThis.Capacitor?.isNativePlatform?.())
+}
+
+async function signInWithNativeProvider(providerId) {
+  const result = providerId === 'google.com'
+    ? await FirebaseAuthentication.signInWithGoogle()
+    : await FirebaseAuthentication.signInWithMicrosoft()
+  if (!result.credential) throw new Error('El proveedor no devolvió credenciales.')
+  const credential = providerId === 'google.com'
+    ? GoogleAuthProvider.credential(result.credential.idToken, result.credential.accessToken)
+    : new OAuthProvider(providerId).credential(result.credential.idToken, result.credential.accessToken)
+  return signInWithCredential(firebaseAuth, credential)
 }
 
 function AuthGate() {
@@ -99,9 +132,19 @@ function AuthGate() {
   const [authError, setAuthError] = useState('')
   useEffect(() => {
     if (!firebaseAuth) return undefined
-    const unsubscribe = onAuthStateChanged(firebaseAuth, (nextUser) => { setUser(nextUser); setAuthLoading(false) })
-    getRedirectResult(firebaseAuth).catch((error) => setAuthError(authErrorMessage(error.code)))
-    return unsubscribe
+    const loadingTimeout = setTimeout(() => {
+      setAuthLoading((current) => {
+        if (current) setAuthError('Firebase tardó demasiado en responder. Revisa internet, fecha/hora automática y vuelve a intentar.')
+        return false
+      })
+    }, 12000)
+    const unsubscribe = onAuthStateChanged(
+      firebaseAuth,
+      (nextUser) => { setUser(nextUser); setAuthLoading(false) },
+      (error) => { setAuthError(authErrorMessage(error.code)); setAuthLoading(false) }
+    )
+    getRedirectResult(firebaseAuth).catch((error) => { setAuthError(authErrorMessage(error.code)); setAuthLoading(false) })
+    return () => { clearTimeout(loadingTimeout); unsubscribe() }
   }, [])
   if (authLoading) return <div className="auth-loading"><Leaf size={32} /><strong>VITIMAX</strong><span>Verificando sesión...</span></div>
   if (guest) return <App guest onSignOut={() => { sessionStorage.removeItem('vitimax-guest'); setGuest(false) }} />
@@ -137,13 +180,14 @@ function AuthScreen({ configured, initialError = '', onAuthenticated, onGuest })
         setError('Completa nombre, apellido y fecha de nacimiento.')
         return
       }
+      const normalizedEmail = email.trim().toLowerCase()
       const result = mode === 'login'
-        ? await signInWithEmailAndPassword(firebaseAuth, email.trim(), password)
-        : await createUserWithEmailAndPassword(firebaseAuth, email.trim(), password)
+        ? await signInWithEmailAndPassword(firebaseAuth, normalizedEmail, password)
+        : await createUserWithEmailAndPassword(firebaseAuth, normalizedEmail, password)
       if (mode === 'register') {
         const fullName = `${firstName.trim()} ${lastName.trim()}`
         await updateProfile(result.user, { displayName: fullName })
-        await setDoc(doc(firebaseDb, 'users', result.user.uid), { profile: { name: fullName, firstName: firstName.trim(), lastName: lastName.trim(), email: email.trim(), birthDate, phone: '', photo: '' } }, { merge: true })
+        await setDoc(doc(firebaseDb, 'users', result.user.uid), { profile: { name: fullName, firstName: firstName.trim(), lastName: lastName.trim(), email: normalizedEmail, birthDate, phone: '', photo: '' } }, { merge: true })
         await sendEmailVerification(result.user)
         setNotice('Cuenta creada. Te enviamos un correo de verificación.')
       }
@@ -158,8 +202,14 @@ function AuthScreen({ configured, initialError = '', onAuthenticated, onGuest })
     setBusy(true)
     try {
       provider.setCustomParameters?.({ prompt: 'select_account' })
-      if (isNativeApp()) await signInWithRedirect(firebaseAuth, provider)
-      else await signInWithPopup(firebaseAuth, provider)
+      if (isNativeApp()) {
+        await signInWithNativeProvider(provider.providerId)
+      } else {
+        await Promise.race([
+          signInWithPopup(firebaseAuth, provider),
+          new Promise((_, reject) => setTimeout(() => reject({ code: 'auth/popup-timeout' }), 20000))
+        ])
+      }
     } catch (authError) { setError(authErrorMessage(authError.code)) }
     finally { setBusy(false) }
   }
@@ -195,16 +245,17 @@ function AuthScreenV2({ configured, initialError = '', onAuthenticated, onGuest 
         setError('Completa nombre, apellido y fecha de nacimiento.')
         return
       }
+      const normalizedEmail = email.trim().toLowerCase()
       const result = mode === 'login'
-        ? await signInWithEmailAndPassword(firebaseAuth, email.trim(), password)
-        : await createUserWithEmailAndPassword(firebaseAuth, email.trim(), password)
+        ? await signInWithEmailAndPassword(firebaseAuth, normalizedEmail, password)
+        : await createUserWithEmailAndPassword(firebaseAuth, normalizedEmail, password)
       if (mode === 'register') {
         const cleanFirstName = firstName.trim()
         const cleanLastName = lastName.trim()
         const fullName = `${cleanFirstName} ${cleanLastName}`
         await updateProfile(result.user, { displayName: fullName })
         if (firebaseDb) {
-          setDoc(doc(firebaseDb, 'users', result.user.uid), { profile: { name: fullName, firstName: cleanFirstName, lastName: cleanLastName, email: email.trim(), birthDate, phone: '', photo: '' } }, { merge: true }).catch(() => undefined)
+          setDoc(doc(firebaseDb, 'users', result.user.uid), { profile: { name: fullName, firstName: cleanFirstName, lastName: cleanLastName, email: normalizedEmail, birthDate, phone: '', photo: '' } }, { merge: true }).catch(() => undefined)
         }
         try {
           await sendEmailVerification(result.user)
@@ -225,8 +276,14 @@ function AuthScreenV2({ configured, initialError = '', onAuthenticated, onGuest 
     setBusy(true)
     try {
       provider.setCustomParameters?.({ prompt: 'select_account' })
-      if (isNativeApp()) await signInWithRedirect(firebaseAuth, provider)
-      else await signInWithPopup(firebaseAuth, provider)
+      if (isNativeApp()) {
+        await signInWithNativeProvider(provider.providerId)
+      } else {
+        await Promise.race([
+          signInWithPopup(firebaseAuth, provider),
+          new Promise((_, reject) => setTimeout(() => reject({ code: 'auth/popup-timeout' }), 20000))
+        ])
+      }
     } catch (authError) { setError(authErrorMessage(authError.code)); setBusy(false) }
   }
 
@@ -345,6 +402,46 @@ function App({ user, onSignOut, guest = false }) {
     XLSX.writeFile(workbook, 'catalogo-vitimax.xlsx')
     setNotice('Catálogo exportado correctamente')
   }
+  function generateAssistantExcel(template = false) {
+    const rows = template ? [emptyProduct] : products
+    const worksheet = XLSX.utils.json_to_sheet(rows)
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Productos')
+    XLSX.writeFile(workbook, template ? 'plantilla-productos-vitimax.xlsx' : 'catalogo-vitimax-ia.xlsx')
+    setNotice(template ? 'Plantilla Excel descargada desde el asistente' : 'Excel generado y descargado desde el asistente')
+  }
+  async function generateAssistantFile(type, requestText) {
+    const title = requestText.trim() || 'Documento VITIMAX'
+    const catalogText = products.length
+      ? products.map((item) => `${item.name || 'Producto pendiente'} | ${item.category || 'Categoría pendiente'} | Precio: ${money(item.price)} | Stock: ${item.stock === '' ? 'Pendiente' : item.stock}`).join('\n')
+      : 'No hay productos registrados todavía.'
+    if (type === 'pdf') {
+      const pdf = new jsPDF()
+      const lines = pdf.splitTextToSize(`${title}\n\nCatálogo VITIMAX\n\n${catalogText}`, 175)
+      pdf.setFontSize(16)
+      pdf.text(lines, 18, 22)
+      pdf.save('documento-vitimax.pdf')
+    } else if (type === 'word') {
+      const document = new Document({ sections: [{ children: [
+        new Paragraph({ text: title, heading: HeadingLevel.TITLE }),
+        new Paragraph({ text: 'Catálogo VITIMAX', heading: HeadingLevel.HEADING_1 }),
+        ...catalogText.split('\n').map((line) => new Paragraph(line))
+      ] }] })
+      downloadBlob(await Packer.toBlob(document), 'documento-vitimax.docx')
+    } else if (type === 'ppt') {
+      const presentation = new pptxgen()
+      presentation.layout = 'LAYOUT_WIDE'
+      const slide = presentation.addSlide()
+      slide.background = { color: 'F4F7F2' }
+      slide.addText(title, { x: 0.6, y: 0.7, w: 12, h: 0.7, fontSize: 24, bold: true, color: '173524' })
+      slide.addText(`Catálogo VITIMAX\n\n${catalogText}`, { x: 0.7, y: 1.7, w: 11.8, h: 4.8, fontSize: 16, color: '173524', breakLine: false, fit: 'shrink' })
+      downloadBlob(await presentation.write({ outputType: 'blob' }), 'presentacion-vitimax.pptx')
+    } else if (type === 'code') {
+      const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>body{font-family:Arial,sans-serif;max-width:900px;margin:40px auto;padding:24px;color:#173524;background:#f4f7f2}section{background:#fff;padding:28px;border-radius:20px;box-shadow:0 10px 30px #17352418}li{margin:10px 0}</style></head><body><section><h1>${escapeHtml(title)}</h1><h2>Catálogo VITIMAX</h2><ul>${products.map((item) => `<li><strong>${escapeHtml(item.name || 'Producto pendiente')}</strong> — ${escapeHtml(item.description || 'Descripción pendiente.')}</li>`).join('')}</ul></section></body></html>`
+      downloadBlob(new Blob([html], { type: 'text/html;charset=utf-8' }), 'codigo-vitimax.html')
+    }
+    setNotice(`${type === 'ppt' ? 'PowerPoint' : type === 'word' ? 'Word' : type.toUpperCase()} generado y descargado`)
+  }
   function importExcel(event) {
     const file = event.target.files?.[0]
     if (!file) return
@@ -428,8 +525,10 @@ function App({ user, onSignOut, guest = false }) {
             const photoRef = ref(firebaseStorage, `users/${user.uid}/profile/avatar-${Date.now()}`)
             const uploaded = await uploadBytes(photoRef, photoFile, { contentType: photoFile.type })
             normalized = { ...normalized, photo: await getDownloadURL(uploaded.ref) }
-          } catch {
-            normalized = { ...normalized, photo: await imageFileToDataUrl(photoFile) }
+          } catch (error) {
+            throw new Error(error?.code === 'storage/unauthorized'
+              ? 'Firebase no autorizó la foto. Inicia sesión nuevamente e inténtalo otra vez.'
+              : 'No se pudo subir la foto a Firebase Storage.')
           }
         } else normalized = { ...normalized, photo: await imageFileToDataUrl(photoFile) }
       }
@@ -444,9 +543,19 @@ function App({ user, onSignOut, guest = false }) {
     }
   }
   function saveSettings(next) { setSettings(next); setOverlay(null); setNotice('Configuración guardada correctamente') }
-  function downloadProductPage(product) {
-    const slug = normalize(product.name || 'producto').replace(/\s+/g, '-') || 'producto'
-    const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${product.name || 'Producto VITIMAX'}</title><style>body{font-family:Arial,sans-serif;margin:0;background:#f4f7f2;color:#173524}main{max-width:900px;margin:auto;padding:48px 24px}article{background:white;border-radius:24px;padding:32px;box-shadow:0 12px 40px #17352418}img{max-width:100%;max-height:360px;object-fit:contain;border-radius:16px}h1{font-size:clamp(2rem,5vw,4rem);margin:16px 0 8px}.tag{color:#4e8a52;text-transform:uppercase;font-weight:bold;letter-spacing:.12em}.price{font-size:1.6rem;font-weight:bold;margin:24px 0}a{display:inline-block;padding:14px 20px;border-radius:999px;background:#276b3b;color:#fff;text-decoration:none}</style></head><body><main><article>${product.image ? `<img src="${product.image}" alt="${product.name || 'Producto'}">` : ''}<div class="tag">${product.category || 'VITIMAX'}</div><h1>${product.name || 'Producto pendiente'}</h1><p>${product.description || 'Descripción pendiente de completar.'}</p><div class="price">${money(product.price)}</div><p><strong>Formato:</strong> ${product.format || 'Pendiente'}</p><p><strong>Modo de uso:</strong> ${product.usage || 'Pendiente de ficha técnica.'}</p><p><strong>Disponibilidad:</strong> ${product.stock === '' ? 'Pendiente' : `${product.stock} unidades`}</p><a href="mailto:${profile.email || ''}">Solicitar información</a></article></main></body></html>`
+  function downloadProductPage(product = null, requestText = '') {
+    const pageData = product || {
+      name: 'VITIMAX',
+      category: 'Catálogo y soluciones agrícolas',
+      description: requestText || 'Soluciones VITIMAX para el cuidado y manejo responsable de cultivos.',
+      price: '',
+      format: 'Información bajo consulta',
+      usage: 'Consulta la ficha técnica oficial antes de usar cualquier producto.',
+      stock: '',
+      image: ''
+    }
+    const slug = normalize(pageData.name || 'pagina-vitimax').replace(/\s+/g, '-') || 'pagina-vitimax'
+    const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${pageData.name || 'VITIMAX'}</title><style>body{font-family:Arial,sans-serif;margin:0;background:#f4f7f2;color:#173524}main{max-width:900px;margin:auto;padding:48px 24px}article{background:white;border-radius:24px;padding:32px;box-shadow:0 12px 40px #17352418}img{max-width:100%;max-height:360px;object-fit:contain;border-radius:16px}h1{font-size:clamp(2rem,5vw,4rem);margin:16px 0 8px}.tag{color:#4e8a52;text-transform:uppercase;font-weight:bold;letter-spacing:.12em}.price{font-size:1.6rem;font-weight:bold;margin:24px 0}a{display:inline-block;padding:14px 20px;border-radius:999px;background:#276b3b;color:#fff;text-decoration:none}</style></head><body><main><article>${pageData.image ? `<img src="${pageData.image}" alt="${pageData.name || 'VITIMAX'}">` : ''}<div class="tag">${pageData.category || 'VITIMAX'}</div><h1>${pageData.name || 'VITIMAX'}</h1><p>${pageData.description || 'Descripción pendiente de completar.'}</p>${pageData.price ? `<div class="price">${money(pageData.price)}</div>` : ''}<p><strong>Formato:</strong> ${pageData.format || 'Pendiente'}</p><p><strong>Modo de uso:</strong> ${pageData.usage || 'Pendiente de ficha técnica.'}</p><p><strong>Disponibilidad:</strong> ${pageData.stock === '' ? 'Pendiente' : `${pageData.stock} unidades`}</p><a href="mailto:${profile.email || ''}">Solicitar información</a></article></main></body></html>`
     const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
@@ -458,10 +567,19 @@ function App({ user, onSignOut, guest = false }) {
   }
   async function askAssistant(text, attachmentFile = null) {
     const promptNormalized = normalize(text)
+    const excelRequested = promptNormalized.includes('excel') || promptNormalized.includes('xlsx') || promptNormalized.includes('hoja de calculo') || promptNormalized.includes('hoja calculo')
+    const templateRequested = excelRequested && (promptNormalized.includes('plantilla') || promptNormalized.includes('vacio') || promptNormalized.includes('vacío'))
+    if (excelRequested && !guest) generateAssistantExcel(templateRequested)
+    const fileType = promptNormalized.includes('pdf') ? 'pdf'
+      : promptNormalized.includes('word') || promptNormalized.includes('docx') ? 'word'
+        : promptNormalized.includes('powerpoint') || promptNormalized.includes('ppt') || promptNormalized.includes('presentacion') ? 'ppt'
+          : promptNormalized.includes('codigo') || promptNormalized.includes('código') || promptNormalized.includes('programa') ? 'code'
+            : null
+    if (fileType && !guest) generateAssistantFile(fileType, text).catch((error) => setNotice(error?.message || 'No se pudo generar el archivo.'))
     const pageRequested = promptNormalized.includes('crear pagina') || promptNormalized.includes('pagina web') || promptNormalized.includes('landing')
     const pageTerms = promptNormalized.split(/\s+/).filter((term) => term.length > 3 && !['crear', 'pagina', 'web', 'promocional', 'promocion'].includes(term))
     const pageProduct = pageRequested && (products.length === 1 ? products[0] : products.find((item) => pageTerms.some((term) => normalize(item.name).includes(term))))
-    if (pageProduct) downloadProductPage(pageProduct)
+    if (pageRequested) downloadProductPage(pageProduct, text)
     let remoteAnswered = false
     const cloudAssistantEnabled = import.meta.env.VITE_ENABLE_CLOUD_ASSISTANT === 'true'
     if (firebaseFunctions && cloudAssistantEnabled && !guest) {
@@ -483,8 +601,9 @@ function App({ user, onSignOut, guest = false }) {
         const { data } = await httpsCallable(firebaseFunctions, 'vitimaxAssistant')({ message: text, products, attachment })
         setMessages((items) => items.map((item) => item.requestId === requestId ? { ...item, text: data.text } : item))
         remoteAnswered = true
-      } catch {
+      } catch (error) {
         setMessages((items) => items.filter((item) => item.requestId !== requestId))
+        setNotice(error?.message || 'Gemini no respondió. Se usará el asistente local.')
       }
     }
     if (remoteAnswered) return
@@ -515,7 +634,13 @@ function App({ user, onSignOut, guest = false }) {
     } else if (normalized.includes('inventario') || normalized.includes('stock') || normalized.includes('reporte')) {
       response = `INFORME DE INVENTARIO\n\nProductos registrados: ${products.length}\nUnidades contabilizadas: ${products.reduce((sum, item) => sum + (Number(item.stock) || 0), 0)}\nStock bajo: ${low.length}\n\n${low.length ? `Requieren atención: ${low.map((item) => `${item.name || 'Sin nombre'} (${item.stock})`).join(', ')}` : 'No hay productos dentro del umbral configurado.'}`
     } else if (normalized.includes('excel') || normalized.includes('import') || normalized.includes('plantilla')) {
-      response = 'AYUDA CON EXCEL\n\nPuedes descargar la plantilla desde Resumen o Catálogo, completar los campos oficiales y usar Importar productos. Las filas sin nombre se reportan como error, los nombres repetidos actualizan el producto existente y los campos sin información quedan pendientes.'
+      response = guest
+        ? 'Para generar y descargar un Excel desde el asistente debes iniciar sesión como administrador.'
+        : templateRequested
+        ? 'PLANTILLA EXCEL GENERADA\n\nDescargué una plantilla vacía con las columnas oficiales de VITIMAX. Puedes completarla y luego importarla desde Catálogo.'
+        : products.length
+          ? `EXCEL GENERADO\n\nDescargué el archivo catalogo-vitimax-ia.xlsx con los ${products.length} productos reales registrados. Puedes abrirlo, editarlo y volver a importarlo desde Catálogo.`
+          : 'No hay productos cargados todavía. Descargué una plantilla Excel vacía para que puedas completar los datos oficiales.'
     } else if (normalized.includes('crear pagina') || normalized.includes('pagina web') || normalized.includes('landing') || normalized.includes('promocion')) {
       if (!product) {
         response = 'Puedo crear la estructura de una página promocional, pero necesito que indiques el nombre de un producto registrado o cargues primero el catálogo.'
@@ -583,10 +708,10 @@ function App({ user, onSignOut, guest = false }) {
     {overlay === 'settings' && <SettingsModal settings={settings} onClose={() => setOverlay(null)} onSave={saveSettings} />}
     {overlay === 'notifications' && <NotificationsModal lowStock={lowStock} missingData={missingData} onClose={() => setOverlay(null)} />}
     {importReport && <ImportReport report={importReport} onClose={() => setImportReport(null)} />}
-    <button className="assistant-fab" onClick={() => setAssistantOpen(true)}><Bot size={20} /><span>Asistente VITIMAX</span></button>
+    <button className="assistant-fab" onClick={() => setAssistantOpen(true)} aria-label="Abrir BOT IA VITIMAX"><img className="assistant-bot-image" src="/bot-vitimax.png" alt="" /><span>BOT IA VITIMAX</span></button>
     {assistantOpen && <Assistant messages={messages} onClose={() => setAssistantOpen(false)} onAsk={askAssistant} />}
     {qrOpen && <QrScanner onClose={() => setQrOpen(false)} onResult={handleQrResult} />}
-    {showProduct && canManage && <ProductModal product={editing || emptyProduct} onClose={() => setShowProduct(false)} onSave={saveProduct} saving={saving} />}
+    {showProduct && canManage && <ProductModal product={editing || emptyProduct} onClose={() => setShowProduct(false)} onSave={saveProduct} onDelete={deleteProduct} saving={saving} />}
   </div>
 }
 
@@ -606,7 +731,7 @@ function Catalog({ products, allProducts, categories, query, setQuery, category,
   return <><div className="page-heading"><div><p className="eyebrow">{readOnly ? 'CONSULTA · 02' : 'GESTIÓN · 02'}</p><h1>Catálogo de productos</h1><p className="muted">La información visible proviene únicamente de los datos cargados.</p></div>{!readOnly && <button className="btn primary" onClick={onCreate}><Plus size={17} /> Nuevo producto</button>}</div><div className="toolbar"><div className="searchbox"><Search size={18} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar por nombre, uso, problema o característica..." /></div><div className="selectbox"><Filter size={16} /><select value={category} onChange={(e) => setCategory(e.target.value)}>{categories.map((c) => <option key={c}>{c}</option>)}</select></div>{!readOnly && <div className="toolbar-actions"><button className="btn secondary compact" onClick={onTemplate}><FileSpreadsheet size={15} /> Plantilla</button><button className="btn secondary compact" onClick={onImport}><Upload size={15} /> Importar</button><button className="btn secondary compact" onClick={onExport} disabled={!allProducts.length}><ArrowDownToLine size={15} /> Exportar</button></div>}</div>{products.length ? <div className="product-grid">{products.map((p) => <ProductCard key={p.id} product={p} onEdit={onEdit} onDelete={onDelete} readOnly={readOnly} />)}</div> : <div className="empty-catalog"><div className="empty-icon"><FileSpreadsheet size={28} /></div><h2>Tu catálogo está esperando los datos oficiales</h2><p>{readOnly ? 'Todavía no hay productos publicados para consultar.' : 'No se encontraron productos registrados. Importa un archivo Excel para cargar nombres, precios, stock y toda la información disponible sin duplicados.'}</p>{!readOnly && <div><button className="btn primary" onClick={onImport}><Upload size={16} /> Importar Excel</button><button className="btn secondary" onClick={onTemplate}>Descargar plantilla</button></div>}<small>{readOnly ? 'El catálogo será visible cuando el administrador cargue los datos oficiales.' : 'Formatos aceptados: .xlsx, .xls · La primera hoja será procesada'}</small></div>}</>
 }
 
-function ProductCard({ product, onEdit, onDelete, readOnly }) { return <article className="product-card"><div className="card-image">{product.image ? <img src={product.image} alt="" /> : <><Leaf size={37} /><span>Foto pendiente</span></> }<span className={Number(product.stock) > 0 ? 'stock-badge available' : 'stock-badge'}>{Number(product.stock) > 0 ? `${product.stock} en stock` : 'Stock pendiente'}</span>{!readOnly && <button className="card-menu" onClick={() => onEdit(product)}><MoreHorizontal size={17} /></button>}</div><div className="card-body"><div className="category-label">{product.category || 'Categoría pendiente'}</div><h3>{product.name || 'Producto sin nombre'}</h3><p>{product.description || 'Descripción pendiente de completar.'}</p><div className="card-footer"><strong>{money(product.price)}</strong>{!readOnly && <button className="link-btn" onClick={() => onEdit(product)}>Editar <ChevronRight size={14} /></button>}</div></div></article> }
+function ProductCard({ product, onEdit, onDelete, readOnly }) { return <article className="product-card"><div className="card-image">{product.image ? <img src={product.image} alt="" /> : <><Leaf size={37} /><span>Foto pendiente</span></> }<span className={Number(product.stock) > 0 ? 'stock-badge available' : 'stock-badge'}>{Number(product.stock) > 0 ? `${product.stock} en stock` : 'Stock pendiente'}</span>{!readOnly && <button className="card-menu" onClick={() => onEdit(product)} aria-label={`Editar ${product.name || 'producto'}`}><MoreHorizontal size={17} /></button>}</div><div className="card-body"><div className="category-label">{product.category || 'Categoría pendiente'}</div><h3>{product.name || 'Producto sin nombre'}</h3><p>{product.description || 'Descripción pendiente de completar.'}</p><div className="card-footer"><strong>{money(product.price)}</strong>{!readOnly && <div className="product-actions"><button className="link-btn" onClick={() => onEdit(product)}>Editar <ChevronRight size={14} /></button><button className="link-btn danger-link" onClick={() => onDelete(product.id)}><Trash2 size={14} /> Eliminar</button></div>}</div></div></article> }
 
 function Inventory({ products, lowStock, onImport, readOnly }) { return <><div className="page-heading"><div><p className="eyebrow">OPERACIÓN · 03</p><h1>Inventario</h1><p className="muted">Consulta existencias y detecta rápidamente lo que necesita atención.</p></div>{!readOnly && <button className="btn primary" onClick={onImport}><Upload size={16} /> Actualizar por Excel</button>}</div><div className="metrics inventory-metrics"><Metric icon={Boxes} label="Total de unidades" value={products.reduce((s, p) => s + (Number(p.stock) || 0), 0)} detail="stock registrado" color="green" /><Metric icon={Bell} label="Stock bajo" value={lowStock.length} detail="umbral de 5 unidades" color="orange" /><Metric icon={Tags} label="Sin stock" value={products.filter((p) => p.stock === 0 || p.stock === '0').length} detail="productos agotados" color="purple" /></div><section className="panel table-panel"><div className="panel-heading"><div><h3>Existencias actuales</h3><p>Los valores se actualizan desde el catálogo o Excel.</p></div></div>{products.length ? <div className="table-wrap"><table><thead><tr><th>Producto</th><th>Categoría</th><th>Precio</th><th>Stock actual</th><th>Estado</th></tr></thead><tbody>{products.map((p) => <tr key={p.id}><td><strong>{p.name || 'Sin nombre'}</strong></td><td>{p.category || 'Pendiente'}</td><td>{money(p.price)}</td><td>{p.stock === '' ? 'Pendiente' : p.stock}</td><td><span className={Number(p.stock) <= 5 ? 'table-status warning' : 'table-status ok'}>{p.stock === '' ? 'Revisar' : Number(p.stock) <= 5 ? 'Stock bajo' : 'En rango'}</span></td></tr>)}</tbody></table></div> : <EmptyState icon={Boxes} title="Sin inventario registrado" text={readOnly ? 'El inventario aparecerá cuando el administrador cargue los datos.' : 'Carga el Excel oficial para visualizar existencias.'} action={readOnly ? 'Ir al catálogo' : 'Importar Excel'} onClick={readOnly ? undefined : onImport} />}</section></> }
 
@@ -623,10 +748,17 @@ function ProfileModal({ profile, onClose, onSave, onSignOut }) {
   const [photoFile, setPhotoFile] = useState(null)
   const [photoPreview, setPhotoPreview] = useState(profile.photo || '')
   const update = (key, value) => setForm((current) => ({ ...current, [key]: value }))
-  const choosePhoto = (event) => { const file = event.target.files?.[0]; if (!file) return; setPhotoFile(file); setPhotoPreview(URL.createObjectURL(file)) }
+  const choosePhoto = (event) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+    if (!file.type.startsWith('image/')) return
+    if (file.size > 5 * 1024 * 1024) return
+    setPhotoFile(file)
+    setPhotoPreview(URL.createObjectURL(file))
+  }
   return <ModalShell title="Mi perfil" eyebrow="CUENTA" onClose={onClose} actions={<><button className="btn secondary" onClick={onSignOut}>Cerrar sesión</button><button className="btn secondary" onClick={onClose}>Cancelar</button><button className="btn primary" onClick={() => onSave(form, photoFile)}>Guardar cambios</button></>}>
     <div className="profile-preview">{photoPreview ? <img className="profile-photo" src={photoPreview} alt="Vista previa de la foto de perfil" /> : <div className="avatar profile-avatar">{form.name?.[0] || 'V'}</div>}<div><strong>{form.name || 'Administrador'}</strong><span>Administrador de VITIMAX</span></div></div>
-    <div className="form-grid"><label>Nombre<input value={form.name} onChange={(e) => update('name', e.target.value)} /></label><label>Correo electrónico<input type="email" value={form.email} onChange={(e) => update('email', e.target.value)} placeholder="Pendiente" readOnly /></label><label>Teléfono<input value={form.phone} onChange={(e) => update('phone', e.target.value)} placeholder="Pendiente" /></label><label>Foto de perfil (URL)<input value={form.photo} onChange={(e) => { update('photo', e.target.value); setPhotoPreview(e.target.value) }} placeholder="Opcional: URL pública" /></label><label className="full">Subir foto desde celular o computadora<input type="file" accept="image/*" capture="user" onChange={choosePhoto} />{photoFile && <small>Foto seleccionada: {photoFile.name} · {Math.ceil(photoFile.size / 1024)} KB</small>}</label></div>
+    <div className="form-grid"><label>Nombre<input value={form.name} onChange={(e) => update('name', e.target.value)} /></label><label>Correo electrónico<input type="email" value={form.email} onChange={(e) => update('email', e.target.value)} placeholder="Pendiente" readOnly /></label><label>Teléfono<input value={form.phone} onChange={(e) => update('phone', e.target.value)} placeholder="Pendiente" /></label><label>Foto de perfil (URL)<input value={form.photo} onChange={(e) => { update('photo', e.target.value); setPhotoPreview(e.target.value) }} placeholder="Opcional: URL pública" /></label><div className="full"><span className="field-label">Foto de perfil</span><div className="modal-actions"><label className="btn secondary">Elegir desde celular o computador<input type="file" accept="image/*" onChange={choosePhoto} hidden /></label><label className="btn secondary">Tomar foto<input type="file" accept="image/*" capture="user" onChange={choosePhoto} hidden /></label></div><small>JPG, PNG o WEBP · máximo 5 MB. Puedes elegir una imagen del dispositivo o tomar una foto.</small>{photoFile && <small>Foto seleccionada: {photoFile.name} · {Math.ceil(photoFile.size / 1024)} KB</small>}</div></div>
   </ModalShell>
 }
 
@@ -646,11 +778,12 @@ function ImportReport({ report, onClose }) {
   return <ModalShell title="Resultado de importación" eyebrow="EXCEL VALIDADO" onClose={onClose}><div className="import-summary"><Metric icon={FileSpreadsheet} label="Filas leídas" value={report.rows} detail="primera hoja" color="blue" /><Metric icon={Plus} label="Agregados" value={report.added} detail="nuevos registros" color="green" /><Metric icon={PackageCheck} label="Actualizados" value={report.updated} detail="sin duplicar" color="purple" /><Metric icon={CircleHelp} label="Pendientes" value={report.missing + report.invalid} detail={`${report.invalid} con error`} color="orange" /></div><p className="modal-note"><CircleHelp size={15} /> Los productos con precio o stock faltante permanecen marcados como pendientes. No se inventaron datos.</p><div className="modal-actions"><button className="btn primary" onClick={onClose}>Continuar</button></div></ModalShell>
 }
 
-function ProductModal({ product, onClose, onSave, saving }) {
+function ProductModal({ product, onClose, onSave, onDelete, saving }) {
   const [form, setForm] = useState(product)
   const [imageFile, setImageFile] = useState(null)
   const update = (key, value) => setForm((current) => ({ ...current, [key]: value }))
-  return <div className="modal-backdrop"><div className="modal"><div className="modal-head"><div><p className="eyebrow">FICHA DE PRODUCTO</p><h2>{product.id ? 'Editar producto' : 'Nuevo producto'}</h2></div><button className="icon-btn" onClick={onClose}><X size={19} /></button></div><p className="modal-note"><CircleHelp size={15} /> Los campos sin información quedarán marcados como pendientes.</p><div className="form-grid">{[['name','Nombre del producto'],['category','Categoría'],['price','Precio'],['previousPrice','Precio anterior'],['stock','Stock disponible'],['format','Formato o tamaño'],['image','URL de fotografía']].map(([key, label]) => <label key={key}>{label}<input value={form[key] ?? ''} onChange={(e) => update(key, e.target.value)} placeholder="Pendiente" /></label>)}<label className="full">Subir fotografía<input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />{imageFile && <small>{imageFile.name}</small>}</label><label className="full">Descripción<textarea value={form.description ?? ''} onChange={(e) => update('description', e.target.value)} placeholder="Pendiente de completar" /></label><label>Modo de uso<textarea value={form.usage ?? ''} onChange={(e) => update('usage', e.target.value)} placeholder="Pendiente" /></label><label>Recomendaciones<textarea value={form.recommendations ?? ''} onChange={(e) => update('recommendations', e.target.value)} placeholder="Pendiente" /></label></div><div className="modal-actions"><button className="btn secondary" onClick={onClose} disabled={saving}>Cancelar</button><button className="btn primary" onClick={() => onSave(form, imageFile)} disabled={saving}><PackageCheck size={16} /> {saving ? 'Subiendo...' : 'Guardar producto'}</button></div></div></div>
+  const remove = () => { if (!product.id) return; if (window.confirm(`¿Eliminar "${product.name || 'este producto'}"? Esta acción no se puede deshacer.`)) { onDelete(product.id); onClose() } }
+  return <div className="modal-backdrop"><div className="modal"><div className="modal-head"><div><p className="eyebrow">FICHA DE PRODUCTO</p><h2>{product.id ? 'Editar producto' : 'Nuevo producto'}</h2></div><button className="icon-btn" onClick={onClose}><X size={19} /></button></div><p className="modal-note"><CircleHelp size={15} /> Los campos sin información quedarán marcados como pendientes.</p><div className="form-grid">{[['name','Nombre del producto'],['category','Categoría'],['price','Precio'],['previousPrice','Precio anterior'],['stock','Stock disponible'],['format','Formato o tamaño'],['image','URL de fotografía']].map(([key, label]) => <label key={key}>{label}<input value={form[key] ?? ''} onChange={(e) => update(key, e.target.value)} placeholder="Pendiente" /></label>)}<label className="full">Subir fotografía<input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />{imageFile && <small>{imageFile.name}</small>}</label><label className="full">Descripción<textarea value={form.description ?? ''} onChange={(e) => update('description', e.target.value)} placeholder="Pendiente de completar" /></label><label>Modo de uso<textarea value={form.usage ?? ''} onChange={(e) => update('usage', e.target.value)} placeholder="Pendiente" /></label><label>Recomendaciones<textarea value={form.recommendations ?? ''} onChange={(e) => update('recommendations', e.target.value)} placeholder="Pendiente" /></label></div><div className="modal-actions">{product.id && <button className="btn danger-button" onClick={remove} disabled={saving}><Trash2 size={16} /> Eliminar producto</button>}<button className="btn secondary" onClick={onClose} disabled={saving}>Cancelar</button><button className="btn primary" onClick={() => onSave(form, imageFile)} disabled={saving}><PackageCheck size={16} /> {saving ? 'Subiendo...' : product.id ? 'Guardar cambios' : 'Agregar producto'}</button></div></div></div>
 }
 
 function QrScanner({ onClose, onResult }) {
@@ -700,6 +833,10 @@ function QrScanner({ onClose, onResult }) {
   return <div className="modal-backdrop"><div className="modal qr-modal"><div className="modal-head"><div><p className="eyebrow">LECTOR DE ENVASES</p><h2>Escanea el código QR</h2></div><button className="icon-btn" aria-label="Cerrar escáner" onClick={onClose}><X size={19} /></button></div><p className="modal-note"><QrCode size={15} /> Enfoca el código dentro del recuadro. Debe identificar un producto registrado en el catálogo de VITIMAX.</p><div id="vitimax-qr-reader" className="qr-reader" />{cameraReady && <p className="qr-status">Cámara lista · apunta al código QR</p>}{error && <p className="auth-error">{error}</p>}<label className="qr-file-btn">Leer imagen QR<input type="file" accept="image/*" capture="environment" onChange={scanImage} /></label><small className="field-help qr-help">Si la cámara no funciona, toma o selecciona una foto del código QR.</small><button className="btn secondary qr-close" onClick={onClose}>Cerrar escáner</button></div></div>
 }
 
-function Assistant({ messages, onClose, onAsk }) { const [text, setText] = useState(''); const [attachment, setAttachment] = useState(null); const submit = (e) => { e.preventDefault(); if (!text.trim() && !attachment) return; onAsk(text.trim() || 'Analiza el archivo adjunto y dime qué información adicional necesitas.', attachment); setText(''); setAttachment(null) }; return <div className="assistant-panel"><div className="assistant-head"><div className="assistant-title"><div className="bot-avatar"><Bot size={19} /></div><div><strong>Asistente VITIMAX</strong><span>Catálogo, archivos, páginas y asesoría</span></div></div><button className="icon-btn" onClick={onClose}><X size={18} /></button></div><div className="assistant-body">{messages.map((m, i) => <div className={`chat ${m.role}`} key={i}><div>{m.text}</div></div>)}</div><div className="quick-prompts"><button onClick={() => onAsk('Crea paso a paso una página web promocional usando el producto registrado que corresponda.')}>Crear página web</button><button onClick={() => onAsk('Ayúdame a organizar y analizar mi Excel de productos.')}>Ayuda con Excel</button></div><form className="assistant-input" onSubmit={submit}><input value={text} onChange={(e) => setText(e.target.value)} placeholder="Pregunta o pide crear algo..." /><label className="assistant-photo" title="Subir archivo">📎<input type="file" accept="image/*,.pdf,.txt,.md,.json,.csv,.xlsx,.xls,.doc,.docx" hidden onChange={(e) => setAttachment(e.target.files?.[0] || null)} /></label><button type="submit"><ArrowUpToLine size={17} /></button></form>{attachment && <small className="assistant-file">Archivo listo: {attachment.name} ({Math.ceil(attachment.size / 1024)} KB)</small>}<small>Los archivos para análisis deben pesar menos de 8 MB. Verifica diagnósticos y aplicaciones con un especialista.</small></div> }
+function AssistantIcon() {
+  return <span className="assistant-logo" aria-hidden="true"><svg viewBox="0 0 32 32" role="img"><path className="assistant-antenna" d="M16 5V2m0 0-2 2m2-2 2 2" /><rect x="5" y="7" width="22" height="18" rx="6" /><path d="M10 15h.01M22 15h.01M11 20c3 2 7 2 10 0" /><path className="assistant-ear" d="M5 14H2m25 0h3" /></svg><b>IA</b></span>
+}
+
+function Assistant({ messages, onClose, onAsk }) { const [text, setText] = useState(''); const [attachment, setAttachment] = useState(null); const submit = (e) => { e.preventDefault(); if (!text.trim() && !attachment) return; onAsk(text.trim() || 'Analiza el archivo adjunto y dime qué información adicional necesitas.', attachment); setText(''); setAttachment(null) }; return <div className="assistant-panel"><div className="assistant-head"><div className="assistant-title"><div className="bot-avatar"><img className="assistant-bot-image panel-bot-image" src="/bot-vitimax.png" alt="Robot BOT IA VITIMAX" /></div><div><strong>BOT IA VITIMAX</strong><span>Gemini · Catálogo · Archivos · Páginas</span></div></div><button className="icon-btn" onClick={onClose}><X size={18} /></button></div><div className="assistant-body">{messages.map((m, i) => <div className={`chat ${m.role}`} key={i}><div>{m.text}</div></div>)}</div><div className="quick-prompts"><button onClick={() => onAsk('Crea paso a paso una página web promocional usando el producto registrado que corresponda.')}>Crear página web</button><button onClick={() => onAsk('Genera y descarga un Excel con mi catálogo actual.')}>Generar Excel</button><button onClick={() => onAsk('Genera y descarga un PDF con mi catálogo actual.')}>Generar PDF</button><button onClick={() => onAsk('Genera y descarga un documento Word con mi catálogo actual.')}>Generar Word</button><button onClick={() => onAsk('Genera y descarga una presentación PowerPoint con mi catálogo actual.')}>Generar PowerPoint</button><button onClick={() => onAsk('Genera y descarga el código de una página web.')}>Generar código</button><button onClick={() => onAsk('Ayúdame a organizar y analizar mi Excel de productos.')}>Ayuda con Excel</button></div><form className="assistant-input" onSubmit={submit}><input value={text} onChange={(e) => setText(e.target.value)} placeholder="Pregunta o pide crear algo..." /><label className="assistant-photo" title="Subir archivo">📎<input type="file" accept="image/*,.pdf,.txt,.md,.json,.csv,.xlsx,.xls,.doc,.docx" hidden onChange={(e) => setAttachment(e.target.files?.[0] || null)} /></label><button type="submit"><ArrowUpToLine size={17} /></button></form>{attachment && <small className="assistant-file">Archivo listo: {attachment.name} ({Math.ceil(attachment.size / 1024)} KB)</small>}<small>Los archivos para análisis deben pesar menos de 8 MB. Verifica diagnósticos y aplicaciones con un especialista.</small></div> }
 
 createRoot(document.getElementById('root')).render(<AuthGate />)

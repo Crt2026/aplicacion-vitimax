@@ -56,5 +56,12 @@ npm run build
 npx cap sync android
 ```
 
+Después de cambiar la autenticación, vuelve a generar e instala el APK para
+que el celular reciba la corrección:
+
+```powershell
+npm run android:apk
+```
+
 El archivo `VITIMAX.apk` incluido en este repositorio corresponde a una versión
 debug para pruebas.
