@@ -1,45 +1,130 @@
 const { onCall, HttpsError } = require('firebase-functions/v2/https')
-const { defineSecret } = require('firebase-functions/params')
-const { GoogleGenerativeAI } = require('@google/generative-ai')
 const admin = require('firebase-admin')
 
 admin.initializeApp()
-const geminiApiKey = defineSecret('GEMINI_API_KEY')
+const vertexModel = 'gemini-2.0-flash-001'
+const vertexLocation = 'us-central1'
+const DAILY_REQUEST_LIMIT = 20
+const MAX_MESSAGE_LENGTH = 4000
+const MAX_CATALOG_LENGTH = 120000
+const MAX_ATTACHMENT_LENGTH = 8_000_000
+const allowedAttachmentTypes = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'application/pdf',
+  'text/plain',
+  'text/markdown',
+  'text/csv',
+  'application/json'
+])
 
-const systemInstruction = `Eres el asistente oficial de VITIMAX. Ayudas paso a paso a clientes y administradores con catálogo, inventario, Excel, publicaciones y creación de páginas web.
+const systemInstruction = `Eres el BOT IA oficial de VITIMAX. Ayudas a clientes y administradores con catálogo, inventario, ventas, Excel, PDF, Word, PowerPoint, publicaciones, creación de páginas web, análisis de archivos y cualquier consulta general.
 Reglas obligatorias:
-- Usa exclusivamente los datos del catálogo que recibes en la consulta. Nunca inventes productos, precios, stock, características, dosis ni resultados.
-- Si falta información, dilo claramente como "pendiente" y pide el dato necesario.
+- Si el catálogo tiene productos, úsalos como fuente principal y respeta sus datos reales.
+- Si el catálogo está VACÍO y el usuario pide un catálogo, productos de ejemplo, plantas, tierra, abonos, fertilizantes, precios, stock o dosis, GENERA datos completos y realistas (ID, categoría, precio en CLP, stock, formato, descripción, dosis, recomendaciones). No te niegues y no entregues un archivo vacío.
+- Marca siempre los datos inventados como "Generado por IA (ejemplo)" y no los presentes como información oficial de VITIMAX.
+- Puedes combinar el catálogo real con datos nuevos solo si el usuario lo pide explícitamente.
 - Para fotografías de plantas, ofrece una orientación preliminar, explica la incertidumbre y recomienda revisión de un especialista de VITIMAX antes de aplicar productos.
 - No confirmes diagnósticos ni dosis si no aparecen en una ficha técnica oficial.
 - Cuando pidan una página web, guía paso a paso: objetivo, público, producto, contenido confirmado, llamada a la acción y estructura final.
+- Si el usuario pide un archivo o una acción, responde además con un bloque \`\`\`json: {"accion":"crear_excel","filename":"catalogo-vitimax.xlsx","resumen":"...","productos":[...],"sheets":[{"name":"Productos","columns":[...],"rows":[[...]]}]} incluyendo las 7 hojas (Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores); {"accion":"registrar_productos_en_app","productos":[...]}; {"accion":"simular_ventas","periodoDias":30}; o {"accion":"crear_documento","documento":{"tipo":"pdf|word|ppt","titulo":"...","contenido":"..."}}.
+- No uses "-" como dato: deja el campo vacío o escribe "Pendiente". Precios en CLP como números.
 - Responde en español, de forma clara, práctica y accionable.`
 
 exports.vitimaxAssistant = onCall(
-  { region: 'us-central1', secrets: [geminiApiKey], enforceAppCheck: false },
+  { region: vertexLocation, enforceAppCheck: false },
   async (request) => {
     if (!request.auth) throw new HttpsError('unauthenticated', 'Debes iniciar sesión para usar la IA.')
     const { message, products = [], attachment } = request.data || {}
     if (typeof message !== 'string' || !message.trim()) {
       throw new HttpsError('invalid-argument', 'La consulta está vacía.')
     }
+    if (message.trim().length > MAX_MESSAGE_LENGTH) {
+      throw new HttpsError('invalid-argument', 'La consulta supera el límite de 4.000 caracteres.')
+    }
     if (!Array.isArray(products) || products.length > 200) {
       throw new HttpsError('invalid-argument', 'El catálogo enviado no es válido.')
     }
 
-    const model = new GoogleGenerativeAI(geminiApiKey.value()).getGenerativeModel({
-      model: 'gemini-2.0-flash',
-      systemInstruction
-    })
     const catalog = JSON.stringify(products.map(({ id, name, category, price, stock, format, description, usage, recommendations, features }) => ({
       id, name, category, price, stock, format, description, usage, recommendations, features
     })))
-    const parts = [{ text: `CATÁLOGO REAL DE VITIMAX:\n${catalog}\n\nCONSULTA DEL USUARIO:\n${message.trim()}` }]
-    if (attachment && typeof attachment.data === 'string' && typeof attachment.mimeType === 'string' && attachment.data.length < 8_000_000) {
-      parts.push({ text: `ARCHIVO ADJUNTO: ${String(attachment.name || 'archivo').slice(0, 120)}` })
-      parts.push({ inlineData: { mimeType: attachment.mimeType, data: attachment.data } })
+    if (catalog.length > MAX_CATALOG_LENGTH) {
+      throw new HttpsError('invalid-argument', 'El catálogo supera el límite permitido para la consulta.')
     }
-    const result = await model.generateContent(parts)
-    return { text: result.response.text() }
+    const parts = [{ text: `CATÁLOGO REAL DE VITIMAX:\n${catalog}\n\nCONSULTA DEL USUARIO:\n${message.trim()}` }]
+    if (attachment) {
+      const name = String(attachment.name || 'archivo').slice(0, 120)
+      // Excel/CSV y texto llegan ya convertidos a texto desde la app.
+      if (typeof attachment.text === 'string' && attachment.text.trim()) {
+        if (attachment.text.length > MAX_ATTACHMENT_LENGTH) {
+          throw new HttpsError('invalid-argument', 'El archivo adjunto supera el límite de 8 MB.')
+        }
+        parts.push({ text: `ARCHIVO ADJUNTO "${name}":\n${attachment.text.slice(0, 24_000)}${attachment.text.length > 24_000 ? '\n[Contenido recortado]' : ''}` })
+      } else {
+        if (typeof attachment.data !== 'string' || typeof attachment.mimeType !== 'string') {
+          throw new HttpsError('invalid-argument', 'El archivo adjunto no es válido.')
+        }
+        if (!allowedAttachmentTypes.has(attachment.mimeType)) {
+          throw new HttpsError('invalid-argument', 'Ese tipo de archivo no está permitido para el asistente.')
+        }
+        if (attachment.data.length > MAX_ATTACHMENT_LENGTH) {
+          throw new HttpsError('invalid-argument', 'El archivo adjunto supera el límite de 8 MB.')
+        }
+        parts.push({ text: `ARCHIVO ADJUNTO: ${name} (${attachment.mimeType})` })
+        if (attachment.mimeType.startsWith('image/') || attachment.mimeType === 'application/pdf') {
+          parts.push({ inlineData: { mimeType: attachment.mimeType, data: attachment.data } })
+        }
+      }
+    }
+
+    const today = new Date().toISOString().slice(0, 10)
+    const usageRef = admin.firestore()
+      .collection('users')
+      .doc(request.auth.uid)
+      .collection('assistantUsage')
+      .doc(today)
+    await admin.firestore().runTransaction(async (transaction) => {
+      const usage = (await transaction.get(usageRef)).data() || {}
+      const count = Number(usage.count) || 0
+      if (count >= DAILY_REQUEST_LIMIT) {
+        throw new HttpsError('resource-exhausted', `Alcanzaste el límite de ${DAILY_REQUEST_LIMIT} consultas de IA por día.`)
+      }
+      transaction.set(usageRef, {
+        count: count + 1,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true })
+    })
+
+    const accessToken = await admin.app().options.credential.getAccessToken()
+    const projectId = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT
+    if (!projectId || !accessToken?.access_token) {
+      throw new HttpsError('failed-precondition', 'Google Cloud no está configurado para la IA.')
+    }
+    const endpoint = `https://${vertexLocation}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${vertexLocation}/publishers/google/models/${vertexModel}:generateContent`
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken.access_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemInstruction }] },
+        contents: [{ role: 'user', parts }],
+        generationConfig: { temperature: 0.2, maxOutputTokens: 1200 }
+      })
+    })
+    if (!response.ok) {
+      const errorText = await response.text()
+      console.error('Vertex AI request failed', response.status, errorText.slice(0, 500))
+      throw new HttpsError('unavailable', 'Google Gemini no pudo responder. Inténtalo nuevamente.')
+    }
+    const result = await response.json()
+    const text = result.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim()
+    if (typeof text !== 'string' || !text.trim()) {
+      throw new HttpsError('unavailable', 'Google Gemini devolvió una respuesta vacía.')
+    }
+    return { text }
   }
 )
