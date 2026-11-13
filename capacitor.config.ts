@@ -6,7 +6,10 @@ const config: CapacitorConfig = {
   webDir: 'dist',
   bundledWebRuntime: false,
   android: {
-    backgroundColor: '#f6f8f6'
+    backgroundColor: '#f6f8f6',
+    // Android 15 dibuja de borde a borde; esto evita que la barra de estado
+    // y la barra de navegación tapen el contenido de la app.
+    adjustMarginsForEdgeToEdge: 'auto'
   },
   plugins: {
     FirebaseAuthentication: {

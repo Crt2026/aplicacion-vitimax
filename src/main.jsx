@@ -2608,7 +2608,7 @@ function SettingsModal({ settings, onClose, onSave }) {
       </section>
       <section className="settings-group about-group">
         <div className="settings-group-head"><span className="settings-group-icon slate"><Info size={17} /></span><div><h3>Acerca de VITIMAX</h3><p>Centro de gestión agrícola digital.</p></div></div>
-        <div className="about-grid"><div><span>Versión</span><strong>1.1.2</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
+        <div className="about-grid"><div><span>Versión</span><strong>1.1.3</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
       </section>
     </div>
   </ModalShell>
