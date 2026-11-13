@@ -149,6 +149,586 @@ export function normalizeProducts(list, options = {}) {
     .filter((item) => item.name || item.description || item.price)
 }
 
+// ---------------------------------------------------------------------------
+// Importador universal de Excel/CSV
+// Detecta encabezados aunque no estén en la fila 1, mapea columnas por
+// sinónimos, recorre todas las hojas y cruza Inventario con Productos.
+// ---------------------------------------------------------------------------
+
+export function normalizeHeader(value) {
+  return String(value ?? '')
+    .replace(/\u00a0/g, ' ')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+const PRODUCT_ALIASES = {
+  id: ['id', 'id producto', 'producto id', 'codigo', 'codigo producto', 'cod producto', 'cod', 'sku', 'referencia', 'ref'],
+  name: ['nombre', 'nombre producto', 'nombre del producto', 'producto', 'articulo', 'item', 'insumo', 'titulo', 'denominacion', 'descripcion corta'],
+  category: ['categoria', 'categoria producto', 'tipo', 'familia', 'rubro', 'linea', 'linea producto', 'grupo'],
+  previousPrice: ['precio anterior', 'precio antes', 'precio normal', 'precio regular', 'precio lista', 'precio de lista', 'precio antiguo', 'precioantiguo', 'precioanterior'],
+  price: ['precio', 'precio venta', 'precio de venta', 'precio unitario', 'valor', 'valor unitario', 'costo', 'pvp', 'monto', 'precio clp', 'precio lista', 'precio publico'],
+  stock: ['stock', 'stock actual', 'stock disponible', 'cantidad', 'cantidad disponible', 'existencias', 'unidades', 'inventario', 'saldo', 'disponible', 'stock fisico'],
+  format: ['formato', 'presentacion', 'tamano', 'tamano envase', 'medida', 'contenido', 'envase', 'volumen', 'peso', 'capacidad'],
+  description: ['descripcion', 'descripcion producto', 'detalle', 'caracteristicas', 'dosis', 'modo de uso', 'modo uso', 'modouso', 'uso', 'informacion', 'observaciones', 'composicion', 'beneficios'],
+  usage: ['modo de uso', 'modo uso', 'modouso', 'dosis', 'dosis recomendada', 'aplicacion', 'instrucciones', 'uso recomendado', 'forma de uso'],
+  recommendations: ['recomendaciones', 'recomendacion', 'consejos', 'observacion', 'notas'],
+  features: ['caracteristicas', 'beneficios', 'propiedades', 'atributos', 'composicion'],
+  image: ['imagen', 'foto', 'fotografia', 'url imagen', 'imagen url', 'link imagen', 'foto url', 'url foto'],
+  source: ['origen', 'fuente', 'source', 'generado por ia', 'generadopor ia', 'generadoPorIA']
+}
+
+const RECORD_ALIASES = {
+  clientes: {
+    id: ['id', 'id cliente', 'codigo', 'codigo cliente', 'rut', 'documento'],
+    nombre: ['nombre', 'nombre cliente', 'cliente', 'razon social', 'nombre completo', 'contacto'],
+    telefono: ['telefono', 'fono', 'celular', 'movil', 'whatsapp', 'tel', 'numero'],
+    email: ['email', 'correo', 'correo electronico', 'e mail', 'mail'],
+    localidad: ['localidad', 'ciudad', 'comuna', 'region', 'direccion', 'zona', 'ubicacion'],
+    notas: ['notas', 'observaciones', 'comentarios', 'detalle']
+  },
+  plantas: {
+    id: ['id', 'id planta', 'codigo', 'codigo planta'],
+    nombre: ['nombre', 'planta', 'cultivo', 'nombre planta', 'nombre cultivo', 'especie'],
+    cientifico: ['nombre cientifico', 'nombrecientifico', 'cientifico', 'especie cientifica', 'taxonomia'],
+    tipo: ['tipo', 'categoria', 'familia', 'grupo', 'clasificacion'],
+    clima: ['clima', 'clima recomendado', 'ambiente'],
+    suelo: ['suelo', 'suelo recomendado', 'tipo suelo', 'sustrato'],
+    riego: ['riego', 'riego recomendado', 'frecuencia riego'],
+    temporada: ['temporada', 'epoca', 'epoca de siembra', 'siembra', 'cosecha'],
+    notas: ['notas', 'observaciones', 'detalle', 'cuidados']
+  },
+  ventas: {
+    id: ['id', 'id venta', 'codigo', 'codigo venta', 'folio', 'boleta', 'factura'],
+    fecha: ['fecha', 'fecha venta', 'dia', 'date'],
+    cliente: ['cliente', 'nombre cliente', 'comprador', 'razon social'],
+    producto: ['producto', 'articulo', 'item', 'insumo', 'descripcion'],
+    cantidad: ['cantidad', 'unidades', 'qty', 'cant'],
+    precioUnitario: ['precio unitario', 'preciounitario', 'precio', 'valor unitario', 'p unitario', 'precio venta'],
+    total: ['total', 'monto', 'importe', 'total clp', 'valor total', 'subtotal'],
+    estado: ['estado', 'situacion', 'status'],
+    canal: ['canal', 'medio', 'origen', 'vendedor', 'punto de venta']
+  },
+  asesorias: {
+    id: ['id', 'id asesoria', 'codigo', 'codigo asesoria', 'ticket'],
+    cliente: ['cliente', 'nombre cliente', 'solicitante', 'contacto'],
+    cultivo: ['cultivo', 'planta', 'especie', 'producto'],
+    consulta: ['consulta', 'problema', 'descripcion', 'detalle', 'motivo', 'requerimiento', 'mensaje'],
+    estado: ['estado', 'situacion', 'status'],
+    prioridad: ['prioridad', 'urgencia', 'nivel'],
+    recomendacion: ['recomendacion', 'respuesta', 'solucion', 'sugerencia', 'notas']
+  },
+  proveedores: {
+    id: ['id', 'id proveedor', 'codigo', 'codigo proveedor', 'rut'],
+    proveedor: ['proveedor', 'nombre', 'nombre proveedor', 'razon social', 'empresa', 'contacto'],
+    contacto: ['contacto', 'nombre contacto', 'vendedor', 'representante', 'persona'],
+    telefono: ['telefono', 'fono', 'celular', 'movil', 'whatsapp', 'tel'],
+    email: ['email', 'correo', 'correo electronico', 'mail'],
+    ciudad: ['ciudad', 'comuna', 'localidad', 'region', 'direccion'],
+    productos: ['productos', 'rubro', 'categoria', 'insumos', 'linea'],
+    condiciones: ['condiciones', 'condiciones de pago', 'plazo', 'notas', 'observaciones']
+  },
+  pedidos: {
+    id: ['id', 'id pedido', 'codigo', 'folio', 'numero'],
+    fecha: ['fecha', 'dia', 'date'],
+    cliente: ['cliente', 'nombre cliente', 'comprador'],
+    producto: ['producto', 'articulo', 'item', 'insumo'],
+    cantidad: ['cantidad', 'unidades', 'qty', 'cant'],
+    total: ['total', 'monto', 'importe', 'valor total'],
+    estado: ['estado', 'situacion', 'status'],
+    notas: ['notas', 'observaciones', 'detalle']
+  }
+}
+
+const ALL_ALIASES = (() => {
+  const merged = { ...PRODUCT_ALIASES }
+  Object.values(RECORD_ALIASES).forEach((aliases) => {
+    Object.entries(aliases).forEach(([field, list]) => {
+      merged[field] = Array.from(new Set([...(merged[field] || []), ...list]))
+    })
+  })
+  return merged
+})()
+
+const FIELD_RULES = {
+  previousPrice: { require: /anterior|antes|normal|regular|lista|antiguo/ },
+  price: { reject: /anterior|antes|normal|regular|lista|antiguo/ },
+  stock: { reject: /minimo|minima|min/ }
+}
+
+function hasValue(value) {
+  if (value === null || value === undefined) return false
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (typeof value === 'boolean') return true
+  if (value instanceof Date) return !Number.isNaN(value.getTime())
+  const text = String(value).replace(/\u00a0/g, ' ').trim()
+  if (!text || /^[-–—]+$/.test(text)) return false
+  if (/^(n\/?a|sin dato|no aplica|pendiente|sin informacion|sin información)$/i.test(text)) return false
+  if (/^[\s$.,;:/\\|-]*$/.test(text)) return false
+  if (/^(clp|ars|usd|peso|pesos|monto|precio|valor)$/i.test(text)) return false
+  return /[a-z0-9]/i.test(text.normalize('NFD').replace(/[\u0300-\u036f]/g, ''))
+}
+
+function readNumber(value) {
+  return hasValue(value) ? toNumber(value) : 0
+}
+
+function formatDateCell(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10)
+  if (typeof value === 'number' && value > 20000 && value < 90000) {
+    const date = XLSX.SSF.parse_date_code(value)
+    if (date) return `${date.y}-${String(date.m).padStart(2, '0')}-${String(date.d).padStart(2, '0')}`
+  }
+  return cleanCell(value)
+}
+
+function aliasScore(header, alias) {
+  if (!header || !alias) return 0
+  if (header === alias) return 1000 + alias.length
+  const headerWords = header.split(' ').filter(Boolean)
+  const aliasWords = alias.split(' ').filter(Boolean)
+  if (` ${header} `.includes(` ${alias} `)) return 600 + alias.length
+  if (aliasWords.length > 1 && aliasWords.every((word) => headerWords.includes(word))) return 520 + alias.length
+  if (header.length >= 4 && alias.includes(header)) return 320 + header.length
+  const overlap = aliasWords.filter((word) => headerWords.includes(word)).length
+  if (overlap) return 100 + overlap * 20 + Math.min(header.length, alias.length)
+  return 0
+}
+
+function fieldAllowed(field, header) {
+  const rule = FIELD_RULES[field]
+  if (!rule) return true
+  if (rule.reject && rule.reject.test(header)) return false
+  if (rule.require && !rule.require.test(header)) return false
+  return true
+}
+
+export function matchColumns(headerRow, aliases) {
+  const headers = headerRow.map((cell) => normalizeHeader(cell))
+  const mapping = {}
+  const used = new Set()
+  const reuse = new Set(['usage', 'features'])
+  const order = ['id', 'name', 'previousPrice', 'price', 'stock', 'category', 'format', 'description', 'usage', 'recommendations', 'features', 'image']
+  const fields = order.filter((field) => aliases[field])
+  Object.keys(aliases).forEach((field) => { if (!fields.includes(field)) fields.push(field) })
+  fields.forEach((field) => {
+    let best = { index: -1, score: 0 }
+    headers.forEach((header, index) => {
+      if (!header || (used.has(index) && !reuse.has(field))) return
+      if (!fieldAllowed(field, header)) return
+      aliases[field].forEach((alias) => {
+        const score = aliasScore(header, normalizeHeader(alias))
+        if (score > best.score) best = { index, score }
+      })
+    })
+    if (best.index >= 0) {
+      mapping[field] = best.index
+      used.add(best.index)
+    }
+  })
+  return mapping
+}
+
+export function findHeaderRow(matrix, aliases, maxRows = 15) {
+  const limit = Math.min(matrix.length, maxRows)
+  let best = null
+  for (let index = 0; index < limit; index += 1) {
+    const row = matrix[index] || []
+    const nonEmpty = row.filter(hasValue).length
+    if (nonEmpty < 1) continue
+    const mapping = matchColumns(row, aliases)
+    const recognized = Object.keys(mapping).length
+    const strong = Boolean(mapping.name || mapping.producto || mapping.precio || mapping.price || mapping.stock || mapping.id)
+    if (recognized < 2 && !(recognized === 1 && strong && nonEmpty <= 2)) continue
+    const score = recognized * 10 + Math.min(nonEmpty, 10) + (mapping.name ? 6 : 0) + (mapping.price || mapping.stock ? 4 : 0)
+    if (!best || score > best.score) best = { index, mapping, recognized, score, headers: row }
+  }
+  return best
+}
+
+function aliasesForKind(kind) {
+  if (kind === 'productos' || kind === 'inventario') return PRODUCT_ALIASES
+  return RECORD_ALIASES[kind] || ALL_ALIASES
+}
+
+function detectKindByName(name) {
+  const value = normalizeHeader(name)
+  if (!value) return ''
+  if (/pedido/.test(value)) return 'pedidos'
+  if (/proveedor|supplier/.test(value)) return 'proveedores'
+  if (/asesor|consulta/.test(value)) return 'asesorias'
+  if (/cliente|directorio/.test(value)) return 'clientes'
+  if (/planta|cultivo|vivero/.test(value)) return 'plantas'
+  // "inventario" contiene la cadena "venta": debe evaluarse antes que ventas.
+  if (/inventario|existencia|bodega|stock/.test(value)) return 'inventario'
+  if (/venta|factura|boleta/.test(value)) return 'ventas'
+  if (/producto|catalogo|articulo|insumo|precio/.test(value)) return 'productos'
+  return ''
+}
+
+function inferKind(mapping) {
+  if (mapping.proveedor) return 'proveedores'
+  if (mapping.consulta || mapping.cultivo) return 'asesorias'
+  if (mapping.cliente && mapping.producto) return 'ventas'
+  if (mapping.cliente) return 'clientes'
+  if (mapping.cientifico || mapping.planta) return 'plantas'
+  if (mapping.name && (mapping.price || mapping.stock || mapping.category)) return 'productos'
+  if (mapping.name) return 'productos'
+  return ''
+}
+
+function rowObject(row, mapping) {
+  const raw = {}
+  Object.entries(mapping).forEach(([field, index]) => { raw[field] = row[index] ?? '' })
+  return raw
+}
+
+function productFromRaw(raw, origin = 'Importado desde Excel') {
+  const pendingFields = []
+  const pricePresent = hasValue(raw.price)
+  const stockPresent = hasValue(raw.stock)
+  if (!pricePresent) pendingFields.push('price')
+  if (!stockPresent) pendingFields.push('stock')
+  let id = cleanCell(raw.id)
+  let name = cleanCell(raw.name)
+  if (!name && id) name = `Producto ${id}`
+  if (!name) return null
+  if (!id) id = makeId('producto')
+  const source = cleanCell(raw.source) || origin
+  const product = {
+    id,
+    name,
+    category: cleanCell(raw.category),
+    price: readNumber(raw.price),
+    previousPrice: readNumber(raw.previousPrice),
+    stock: readNumber(raw.stock),
+    format: cleanCell(raw.format),
+    description: cleanCell(raw.description),
+    usage: cleanCell(raw.usage) || cleanCell(raw.description),
+    recommendations: cleanCell(raw.recommendations),
+    features: cleanCell(raw.features),
+    image: cleanCell(raw.image),
+    source,
+    status: pendingFields.length ? 'Pendiente de completar' : 'Completo',
+    pendingFields
+  }
+  return product
+}
+
+function parseProductRows(rows, mapping, origin) {
+  const products = []
+  let invalid = 0
+  rows.forEach((row) => {
+    if (!row.some(hasValue)) return
+    const product = productFromRaw(rowObject(row, mapping), origin)
+    if (!product) { invalid += 1; return }
+    products.push(product)
+  })
+  return { products, invalid }
+}
+
+function recordFromRaw(kind, raw) {
+  const record = {}
+  const aliases = RECORD_ALIASES[kind] || {}
+  const numeric = new Set(['cantidad', 'precioUnitario', 'total'])
+  Object.keys(aliases).forEach((field) => {
+    if (field === 'id') return
+    const value = raw[field]
+    record[field] = numeric.has(field) ? (hasValue(value) ? toNumber(value) : '') : cleanCell(value)
+  })
+  if (record.fecha !== undefined) record.fecha = formatDateCell(raw.fecha)
+  const primary = kind === 'proveedores' ? 'proveedor' : kind === 'plantas' ? 'nombre' : 'cliente'
+  if (!record[primary]) {
+    const fallback = record.nombre || record.email || record.telefono || record.producto || record.consulta
+    if (fallback) record[primary] = fallback
+  }
+  if (!record[primary] && !Object.values(record).some(hasValue)) return null
+  if (!record[primary]) record[primary] = 'Sin nombre'
+  record.id = cleanCell(raw.id) || makeId(kind.slice(0, 3))
+  return record
+}
+
+function parseRecordRows(rows, mapping, kind) {
+  const records = []
+  rows.forEach((row) => {
+    if (!row.some(hasValue)) return
+    const record = recordFromRaw(kind, rowObject(row, mapping))
+    if (record) records.push(record)
+  })
+  return records
+}
+
+function dedupeProducts(list) {
+  const byId = new Map()
+  const byName = new Map()
+  const output = []
+  list.forEach((product) => {
+    const idKey = normalizeHeader(product.id)
+    const nameKey = normalizeHeader(product.name)
+    const existingIndex = byId.has(idKey) ? byId.get(idKey) : byName.has(nameKey) ? byName.get(nameKey) : -1
+    if (existingIndex >= 0) {
+      const current = output[existingIndex]
+      const pending = new Set(current.pendingFields || [])
+      const incomingPending = new Set(product.pendingFields || [])
+      ;['price', 'stock'].forEach((field) => {
+        if (pending.has(field) && !incomingPending.has(field)) pending.delete(field)
+      })
+      const merged = { ...current }
+      Object.entries(product).forEach(([field, value]) => {
+        if (['id', 'status', 'pendingFields'].includes(field)) return
+        if (field === 'price' || field === 'stock') {
+          // Solo se conserva el valor previo cuando la fila entrante no aporta el dato.
+          if (incomingPending.has(field) && !pending.has(field)) merged[field] = current[field]
+          else merged[field] = value
+          return
+        }
+        if (field === 'source') {
+          if (!current.source || current.source === 'Inventario Excel') merged[field] = value
+          return
+        }
+        if (value !== '' && value !== null && value !== undefined) merged[field] = value
+      })
+      merged.pendingFields = [...pending]
+      merged.status = merged.pendingFields.length ? 'Pendiente de completar' : 'Completo'
+      output[existingIndex] = merged
+    } else {
+      if (idKey) byId.set(idKey, output.length)
+      if (nameKey) byName.set(nameKey, output.length)
+      output.push(product)
+    }
+  })
+  return output
+}
+
+export function parseWorkbookImport(workbook, options = {}) {
+  const maxHeaderRows = Number(options.maxHeaderRows) || 15
+  const result = {
+    products: [],
+    records: { clientes: [], plantas: [], ventas: [], asesorias: [], proveedores: [], pedidos: [] },
+    sheets: [],
+    rows: 0,
+    rawRows: 0,
+    invalid: 0,
+    pending: 0,
+    irregularSheets: [],
+    needsAi: false,
+    rawText: ''
+  }
+  if (!workbook?.SheetNames?.length) return result
+  let rawRows = 0
+  workbook.SheetNames.forEach((sheetName) => {
+    const sheet = workbook.Sheets[sheetName]
+    if (!sheet) return
+    const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', blankrows: false })
+    if (!matrix.length) return
+    rawRows += matrix.length
+    let kind = detectKindByName(sheetName)
+    let aliases = aliasesForKind(kind || '')
+    let header = findHeaderRow(matrix, aliases, maxHeaderRows)
+    if (!header) {
+      aliases = ALL_ALIASES
+      header = findHeaderRow(matrix, aliases, maxHeaderRows)
+    }
+    if (!header) {
+      result.irregularSheets.push({ name: sheetName, rows: matrix.length })
+      return
+    }
+    let mapping = header.mapping
+    if (!kind) kind = inferKind(mapping)
+    if (!kind) {
+      result.irregularSheets.push({ name: sheetName, rows: matrix.length })
+      return
+    }
+    if (kind === 'productos' && !mapping.name) {
+      const retry = findHeaderRow(matrix, ALL_ALIASES, maxHeaderRows)
+      if (retry?.mapping?.name) { header = retry; mapping = retry.mapping }
+    }
+    const dataRows = matrix.slice(header.index + 1)
+    const nonEmptyRows = dataRows.filter((row) => row.some(hasValue))
+    let imported = 0
+    let invalid = 0
+    if (kind === 'productos' || kind === 'inventario') {
+      const parsed = parseProductRows(dataRows, mapping, kind === 'inventario' ? 'Inventario Excel' : 'Importado desde Excel')
+      result.products.push(...parsed.products)
+      imported = parsed.products.length
+      invalid = parsed.invalid
+    } else {
+      const parsed = parseRecordRows(dataRows, mapping, kind)
+      result.records[kind].push(...parsed)
+      imported = parsed.length
+    }
+    result.rows += nonEmptyRows.length
+    result.invalid += invalid
+    result.sheets.push({
+      name: sheetName,
+      kind,
+      headerRow: header.index + 1,
+      recognized: header.recognized,
+      imported,
+      irregular: false
+    })
+  })
+  result.products = dedupeProducts(result.products)
+  result.pending = result.products.filter((product) => product.status === 'Pendiente de completar').length
+  const recordCount = Object.values(result.records).reduce((sum, list) => sum + list.length, 0)
+  result.needsAi = !result.products.length && !recordCount && rawRows > 0
+  result.rawRows = rawRows
+  result.rawText = workbookToRawText(workbook)
+  return result
+}
+
+export function workbookToRawText(workbook, maxChars = 12000) {
+  if (!workbook?.SheetNames?.length) return ''
+  const chunks = []
+  workbook.SheetNames.forEach((sheetName) => {
+    const sheet = workbook.Sheets[sheetName]
+    if (!sheet) return
+    const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', blankrows: false })
+    if (!matrix.length) return
+    const lines = matrix.slice(0, 40).map((row) => row.map((cell) => {
+      if (cell instanceof Date) return formatDateCell(cell)
+      return cleanCell(cell)
+    }).join(' | ')).filter((line) => line.replace(/[|\s]/g, ''))
+    if (lines.length) chunks.push(`HOJA "${sheetName}":\n${lines.join('\n')}`)
+  })
+  return chunks.join('\n\n').slice(0, maxChars)
+}
+
+export function mergeImportedProducts(existing = [], incoming = []) {
+  const list = Array.isArray(existing) ? [...existing] : []
+  const byId = new Map()
+  const byName = new Map()
+  const refreshIndexes = () => {
+    byId.clear()
+    byName.clear()
+    list.forEach((product, index) => {
+      const idKey = normalizeHeader(product.id)
+      const nameKey = normalizeHeader(product.name)
+      if (idKey) byId.set(idKey, index)
+      if (nameKey) byName.set(nameKey, index)
+    })
+  }
+  refreshIndexes()
+  let added = 0
+  let updated = 0
+  incoming.forEach((product) => {
+    if (!product?.name) return
+    const idKey = normalizeHeader(product.id)
+    const nameKey = normalizeHeader(product.name)
+    const existingIndex = byId.has(idKey) ? byId.get(idKey) : byName.has(nameKey) ? byName.get(nameKey) : -1
+    if (existingIndex < 0) {
+      list.push(product)
+      added += 1
+      refreshIndexes()
+      return
+    }
+    const previous = list[existingIndex]
+    const merged = { ...previous }
+    const pendingFields = []
+    Object.entries(product).forEach(([field, value]) => {
+      if (['id', 'status', 'pendingFields'].includes(field)) return
+      if (field === 'price' || field === 'stock') {
+        const incomingPending = product.pendingFields?.includes(field)
+        const previousPending = previous.pendingFields?.includes(field) || !hasValue(previous[field])
+        if (incomingPending) {
+          if (previousPending) {
+            merged[field] = 0
+            pendingFields.push(field)
+          } else {
+            merged[field] = previous[field]
+          }
+        } else {
+          merged[field] = value
+        }
+        return
+      }
+      if (field === 'source' && previous.source && product.source === 'Importado desde Excel') return
+      if (value !== '' && value !== null && value !== undefined) merged[field] = value
+    })
+    merged.pendingFields = pendingFields
+    merged.status = pendingFields.length ? 'Pendiente de completar' : 'Completo'
+    list[existingIndex] = merged
+    updated += 1
+    refreshIndexes()
+  })
+  return { products: list, added, updated }
+}
+
+function recordKey(kind, record) {
+  // Se priorizan claves naturales para que un Excel se cruce con registros creados
+  // manualmente aunque el ID sea un UUID interno o un RUT distinto.
+  const id = normalizeHeader(record.id)
+  const natural = (value) => normalizeHeader(value)
+  if (kind === 'proveedores') {
+    const name = natural(record.proveedor)
+    return name ? `name:${name}` : `id:${id}`
+  }
+  if (kind === 'plantas') {
+    const name = natural(record.nombre)
+    return name ? `name:${name}` : `id:${id}`
+  }
+  if (kind === 'ventas' || kind === 'pedidos') {
+    return `sale:${natural(record.fecha)}|${natural(record.cliente)}|${natural(record.producto)}|${natural(record.total)}`
+  }
+  if (kind === 'asesorias') {
+    return `case:${natural(record.cliente)}|${natural(record.cultivo)}|${natural(record.consulta)}`
+  }
+  const name = natural(record.nombre || record.cliente)
+  if (name) return `name:${name}`
+  const email = natural(record.email)
+  if (email) return `email:${email}`
+  const phone = natural(record.telefono)
+  if (phone) return `phone:${phone}`
+  return `id:${id}`
+}
+
+export function mergeImportedRecords(existing = [], incoming = [], kind = 'clientes') {
+  const list = Array.isArray(existing) ? [...existing] : []
+  const indexByKey = new Map()
+  list.forEach((record, index) => indexByKey.set(recordKey(kind, record), index))
+  let added = 0
+  let updated = 0
+  incoming.forEach((record) => {
+    if (!record) return
+    const key = recordKey(kind, record)
+    const index = indexByKey.get(key)
+    if (index === undefined) {
+      list.push(record)
+      indexByKey.set(key, list.length - 1)
+      added += 1
+      return
+    }
+    const merged = { ...list[index], ...record, id: list[index].id || record.id }
+    list[index] = merged
+    updated += 1
+  })
+  return { records: list, added, updated }
+}
+
+export function normalizeImportedProducts(list = []) {
+  if (!Array.isArray(list)) return []
+  return list.map((item) => {
+    const mapping = matchColumns(Object.keys(item || {}), PRODUCT_ALIASES)
+    const raw = {}
+    Object.entries(mapping).forEach(([field, index]) => { raw[field] = Object.values(item)[index] })
+    return productFromRaw(raw, 'Importado desde Excel (IA)')
+  }).filter(Boolean)
+}
+
+export function normalizeImportedRecords(kind, list = []) {
+  if (!Array.isArray(list)) return []
+  const aliases = RECORD_ALIASES[kind] || {}
+  return list.map((item) => {
+    const mapping = matchColumns(Object.keys(item || {}), aliases)
+    const raw = {}
+    Object.entries(mapping).forEach(([field, index]) => { raw[field] = Object.values(item)[index] })
+    return recordFromRaw(kind, raw)
+  }).filter(Boolean)
+}
+
 export function productToRow(product) {
   return [
     cleanCell(product.id),

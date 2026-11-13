@@ -32,16 +32,19 @@ import {
   buildDemoProducts,
   buildSalesSheets,
   buildWorkbook,
-  cleanCell,
   extractPdfText,
+  mergeImportedProducts,
+  mergeImportedRecords,
   mergeWorkbookSheets,
+  normalizeImportedProducts,
+  normalizeImportedRecords,
   normalizeProduct,
   normalizeProducts,
   parseJsonBlock,
+  parseWorkbookImport,
   productToRow,
   simulateSales,
   summarizeSimulation,
-  toNumber,
   workbookBlob
 } from './ai-data.js'
 
@@ -50,7 +53,7 @@ const PROFILE_KEY = 'vitimax-profile-v1'
 const SETTINGS_KEY = 'vitimax-settings-v1'
 const CHAT_KEY = 'vitimax-assistant-chat-v1'
 const MODULES_KEY = 'vitimax-modules-v1'
-const EMPTY_MODULES = { pedidos: [], clientes: [], asesorias: [], contenido: [] }
+const EMPTY_MODULES = { pedidos: [], clientes: [], asesorias: [], contenido: [], ventas: [], plantas: [], proveedores: [] }
 
 function readLocalJson(key, fallback) {
   try {
@@ -60,20 +63,6 @@ function readLocalJson(key, fallback) {
     return fallback
   }
 }
-const fieldMap = {
-  name: ['nombre', 'producto', 'name'],
-  category: ['categoria', 'categoría', 'category'],
-  price: ['precio', 'price'],
-  previousPrice: ['precio anterior', 'precio_anterior', 'previousprice'],
-  stock: ['stock', 'existencias', 'cantidad'],
-  format: ['formato', 'tamaño', 'tamano', 'format'],
-  description: ['descripcion', 'descripción', 'description'],
-  usage: ['modo de uso', 'uso', 'usage'],
-  recommendations: ['recomendaciones', 'recommendations'],
-  features: ['caracteristicas', 'características', 'features'],
-  image: ['fotografia', 'fotografía', 'imagen', 'image', 'url imagen']
-}
-
 const emptyProduct = {
   name: '', category: '', price: '', previousPrice: '', stock: '',
   format: '', description: '', usage: '', recommendations: '', features: '', image: ''
@@ -88,25 +77,18 @@ function makeId() {
   return `vitimax-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 }
 
-function readProduct(row) {
-  const keys = Object.keys(row)
-  const find = (aliases) => {
-    const key = keys.find((candidate) => aliases.includes(normalize(candidate)))
-    return key ? row[key] : ''
-  }
-  const product = Object.fromEntries(Object.entries(fieldMap).map(([field, aliases]) => [field, find(aliases)]))
-  Object.keys(product).forEach((field) => {
-    if (!['price', 'previousPrice', 'stock'].includes(field)) product[field] = cleanCell(product[field])
-  })
-  product.price = product.price === '' ? '' : toNumber(product.price)
-  product.previousPrice = product.previousPrice === '' ? '' : toNumber(product.previousPrice)
-  product.stock = product.stock === '' ? '' : toNumber(product.stock)
-  return product
-}
-
 function money(value) {
   if (value === '' || value === null || value === undefined || Number.isNaN(Number(value))) return 'Pendiente'
   return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', maximumFractionDigits: 0 }).format(Number(value))
+}
+
+// Un producto importado puede tener 0 en precio/stock porque el Excel venía incompleto.
+// pendingFields evita mostrarlo como "sin stock" o precio real cuando en realidad falta el dato.
+function productPending(product, field) {
+  if (!product) return false
+  if (Array.isArray(product.pendingFields)) return product.pendingFields.includes(field)
+  const value = product[field]
+  return value === '' || value === null || value === undefined
 }
 
 function imageFileToDataUrl(file) {
@@ -502,6 +484,61 @@ async function askOpenRouterMessages({ messages, apiKey, tools, toolChoice, maxT
   return askOpenRouterChat({ messages, apiKey, tools, toolChoice, maxTokens, responseFormat })
 }
 
+const IMPORT_AI_SCHEMA_PROMPT = `Eres el importador universal de VITIMAX. Recibes las primeras filas de un Excel o CSV irregular y debes mapearlas al esquema de la aplicación.
+Devuelve SOLO un objeto JSON válido con esta forma exacta (omite las claves que no tengan datos y usa [] cuando no existan registros):
+{
+  "productos": [{"id": "", "nombre": "", "categoria": "", "precio": 0, "precioAnterior": 0, "stock": 0, "formato": "", "descripcion": "", "uso": "", "recomendaciones": "", "caracteristicas": "", "imagen": ""}],
+  "clientes": [{"id": "", "nombre": "", "telefono": "", "email": "", "localidad": "", "notas": ""}],
+  "plantas": [{"id": "", "nombre": "", "cientifico": "", "tipo": "", "clima": "", "suelo": "", "riego": "", "temporada": "", "notas": ""}],
+  "ventas": [{"id": "", "fecha": "", "cliente": "", "producto": "", "cantidad": 0, "precioUnitario": 0, "total": 0, "estado": "", "canal": ""}],
+  "asesorias": [{"id": "", "cliente": "", "cultivo": "", "consulta": "", "estado": "", "prioridad": "", "recomendacion": ""}],
+  "proveedores": [{"id": "", "proveedor": "", "contacto": "", "telefono": "", "email": "", "ciudad": "", "productos": "", "condiciones": ""}],
+  "pedidos": [{"id": "", "fecha": "", "cliente": "", "producto": "", "cantidad": 0, "total": 0, "estado": "", "notas": ""}]
+}
+Reglas:
+- Usa los datos reales de las filas. NO inventes nombres, precios ni stock.
+- Si un producto no trae precio o stock, usa 0; VITIMAX lo marcará como "Pendiente de completar".
+- Limpia símbolos de moneda ($, puntos, comas, CLP) y entrega números.
+- Reconoce encabezados por sinónimos (nombre/producto/artículo, precio/valor/costo, stock/cantidad/existencias, categoría/tipo/familia, código/SKU, descripción/dosis/uso).
+- No agregues explicaciones, markdown ni texto fuera del JSON.`
+
+async function importWorkbookWithAi(rawText, fileName, settings) {
+  if (!rawText) return null
+  const prompt = `${IMPORT_AI_SCHEMA_PROMPT}\n\nARCHIVO: ${fileName}\n\nFILAS DETECTADAS:\n${rawText}`
+  const directKey = resolveDirectKey(settings)
+  if (directKey) {
+    try {
+      const result = await askOpenRouterMessages({
+        messages: [
+          { role: 'system', content: 'Respondes únicamente con JSON válido, sin markdown ni explicaciones.' },
+          { role: 'user', content: prompt }
+        ],
+        apiKey: directKey,
+        maxTokens: 3200,
+        responseFormat: { type: 'json_object' }
+      })
+      const parsed = parseJsonBlock(result.content)
+      if (parsed) return parsed
+    } catch { /* se intenta el servidor opcional */ }
+  }
+  const aiUrl = resolveAiUrl(settings)
+  if (aiUrl) {
+    try {
+      const response = await fetchWithTimeout(`${aiUrl}/api/assistant`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: prompt, history: [], maxTokens: 3200 })
+      }, 120_000)
+      const data = await response.json().catch(() => ({}))
+      if (response.ok) {
+        const parsed = parseJsonBlock(data.text || data.reply || '')
+        if (parsed) return parsed
+      }
+    } catch { /* sin IA disponible */ }
+  }
+  return null
+}
+
 const GENERATION_SYSTEM_PROMPT = `Eres el generador de entregables de VITIMAX. Produces archivos reales, completos y listos para usar.
 Reglas:
 - Escribe siempre en español neutro.
@@ -623,6 +660,9 @@ const SECTION_META = {
   Inventario: { icon: Boxes, tone: 'blue' },
   Pedidos: { icon: ClipboardList, tone: 'amber' },
   Clientes: { icon: UsersRound, tone: 'sky' },
+  Ventas: { icon: TrendingUp, tone: 'green' },
+  Plantas: { icon: Leaf, tone: 'mint' },
+  Proveedores: { icon: Truck, tone: 'slate' },
   Asesorías: { icon: Sprout, tone: 'mint' },
   Contenido: { icon: Sparkles, tone: 'violet' },
   Configuración: { icon: Settings2, tone: 'slate' }
@@ -701,6 +741,89 @@ const MODULE_CONFIG = {
       { icon: Phone, label: 'Con teléfono', value: rows.filter((r) => r.telefono).length, detail: 'contacto directo', color: 'green' },
       { icon: Mail, label: 'Con correo', value: rows.filter((r) => r.email).length, detail: 'para novedades', color: 'purple' },
       { icon: MapPin, label: 'Localidades', value: new Set(rows.map((r) => r.localidad).filter(Boolean)).size, detail: 'zonas registradas', color: 'orange' }
+    ]
+  },
+  Ventas: {
+    key: 'ventas', icon: TrendingUp, tone: 'green', eyebrow: 'COMERCIAL · 08',
+    title: 'Ventas', singular: 'venta', addLabel: 'Nueva venta', listTitle: 'Ventas registradas',
+    description: 'Controla ingresos, productos vendidos y el canal de cada operación.',
+    emptyTitle: 'Todavía no hay ventas',
+    emptyText: 'Registra la primera venta o impórtala desde un Excel con hojas de Ventas.',
+    features: [[TrendingUp, 'Ingresos claros', 'Total por venta y suma acumulada.'], [ReceiptText, 'Detalle completo', 'Cliente, producto, cantidad y precio.'], [Wallet, 'Canales', 'Compara ventas por medio o vendedor.']],
+    fields: [
+      { key: 'fecha', label: 'Fecha', type: 'date' },
+      { key: 'cliente', label: 'Cliente', required: true, placeholder: 'Nombre del cliente' },
+      { key: 'producto', label: 'Producto', required: true, placeholder: 'Producto vendido' },
+      { key: 'cantidad', label: 'Cantidad', type: 'number', min: 0, placeholder: '1' },
+      { key: 'precioUnitario', label: 'Precio unitario', type: 'number', min: 0, placeholder: '0' },
+      { key: 'total', label: 'Total', type: 'number', min: 0, placeholder: '0' },
+      { key: 'estado', label: 'Estado', type: 'select', options: ['Pagada', 'Pendiente', 'Anulada'], default: 'Pagada' },
+      { key: 'canal', label: 'Canal', placeholder: 'Local, online, terreno...' }
+    ],
+    statusKey: 'estado',
+    primary: (r) => r.cliente || 'Cliente sin nombre',
+    secondary: (r) => [r.producto, r.cantidad ? `${r.cantidad} u.` : '', r.canal].filter(Boolean).join(' · ') || 'Producto pendiente',
+    meta: (r) => r.total !== '' && r.total !== undefined ? money(r.total) : 'Total pendiente',
+    stats: (rows) => [
+      { icon: TrendingUp, label: 'Ventas', value: rows.length, detail: 'registradas', color: 'green' },
+      { icon: Wallet, label: 'Ingresos', value: money(rows.reduce((sum, r) => sum + (Number(r.total) || 0), 0)), detail: 'suma total', color: 'blue' },
+      { icon: PackageCheck, label: 'Unidades', value: rows.reduce((sum, r) => sum + (Number(r.cantidad) || 0), 0), detail: 'productos vendidos', color: 'purple' },
+      { icon: Clock, label: 'Pendientes', value: rows.filter((r) => r.estado === 'Pendiente').length, detail: 'por cobrar', color: 'orange' }
+    ]
+  },
+  Plantas: {
+    key: 'plantas', icon: Leaf, tone: 'mint', eyebrow: 'CULTIVOS · 09',
+    title: 'Plantas', singular: 'planta', addLabel: 'Nueva planta', listTitle: 'Plantas y cultivos',
+    description: 'Organiza especies, clima, suelo, riego y temporada de cada cultivo.',
+    emptyTitle: 'Sin plantas registradas',
+    emptyText: 'Agrega una planta o importa una hoja de Plantas desde Excel.',
+    features: [[Leaf, 'Ficha botánica', 'Nombre científico y familia.'], [Sprout, 'Manejo', 'Suelo, riego y temporada.'], [BookOpen, 'Notas', 'Cuidados y observaciones.']],
+    fields: [
+      { key: 'nombre', label: 'Planta / cultivo', required: true, placeholder: 'Ej.: Tomate' },
+      { key: 'cientifico', label: 'Nombre científico', placeholder: 'Solanum lycopersicum' },
+      { key: 'tipo', label: 'Tipo', placeholder: 'Hortaliza, frutal, aromática...' },
+      { key: 'clima', label: 'Clima', placeholder: 'Templado, cálido...' },
+      { key: 'suelo', label: 'Suelo recomendado', placeholder: 'Franco, drenado...' },
+      { key: 'riego', label: 'Riego', placeholder: 'Frecuencia y forma de riego' },
+      { key: 'temporada', label: 'Temporada', placeholder: 'Primavera - verano' },
+      { key: 'notas', label: 'Notas', type: 'textarea', full: true, placeholder: 'Cuidados, plagas o información útil' }
+    ],
+    statusKey: null,
+    primary: (r) => r.nombre || 'Planta sin nombre',
+    secondary: (r) => [r.cientifico, r.tipo, r.clima].filter(Boolean).join(' · ') || 'Ficha pendiente',
+    meta: (r) => r.temporada || 'Sin temporada',
+    stats: (rows) => [
+      { icon: Leaf, label: 'Plantas', value: rows.length, detail: 'registradas', color: 'green' },
+      { icon: Tags, label: 'Tipos', value: new Set(rows.map((r) => r.tipo).filter(Boolean)).size, detail: 'categorías', color: 'blue' },
+      { icon: Sprout, label: 'Con nombre científico', value: rows.filter((r) => r.cientifico).length, detail: 'fichas botánicas', color: 'purple' },
+      { icon: CalendarDays, label: 'Temporadas', value: new Set(rows.map((r) => r.temporada).filter(Boolean)).size, detail: 'épocas distintas', color: 'orange' }
+    ]
+  },
+  Proveedores: {
+    key: 'proveedores', icon: Truck, tone: 'slate', eyebrow: 'ABASTECIMIENTO · 10',
+    title: 'Proveedores', singular: 'proveedor', addLabel: 'Nuevo proveedor', listTitle: 'Proveedores registrados',
+    description: 'Guarda contactos, productos y condiciones de tus proveedores.',
+    emptyTitle: 'Sin proveedores registrados',
+    emptyText: 'Agrega un proveedor o importa una hoja de Proveedores desde Excel.',
+    features: [[Truck, 'Contacto directo', 'Teléfono, correo y ciudad.'], [Boxes, 'Productos', 'Rubro o insumos que entrega.'], [Wallet, 'Condiciones', 'Pagos, plazos y entregas.']],
+    fields: [
+      { key: 'proveedor', label: 'Proveedor', required: true, placeholder: 'Nombre o empresa' },
+      { key: 'contacto', label: 'Contacto', placeholder: 'Persona de contacto' },
+      { key: 'telefono', label: 'Teléfono', placeholder: '+56 9 ...' },
+      { key: 'email', label: 'Correo', type: 'email', placeholder: 'proveedor@correo.com' },
+      { key: 'ciudad', label: 'Ciudad', placeholder: 'Ciudad o comuna' },
+      { key: 'productos', label: 'Productos / rubro', placeholder: 'Fertilizantes, sustratos...' },
+      { key: 'condiciones', label: 'Condiciones', type: 'textarea', full: true, placeholder: 'Pago, plazos, entregas' }
+    ],
+    statusKey: null,
+    primary: (r) => r.proveedor || 'Proveedor sin nombre',
+    secondary: (r) => [r.contacto, r.telefono, r.ciudad].filter(Boolean).join(' · ') || 'Sin datos de contacto',
+    meta: (r) => r.productos || 'Rubro pendiente',
+    stats: (rows) => [
+      { icon: Truck, label: 'Proveedores', value: rows.length, detail: 'registrados', color: 'green' },
+      { icon: Phone, label: 'Con teléfono', value: rows.filter((r) => r.telefono).length, detail: 'contacto directo', color: 'blue' },
+      { icon: Mail, label: 'Con correo', value: rows.filter((r) => r.email).length, detail: 'para pedidos', color: 'purple' },
+      { icon: MapPin, label: 'Ciudades', value: new Set(rows.map((r) => r.ciudad).filter(Boolean)).size, detail: 'zonas cubiertas', color: 'orange' }
     ]
   },
   Asesorías: {
@@ -1012,8 +1135,8 @@ function App({ user, onSignOut, guest = false }) {
     const haystack = Object.values(p).join(' ').toLowerCase()
     return haystack.includes(query.toLowerCase()) && (category === 'Todas' || p.category === category)
   }), [products, query, category])
-  const lowStock = products.filter((p) => Number(p.stock) > 0 && Number(p.stock) <= 5)
-  const missingData = products.filter((p) => !p.name || p.price === '' || p.stock === '')
+  const lowStock = products.filter((p) => !productPending(p, 'stock') && Number(p.stock) > 0 && Number(p.stock) <= 5)
+  const missingData = products.filter((p) => !p.name || productPending(p, 'price') || productPending(p, 'stock'))
 
   function navigate(item) { setActive(item); setQuery(''); setMobileMenuOpen(false); setOverlay(null) }
   function saveModuleRecord(moduleKey, values, existing) {
@@ -1117,7 +1240,7 @@ function App({ user, onSignOut, guest = false }) {
       `Categoría: ${item.category || 'Pendiente'}`,
       `Formato: ${item.format || 'Pendiente'}`,
       `Precio: ${money(item.price)}`,
-      `Stock: ${item.stock === '' ? 'Pendiente' : item.stock}`,
+      `Stock: ${productPending(item, 'stock') ? 'Pendiente' : item.stock}`,
       `Descripción: ${item.description || 'Pendiente'}`
     ].join(' | ')).join('\n')
     const body = String(aiText || '').trim() || `Catálogo VITIMAX\n\n${catalogText}\n\n${products.length ? '' : 'Datos de ejemplo generados por IA. No son información oficial de VITIMAX.'}`
@@ -1182,7 +1305,7 @@ function App({ user, onSignOut, guest = false }) {
     setNotice(`${type === 'ppt' ? 'PowerPoint' : type === 'word' ? 'Word' : type.toUpperCase()} generado y guardado`)
     return saved || { filename, location: '' }
   }
-  function importExcel(event) {
+  async function importExcel(event) {
     const file = event.target.files?.[0]
     if (!file) return
     const reset = () => { event.target.value = '' }
@@ -1192,50 +1315,86 @@ function App({ user, onSignOut, guest = false }) {
       return
     }
     const isCsv = /\.csv$/i.test(file.name) || /csv/i.test(file.type)
-    const reader = new FileReader()
-    reader.onerror = () => {
-      setNotice(`No se pudo leer "${file.name}". Prueba a guardarlo de nuevo como .xlsx o .csv.`)
-      reset()
-    }
-    reader.onload = (loadEvent) => {
-      try {
-        const workbook = isCsv
-          ? XLSX.read(String(loadEvent.target.result || ''), { type: 'string' })
-          : XLSX.read(loadEvent.target.result, { type: 'array' })
-        if (!workbook.SheetNames.length) throw new Error('El archivo no contiene hojas.')
-        const preferred = workbook.SheetNames.find((name) => /producto|catalogo|catálogo|inventario/i.test(name))
-        const sheetName = preferred || workbook.SheetNames[0]
-        const sheet = workbook.Sheets[sheetName]
-        const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', blankrows: false })
-        if (!matrix.length) throw new Error('La hoja está vacía.')
-        const headerIndex = matrix.findIndex((row) => row.some((cell) => /^(nombre|producto|name|precio|price|categoria|categoría)$/i.test(String(cell || '').trim())))
-        const headerRow = matrix[headerIndex >= 0 ? headerIndex : 0].map((cell) => cleanCell(cell))
-        const dataRows = matrix.slice((headerIndex >= 0 ? headerIndex : 0) + 1)
-        const objects = dataRows.map((row) => Object.fromEntries(headerRow.map((key, index) => [key || `columna${index + 1}`, row[index] ?? ''])))
-        const parsed = objects.map(readProduct).filter((p) => Object.values(p).some((value) => value !== ''))
-        const invalid = parsed.filter((p) => !p.name).length
-        const valid = parsed.filter((p) => p.name)
-        const existing = new Map(products.map((p) => [normalize(p.name), p]))
-        let updated = 0
-        let added = 0
-        valid.forEach((product) => {
-          const key = normalize(product.name)
-          if (!key) return
-          if (existing.has(key)) { existing.set(key, { ...existing.get(key), ...product }); updated += 1 }
-          else { existing.set(key, { ...product, id: makeId() }); added += 1 }
-        })
-        setProducts([...existing.values()])
-        setImportReport({ rows: parsed.length, invalid, added, updated, missing: valid.filter((p) => p.price === '' || p.stock === '').length })
-        setActive('Catálogo')
-        setNotice(valid.length
-          ? `${added} agregados · ${updated} actualizados · ${invalid} filas sin nombre`
-          : `El archivo "${file.name}" se abrió, pero no se encontraron productos con columna Nombre/Producto.`)
-      } catch (error) {
-        setNotice(`No se pudo leer "${file.name}": ${error?.message || 'formato no reconocido'}. Usa .xlsx, .xls o .csv con una columna Nombre o Producto.`)
-      } finally { reset() }
-    }
-    if (isCsv) reader.readAsText(file)
-    else reader.readAsArrayBuffer(file)
+    try {
+      setNotice(`Analizando "${file.name}"…`)
+      const workbook = isCsv
+        ? XLSX.read(await file.text(), { type: 'string', cellDates: true })
+        : XLSX.read(new Uint8Array(await file.arrayBuffer()), { type: 'array', cellDates: true })
+      if (!workbook.SheetNames.length) throw new Error('El archivo no contiene hojas.')
+
+      let parsed = parseWorkbookImport(workbook)
+      let aiUsed = false
+
+      // Fallback: si no se reconoció ninguna tabla estándar, el BOT IA mapea las filas crudas.
+      if (parsed.needsAi) {
+        setNotice('Estructura irregular detectada · el BOT IA está analizando las filas…')
+        const aiRaw = await importWorkbookWithAi(parsed.rawText, file.name, settings)
+        if (aiRaw) {
+          const aiProducts = normalizeImportedProducts(aiRaw.productos || aiRaw.products || [])
+          const aiRecords = {}
+          ;['clientes', 'plantas', 'ventas', 'asesorias', 'proveedores', 'pedidos'].forEach((kind) => {
+            aiRecords[kind] = normalizeImportedRecords(kind, aiRaw[kind] || [])
+          })
+          const recordTotal = Object.values(aiRecords).reduce((sum, list) => sum + list.length, 0)
+          if (aiProducts.length || recordTotal) {
+            aiUsed = true
+            parsed = {
+              ...parsed,
+              products: aiProducts,
+              records: Object.fromEntries(Object.keys(parsed.records).map((kind) => [kind, aiRecords[kind] || []])),
+              pending: aiProducts.filter((product) => product.status === 'Pendiente de completar').length
+            }
+          }
+        }
+      }
+
+      const productMerge = mergeImportedProducts(products, parsed.products)
+      const nextRecords = { ...records }
+      const recordTotals = { added: 0, updated: 0 }
+      Object.entries(parsed.records).forEach(([kind, list]) => {
+        if (!list?.length) return
+        const merged = mergeImportedRecords(nextRecords[kind] || [], list, kind)
+        nextRecords[kind] = merged.records
+        recordTotals.added += merged.added
+        recordTotals.updated += merged.updated
+      })
+
+      if (!parsed.sheets.length && !parsed.products.length && !Object.values(parsed.records).some((list) => list?.length)) {
+        throw new Error(parsed.needsAi
+          ? 'La estructura es irregular y el BOT IA no pudo analizarla. Revisa la conexión o configura una clave de IA en Configuración.'
+          : 'No se reconoció ninguna tabla. Revisa que el archivo tenga encabezados como Nombre, Producto, Precio o Stock.')
+      }
+
+      setProducts(productMerge.products)
+      setRecords(nextRecords)
+      setImportReport({
+        fileName: file.name,
+        rows: parsed.rows || parsed.rawRows || 0,
+        added: productMerge.added,
+        updated: productMerge.updated,
+        missing: parsed.pending,
+        invalid: parsed.invalid,
+        sheets: parsed.sheets,
+        irregular: parsed.irregularSheets,
+        recordsAdded: recordTotals.added,
+        recordsUpdated: recordTotals.updated,
+        aiUsed
+      })
+
+      const sectionByKind = { clientes: 'Clientes', plantas: 'Plantas', ventas: 'Ventas', asesorias: 'Asesorías', proveedores: 'Proveedores', pedidos: 'Pedidos' }
+      const importedKind = Object.entries(parsed.records).find(([, list]) => list?.length)?.[0]
+      setActive(parsed.products.length ? 'Catálogo' : sectionByKind[importedKind] || 'Resumen')
+
+      const pieces = []
+      if (productMerge.added) pieces.push(`${productMerge.added} producto(s) agregado(s)`)
+      if (productMerge.updated) pieces.push(`${productMerge.updated} actualizado(s)`)
+      if (recordTotals.added) pieces.push(`${recordTotals.added} registro(s) agregado(s)`)
+      if (parsed.pending) pieces.push(`${parsed.pending} pendiente(s) de completar`)
+      if (aiUsed) pieces.push('mapeado por el BOT IA')
+      setNotice(pieces.length ? pieces.join(' · ') : `El archivo "${file.name}" se leyó, pero no aportó registros nuevos.`)
+    } catch (error) {
+      setNotice(`No se pudo importar "${file.name}": ${error?.message || 'formato no reconocido'}.`)
+    } finally { reset() }
   }
   async function uploadProductImage(file, productId) {
     const readLocal = () => new Promise((resolve, reject) => {
@@ -1324,7 +1483,7 @@ function App({ user, onSignOut, guest = false }) {
     const slug = normalize(pageData.name || 'pagina-vitimax').replace(/\s+/g, '-') || 'pagina-vitimax'
     const safe = (value, fallback = '') => escapeHtml(value || fallback)
     const safeImage = pageData.image && /^(https?:|data:image\/)/i.test(pageData.image) ? escapeHtml(pageData.image) : ''
-    const template = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safe(pageData.name, 'VITIMAX')}</title><style>body{font-family:Arial,sans-serif;margin:0;background:#f4f7f2;color:#173524}main{max-width:900px;margin:auto;padding:48px 24px}article{background:white;border-radius:24px;padding:32px;box-shadow:0 12px 40px #17352418}img{max-width:100%;max-height:360px;object-fit:contain;border-radius:16px}h1{font-size:clamp(2rem,5vw,4rem);margin:16px 0 8px}.tag{color:#4e8a52;text-transform:uppercase;font-weight:bold;letter-spacing:.12em}.price{font-size:1.6rem;font-weight:bold;margin:24px 0}a{display:inline-block;padding:14px 20px;border-radius:999px;background:#276b3b;color:#fff;text-decoration:none}</style></head><body><main><article>${safeImage ? `<img src="${safeImage}" alt="${safe(pageData.name, 'VITIMAX')}">` : ''}<div class="tag">${safe(pageData.category, 'VITIMAX')}</div><h1>${safe(pageData.name, 'VITIMAX')}</h1><p>${safe(pageData.description, 'Descripción pendiente de completar.')}</p>${pageData.price ? `<div class="price">${safe(money(pageData.price))}</div>` : ''}<p><strong>Formato:</strong> ${safe(pageData.format, 'Pendiente')}</p><p><strong>Modo de uso:</strong> ${safe(pageData.usage, 'Pendiente de ficha técnica.')}</p><p><strong>Disponibilidad:</strong> ${pageData.stock === '' ? 'Pendiente' : `${safe(pageData.stock)} unidades`}</p><a href="mailto:${safe(profile.email)}">Solicitar información</a></article></main></body></html>`
+    const template = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safe(pageData.name, 'VITIMAX')}</title><style>body{font-family:Arial,sans-serif;margin:0;background:#f4f7f2;color:#173524}main{max-width:900px;margin:auto;padding:48px 24px}article{background:white;border-radius:24px;padding:32px;box-shadow:0 12px 40px #17352418}img{max-width:100%;max-height:360px;object-fit:contain;border-radius:16px}h1{font-size:clamp(2rem,5vw,4rem);margin:16px 0 8px}.tag{color:#4e8a52;text-transform:uppercase;font-weight:bold;letter-spacing:.12em}.price{font-size:1.6rem;font-weight:bold;margin:24px 0}a{display:inline-block;padding:14px 20px;border-radius:999px;background:#276b3b;color:#fff;text-decoration:none}</style></head><body><main><article>${safeImage ? `<img src="${safeImage}" alt="${safe(pageData.name, 'VITIMAX')}">` : ''}<div class="tag">${safe(pageData.category, 'VITIMAX')}</div><h1>${safe(pageData.name, 'VITIMAX')}</h1><p>${safe(pageData.description, 'Descripción pendiente de completar.')}</p>${pageData.price ? `<div class="price">${safe(money(pageData.price))}</div>` : ''}<p><strong>Formato:</strong> ${safe(pageData.format, 'Pendiente')}</p><p><strong>Modo de uso:</strong> ${safe(pageData.usage, 'Pendiente de ficha técnica.')}</p><p><strong>Disponibilidad:</strong> ${productPending(pageData, 'stock') ? 'Pendiente' : `${safe(pageData.stock)} unidades`}</p><a href="mailto:${safe(profile.email)}">Solicitar información</a></article></main></body></html>`
     const html = aiHtml || template
     const filename = `pagina-${slug}.html`
     const saved = await saveBlob(new Blob([html], { type: 'text/html;charset=utf-8' }), filename)
@@ -1447,14 +1606,14 @@ function App({ user, onSignOut, guest = false }) {
       response = `INFORME DE INVENTARIO\n\nProductos registrados: ${workingProducts.length}\nUnidades contabilizadas: ${workingProducts.reduce((sum, item) => sum + (Number(item.stock) || 0), 0)}\nStock bajo: ${low.length}\n\n${low.length ? `Requieren atención: ${low.map((item) => `${item.name || 'Sin nombre'} (${item.stock})`).join(', ')}` : 'No hay productos dentro del umbral configurado.'}`
     } else if (promptNormalized.includes('descripcion') || promptNormalized.includes('publicacion') || promptNormalized.includes('redes') || promptNormalized.includes('contenido')) {
       response = product
-        ? `BORRADOR DE CONTENIDO\n\n${product.name || 'Producto pendiente'}\n\n${product.description || 'La descripción todavía está pendiente de completar.'}\n\nDatos disponibles: ${[product.category, product.format, product.features].filter(Boolean).join(' · ') || 'Sin características registradas.'}\n\nPrecio: ${money(product.price)} · Stock: ${product.stock === '' ? 'Pendiente' : product.stock}`
+        ? `BORRADOR DE CONTENIDO\n\n${product.name || 'Producto pendiente'}\n\n${product.description || 'La descripción todavía está pendiente de completar.'}\n\nDatos disponibles: ${[product.category, product.format, product.features].filter(Boolean).join(' · ') || 'Sin características registradas.'}\n\nPrecio: ${money(product.price)} · Stock: ${productPending(product, 'stock') ? 'Pendiente' : product.stock}`
         : 'Puedo redactar el contenido que necesites. Si quieres que use un producto del catálogo, escribe su nombre.'
     } else if (promptNormalized.includes('dosis') || promptNormalized.includes('aplicar') || promptNormalized.includes('tratamiento') || promptNormalized.includes('sirve')) {
       response = product
         ? `INFORMACIÓN DE ${product.name || 'PRODUCTO'}\n\nModo de uso: ${product.usage || 'Pendiente de ficha técnica.'}\nRecomendaciones: ${product.recommendations || 'Pendientes de ficha técnica.'}\n\nVerifica siempre la etiqueta oficial y consulta a un especialista antes de aplicar cualquier producto.`
         : 'Puedo darte una orientación general o generar una ficha de ejemplo. Confirma siempre la dosis con la etiqueta oficial y un especialista.'
     } else {
-      response = `Encontré ${matches.length} coincidencia(s) en el catálogo.${matches.length ? `\n\n${matches.slice(0, 5).map((item) => `• ${item.name || 'Sin nombre'} · ${money(item.price)} · Stock: ${item.stock === '' ? 'Pendiente' : item.stock}`).join('\n')}` : '\n\nNo encontré coincidencias exactas. Puedo buscar en el catálogo, generar datos de ejemplo o crear el archivo que necesites.'}`
+      response = `Encontré ${matches.length} coincidencia(s) en el catálogo.${matches.length ? `\n\n${matches.slice(0, 5).map((item) => `• ${item.name || 'Sin nombre'} · ${money(item.price)} · Stock: ${productPending(item, 'stock') ? 'Pendiente' : item.stock}`).join('\n')}` : '\n\nNo encontré coincidencias exactas. Puedo buscar en el catálogo, generar datos de ejemplo o crear el archivo que necesites.'}`
     }
     const localFallback = attachmentNote ? `${response}\n\n${attachmentNote}` : response
     const generateLocalFiles = async () => {
@@ -1837,6 +1996,9 @@ function App({ user, onSignOut, guest = false }) {
   const moduleCounts = {
     Pedidos: (records.pedidos || []).filter((row) => row.estado === 'Pendiente').length,
     Clientes: (records.clientes || []).length,
+    Ventas: (records.ventas || []).length,
+    Plantas: (records.plantas || []).length,
+    Proveedores: (records.proveedores || []).length,
     Asesorías: (records.asesorias || []).filter((row) => row.estado === 'Abierta').length,
     Contenido: (records.contenido || []).filter((row) => row.estado === 'Borrador').length
   }
@@ -1857,10 +2019,10 @@ function App({ user, onSignOut, guest = false }) {
         {active === 'Informe' && <ApplicationReport products={products} lowStock={lowStock} missingData={missingData} guest={guest} />}
         {active === 'Catálogo' && <Catalog products={filtered} allProducts={products} categories={categories} query={query} setQuery={setQuery} category={category} setCategory={setCategory} onImport={canManage ? () => fileRef.current?.click() : undefined} onExport={canManage ? exportProducts : undefined} onTemplate={canManage ? downloadTemplate : undefined} onCreate={canManage ? () => { setEditing(null); setShowProduct(true) } : undefined} onEdit={canManage ? (p) => { setEditing(p); setShowProduct(true) } : undefined} onDelete={canManage ? (id) => setProducts((all) => all.filter((p) => p.id !== id)) : undefined} readOnly={guest} />}
         {active === 'Inventario' && <Inventory products={products} lowStock={lowStock} onImport={canManage ? () => fileRef.current?.click() : undefined} readOnly={guest} />}
-        {['Pedidos', 'Clientes', 'Asesorías', 'Contenido'].includes(active) && <ModulePage config={MODULE_CONFIG[active]} rows={records[MODULE_CONFIG[active].key] || []} onCreate={canManage ? () => setModuleModal({ module: active, record: null }) : undefined} onEdit={canManage ? (record) => setModuleModal({ module: active, record }) : undefined} onDelete={canManage ? (id) => deleteModuleRecord(MODULE_CONFIG[active].key, id) : undefined} readOnly={guest} onAssistant={active === 'Asesorías' || active === 'Contenido' ? () => setAssistantOpen(true) : undefined} />}
+        {['Pedidos', 'Clientes', 'Asesorías', 'Contenido', 'Ventas', 'Plantas', 'Proveedores'].includes(active) && <ModulePage config={MODULE_CONFIG[active]} rows={records[MODULE_CONFIG[active].key] || []} onCreate={canManage ? () => setModuleModal({ module: active, record: null }) : undefined} onEdit={canManage ? (record) => setModuleModal({ module: active, record }) : undefined} onDelete={canManage ? (id) => deleteModuleRecord(MODULE_CONFIG[active].key, id) : undefined} readOnly={guest} onAssistant={active === 'Asesorías' || active === 'Contenido' ? () => setAssistantOpen(true) : undefined} />}
       </div>
     </main>
-    <input ref={fileRef} type="file" accept=".xlsx,.xls" hidden onChange={importExcel} />
+    <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv" hidden onChange={importExcel} />
     {notice && <div className="toast"><PackageCheck size={18} />{notice}</div>}
     {mobileMenuOpen && <button className="drawer-backdrop" aria-label="Cerrar menú" onClick={() => setMobileMenuOpen(false)} />}
     {overlay === 'profile' && <ProfileModal profile={profile} onClose={() => setOverlay(null)} onSave={saveProfile} onSignOut={() => { setOverlay(null); setMobileMenuOpen(false); onSignOut?.() }} />}
@@ -2059,8 +2221,10 @@ function Catalog({ products, allProducts, categories, query, setQuery, category,
 
 function ProductCard({ product, onEdit, onDelete, readOnly }) {
   const stock = Number(product.stock) || 0
-  const stockLabel = product.stock === '' || product.stock === null || product.stock === undefined ? 'Stock pendiente' : stock <= 0 ? 'Sin stock' : stock <= 5 ? `${stock} · stock bajo` : `${stock} en stock`
-  const stockClass = product.stock === '' || product.stock === null || product.stock === undefined ? 'pending' : stock <= 0 ? 'out' : stock <= 5 ? 'low' : 'available'
+  const stockPending = productPending(product, 'stock')
+  const pricePending = productPending(product, 'price')
+  const stockLabel = stockPending ? 'Stock pendiente' : stock <= 0 ? 'Sin stock' : stock <= 5 ? `${stock} · stock bajo` : `${stock} en stock`
+  const stockClass = stockPending ? 'pending' : stock <= 0 ? 'out' : stock <= 5 ? 'low' : 'available'
   return <article className="product-card">
     <div className="card-image">
       {product.image ? <img src={product.image} alt="" /> : <><Leaf size={37} /><span>Foto pendiente</span></>}
@@ -2070,9 +2234,10 @@ function ProductCard({ product, onEdit, onDelete, readOnly }) {
     <div className="card-body">
       <div className="category-label"><Tags size={12} /> {product.category || 'Categoría pendiente'}</div>
       <h3>{product.name || 'Producto sin nombre'}</h3>
+      {product.status === 'Pendiente de completar' && <span className="pending-badge">Pendiente de completar</span>}
       <p>{product.description || 'Descripción pendiente de completar.'}</p>
       <div className="card-footer">
-        <strong>{money(product.price)}</strong>
+        <strong className={pricePending ? 'price-pending' : undefined}>{pricePending ? 'Precio pendiente' : money(product.price)}</strong>
         {!readOnly && <div className="product-actions"><button className="link-btn" onClick={() => onEdit(product)}>Editar <ChevronRight size={14} /></button><button className="link-btn danger-link" onClick={() => onDelete(product.id)}><Trash2 size={14} /> Eliminar</button></div>}
       </div>
     </div>
@@ -2083,14 +2248,14 @@ function Inventory({ products, lowStock, onImport, readOnly }) {
   const [search, setSearch] = useState('')
   const [view, setView] = useState('Todos')
   const totalStock = products.reduce((sum, product) => sum + (Number(product.stock) || 0), 0)
-  const outOfStock = products.filter((product) => product.stock !== '' && Number(product.stock) <= 0)
+  const outOfStock = products.filter((product) => !productPending(product, 'stock') && Number(product.stock) <= 0)
   const maxStock = Math.max(1, ...products.map((product) => Number(product.stock) || 0))
   const views = ['Todos', 'Stock bajo', 'Sin stock', 'En rango']
   const filtered = products.filter((product) => {
     const stock = Number(product.stock) || 0
-    const pending = product.stock === '' || product.stock === null || product.stock === undefined
+    const pending = productPending(product, 'stock')
     if (view === 'Stock bajo' && !(stock > 0 && stock <= 5)) return false
-    if (view === 'Sin stock' && !(product.stock !== '' && stock <= 0)) return false
+    if (view === 'Sin stock' && !(!pending && stock <= 0)) return false
     if (view === 'En rango' && (pending || stock <= 5)) return false
     if (!search.trim()) return true
     return `${product.name || ''} ${product.category || ''}`.toLowerCase().includes(search.trim().toLowerCase())
@@ -2112,13 +2277,13 @@ function Inventory({ products, lowStock, onImport, readOnly }) {
         </div>
         <div className="table-wrap"><table><thead><tr><th>Producto</th><th>Categoría</th><th>Precio</th><th>Stock actual</th><th>Estado</th></tr></thead><tbody>{filtered.map((p) => {
           const stock = Number(p.stock) || 0
-          const pending = p.stock === '' || p.stock === null || p.stock === undefined
+          const pending = productPending(p, 'stock')
           const tone = pending ? 'amber' : stock <= 0 ? 'red' : stock <= 5 ? 'amber' : 'green'
           const label = pending ? 'Revisar' : stock <= 0 ? 'Sin stock' : stock <= 5 ? 'Stock bajo' : 'En rango'
           return <tr key={p.id}>
             <td><strong>{p.name || 'Sin nombre'}</strong></td>
             <td>{p.category || 'Pendiente'}</td>
-            <td>{money(p.price)}</td>
+            <td>{productPending(p, 'price') ? 'Pendiente' : money(p.price)}</td>
             <td><div className="stock-cell"><span>{pending ? 'Pendiente' : stock}</span><div className="bar-track"><span className={`bar-${tone}`} style={{ width: `${pending ? 0 : Math.max(4, Math.round((stock / maxStock) * 100))}%` }} /></div></div></td>
             <td><span className={`table-status ${tone}`}>{label}</span></td>
           </tr>
@@ -2454,7 +2619,27 @@ function NotificationsModal({ lowStock, missingData, onClose }) {
 }
 
 function ImportReport({ report, onClose }) {
-  return <ModalShell title="Resultado de importación" eyebrow="EXCEL VALIDADO" onClose={onClose}><div className="import-summary"><Metric icon={FileSpreadsheet} label="Filas leídas" value={report.rows} detail="primera hoja" color="blue" /><Metric icon={Plus} label="Agregados" value={report.added} detail="nuevos registros" color="green" /><Metric icon={PackageCheck} label="Actualizados" value={report.updated} detail="sin duplicar" color="purple" /><Metric icon={CircleHelp} label="Pendientes" value={report.missing + report.invalid} detail={`${report.invalid} con error`} color="orange" /></div><p className="modal-note"><CircleHelp size={15} /> Los productos con precio o stock faltante permanecen marcados como pendientes. No se inventaron datos.</p><div className="modal-actions"><button className="btn primary" onClick={onClose}>Continuar</button></div></ModalShell>
+  const sheets = report.sheets || []
+  const irregular = report.irregular || []
+  return <ModalShell title="Resultado de importación" eyebrow="EXCEL VALIDADO" onClose={onClose}>
+    <div className="import-summary">
+      <Metric icon={FileSpreadsheet} label="Filas leídas" value={report.rows} detail={`${sheets.length} hoja(s)`} color="blue" />
+      <Metric icon={Plus} label="Productos" value={report.added} detail={`${report.updated} actualizados`} color="green" />
+      <Metric icon={PackageCheck} label="Registros" value={report.recordsAdded || 0} detail={`${report.recordsUpdated || 0} actualizados`} color="purple" />
+      <Metric icon={CircleHelp} label="Pendientes" value={report.missing + report.invalid} detail={`${report.invalid} sin nombre`} color="orange" />
+    </div>
+    {sheets.length > 0 && <div className="import-sheets">
+      <h4>Hojas procesadas</h4>
+      {sheets.map((sheet) => <div className="import-sheet-row" key={sheet.name}>
+        <span><FileSpreadsheet size={15} /> {sheet.name}</span>
+        <small>{sheet.kind} · encabezado en fila {sheet.headerRow} · {sheet.imported} registro(s)</small>
+      </div>)}
+    </div>}
+    {irregular.length > 0 && <p className="modal-note"><AlertTriangle size={15} /> {irregular.length} hoja(s) sin tabla reconocible: {irregular.map((item) => item.name).join(', ')}.</p>}
+    {report.aiUsed && <p className="modal-note"><Bot size={15} /> La estructura era irregular y el BOT IA mapeó las filas al esquema VITIMAX.</p>}
+    <p className="modal-note"><CircleHelp size={15} /> Los productos con precio o stock faltante se guardaron con 0 y quedaron como "Pendiente de completar". No se inventaron datos.</p>
+    <div className="modal-actions"><button className="btn primary" onClick={onClose}>Continuar</button></div>
+  </ModalShell>
 }
 
 function ProductModal({ product, onClose, onSave, onDelete, saving }) {

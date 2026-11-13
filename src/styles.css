@@ -411,6 +411,14 @@ button,.btn,.nav-item,.icon-btn,.user-chip{touch-action:manipulation}
 .stock-badge.low{background:#fbe9d3;color:#a9752f}
 .stock-badge.out{background:#f8e1dd;color:#b0564a}
 .stock-badge.pending{background:#eef1ef;color:#7c9086}
+.price-pending{color:#a9752f!important;font-size:12px!important}
+.pending-badge{display:inline-flex;align-items:center;width:max-content;margin:2px 0 6px;padding:4px 8px;border-radius:20px;background:#fbe9d3;color:#a9752f;font-size:10px;font-weight:700;letter-spacing:.02em}
+.import-sheets{margin:6px 0 14px;padding:12px;border:1px solid #e3ebe6;border-radius:10px;background:#f8faf8}
+.import-sheets h4{margin:0 0 8px;font:700 12px Manrope;color:#173524}
+.import-sheet-row{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-top:1px solid #e9f0eb;font-size:12px}
+.import-sheet-row:first-of-type{border-top:0}
+.import-sheet-row span{display:inline-flex;align-items:center;gap:6px;font-weight:700;color:#24503c}
+.import-sheet-row small{color:#7b8f84;text-align:right}
 .card-menu{transition:background .18s,color .18s,box-shadow .18s;box-shadow:0 2px 8px rgba(23,60,44,.12)}
 .card-menu:hover{background:#123d2b;color:#fff}
 
