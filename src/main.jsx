@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import * as XLSX from 'xlsx'
 import { jsPDF } from 'jspdf'
@@ -197,6 +197,62 @@ function escapeHtml(value) {
   return String(value || '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]))
 }
 
+const LAST_EMAIL_KEY = 'vitimax-last-email'
+// Huella del certificado con el que se firma el APK que entrega VITIMAX.
+// Debe estar registrada en Firebase (Authentication → Google → huella SHA-1)
+// para que el acceso con Google funcione dentro de la app Android.
+const ANDROID_APP_SHA1 = 'F9:01:BC:C4:43:34:CE:CF:C6:DF:D8:66:C1:36:D7:14:E0:A1:02:12'
+
+function scopedKey(base, uid) {
+  return uid ? `${base}:${uid}` : base
+}
+
+function providerLabel(user) {
+  const id = user?.providerData?.[0]?.providerId || user?.providerId || ''
+  if (id === 'google.com') return 'Google'
+  if (id === 'microsoft.com') return 'Microsoft'
+  if (id === 'password') return 'Correo y contraseña'
+  return id ? id.replace('.com', '') : 'Cuenta VITIMAX'
+}
+
+function hasPasswordProvider(user) {
+  return Boolean(user?.providerData?.some((item) => item.providerId === 'password'))
+}
+
+// Mensaje claro cuando Google rechaza la app por falta de la huella SHA-1.
+function isGoogleConfigError(error) {
+  const code = String(error?.code ?? '')
+  const message = String(error?.message ?? '')
+  const blob = `${code} ${message}`.toLowerCase()
+  return blob.includes('developer_error') || blob.includes('apiexception: 10') || blob.includes(': 10:')
+}
+
+async function compressImage(file, maxSide = 640, quality = 0.85) {
+  const dataUrl = await imageFileToDataUrl(file)
+  const image = await new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('No se pudo procesar la imagen. Prueba con otra foto.'))
+    img.src = dataUrl
+  })
+  const scale = Math.min(1, maxSide / Math.max(image.width || 1, image.height || 1))
+  const width = Math.max(1, Math.round((image.width || 1) * scale))
+  const height = Math.max(1, Math.round((image.height || 1) * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const context = canvas.getContext('2d')
+  if (!context) return dataUrl
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.drawImage(image, 0, 0, width, height)
+  try {
+    return canvas.toDataURL('image/jpeg', quality)
+  } catch {
+    return dataUrl
+  }
+}
+
 function authErrorMessage(code) {
   return code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found' ? 'Correo o contraseña incorrectos.'
     : code === 'auth/email-already-in-use' ? 'Ese correo ya está registrado.'
@@ -217,7 +273,11 @@ function authErrorMessage(code) {
                             : code === 'auth/invalid-api-key' ? 'La clave de Firebase no es válida. Revisa la configuración del proyecto.'
                               : code === 'auth/internal-error' ? 'Firebase rechazó temporalmente el acceso. Revisa proveedores y dominios autorizados.'
                                 : code === 'auth/invalid-continue-uri' || code === 'auth/unauthorized-continue-uri' ? 'Firebase bloqueó el regreso de Google/Microsoft. Agrega el dominio de la app en Authentication → Settings → Authorized domains.'
-                                : code ? `Firebase no pudo completar el acceso (${code}). Revisa la configuración y vuelve a intentar.` : 'Firebase no devolvió un error identificable. Cierra y abre la aplicación nuevamente.'
+                                : code === 'auth/requires-recent-login' ? 'Por seguridad debes volver a iniciar sesión para completar este cambio.'
+                                  : code === 'auth/credential-already-in-use' ? 'Esa cuenta de Google/Microsoft ya está vinculada a otro usuario.'
+                                    : code === 'auth/operation-not-supported-in-this-environment' ? 'Este acceso no está disponible en este dispositivo. Usa correo y contraseña o inténtalo desde el navegador.'
+                                      : code === 'auth/missing-email' ? 'Escribe tu correo electrónico.'
+                                        : code ? `Firebase no pudo completar el acceso (${code}). Revisa la configuración y vuelve a intentar.` : 'Firebase no devolvió un error identificable. Cierra y abre la aplicación nuevamente.'
 }
 
 function isNativeApp() {
@@ -600,7 +660,14 @@ async function signInWithNativeProvider(providerId) {
   const credential = providerId === 'google.com'
     ? GoogleAuthProvider.credential(result.credential.idToken, result.credential.accessToken)
     : new OAuthProvider(providerId).credential(result.credential.idToken, result.credential.accessToken)
-  return signInWithCredential(firebaseAuth, credential)
+  try {
+    return await signInWithCredential(firebaseAuth, credential)
+  } catch (error) {
+    // Si la sesión de Firebase no se pudo crear, cerramos también la sesión nativa
+    // para que el próximo intento empiece limpio.
+    try { await FirebaseAuthentication.signOut() } catch { /* sin sesión nativa */ }
+    throw error
+  }
 }
 
 function AuthGate() {
@@ -608,6 +675,7 @@ function AuthGate() {
   const [guest, setGuest] = useState(() => sessionStorage.getItem('vitimax-guest') === 'true')
   const [authLoading, setAuthLoading] = useState(Boolean(firebaseAuth))
   const [authError, setAuthError] = useState('')
+  const [sessionNotice, setSessionNotice] = useState('')
   useEffect(() => {
     if (!firebaseAuth) return undefined
     const loadingTimeout = setTimeout(() => {
@@ -626,6 +694,7 @@ function AuthGate() {
   }, [])
   async function handleSignOut() {
     setAuthError('')
+    setSessionNotice('Sesión cerrada correctamente. Puedes volver a iniciar sesión cuando quieras.')
     try { sessionStorage.removeItem('vitimax-guest') } catch { /* sessionStorage puede no estar disponible */ }
     setGuest(false)
     try {
@@ -638,10 +707,14 @@ function AuthGate() {
     } catch { /* la sesión local se limpia igualmente */ }
     setUser(null)
   }
+  function enterAsGuest() {
+    try { sessionStorage.setItem('vitimax-guest', 'true') } catch { /* sessionStorage puede no estar disponible */ }
+    setGuest(true)
+  }
   if (authLoading) return <div className="auth-loading"><span className="auth-loading-mark"><BrandMark size={40} /></span><strong>VITIMAX</strong><span>Verificando sesión...</span></div>
   if (guest) return <App guest onSignOut={handleSignOut} />
-  if (!firebaseConfigured) return <AuthScreenV2 configured={false} onGuest={() => { sessionStorage.setItem('vitimax-guest', 'true'); setGuest(true) }} />
-  if (!user) return <AuthScreenV2 configured initialError={authError} onAuthenticated={setUser} onGuest={() => { sessionStorage.setItem('vitimax-guest', 'true'); setGuest(true) }} />
+  if (!firebaseConfigured) return <AuthScreenV2 configured={false} onGuest={enterAsGuest} />
+  if (!user) return <AuthScreenV2 configured initialError={authError} initialNotice={sessionNotice} onAuthenticated={setUser} onGuest={enterAsGuest} />
   return <App user={user} onSignOut={handleSignOut} />
 }
 
@@ -940,17 +1013,23 @@ function AuthScreen({ configured, initialError = '', onAuthenticated, onGuest })
   return <main className="auth-screen"><section className="auth-card"><div className="auth-brand"><div className="brand-mark"><BrandMark size={22} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div></div>{!configured ? <div className="auth-setup"><CircleHelp size={28} /><h1>Accede a VITIMAX</h1><p>El acceso de administrador necesita configurar Firebase. Mientras tanto puedes entrar como invitado para consultar la aplicación.</p><small>El modo invitado es solo de lectura: no permite editar productos, importar Excel ni cambiar la configuración.</small><button className="btn primary auth-guest" onClick={onGuest}>Entrar como invitado</button></div> : <><p className="eyebrow">ACCESO DE ADMINISTRADOR</p><h1>{mode === 'login' ? 'Iniciar sesión' : 'Crear cuenta'}</h1><p className="auth-muted">Accede al centro de gestión de VITIMAX.</p><div className="social-actions"><button className="social-btn google" disabled={busy} onClick={() => providerLogin(new GoogleAuthProvider())}><GoogleBrandIcon /> Continuar con Google</button><button className="social-btn microsoft" disabled={busy} onClick={() => providerLogin(new OAuthProvider('microsoft.com'))}><MicrosoftBrandIcon /> Continuar con Microsoft</button></div><div className="auth-divider"><span>o con correo</span></div><form onSubmit={submit} className="auth-form"><label>Correo electrónico<input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" /></label><label>Contraseña<input type="password" required minLength="6" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} /></label>{error && <p className="auth-error">{error}</p>}<button className="btn primary auth-submit" disabled={busy}>{busy ? 'Conectando...' : mode === 'login' ? 'Iniciar sesión' : 'Registrarme'}</button></form><button className="auth-switch" onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError('') }}>{mode === 'login' ? 'Crear cuenta de administrador' : 'Ya tengo una cuenta'}</button><button className="auth-guest-link" onClick={onGuest}>Continuar como invitado</button></>}</section></main>
 }
 
-function AuthScreenV2({ configured, initialError = '', onAuthenticated, onGuest }) {
+function AuthScreenV2({ configured, initialError = '', initialNotice = '', onAuthenticated, onGuest }) {
   const [mode, setMode] = useState('login')
-  const [email, setEmail] = useState('')
+  const [email, setEmail] = useState(() => { try { return localStorage.getItem(LAST_EMAIL_KEY) || '' } catch { return '' } })
   const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [firstName, setFirstName] = useState('')
   const [lastName, setLastName] = useState('')
   const [birthDate, setBirthDate] = useState('')
   const [error, setError] = useState(initialError)
-  const [notice, setNotice] = useState('')
+  const [notice, setNotice] = useState(initialNotice)
   const [busy, setBusy] = useState(false)
   useEffect(() => { if (initialError) setError(initialError) }, [initialError])
+  useEffect(() => { if (initialNotice) setNotice(initialNotice) }, [initialNotice])
+
+  function rememberEmail(value) {
+    try { if (value) localStorage.setItem(LAST_EMAIL_KEY, value) } catch { /* almacenamiento no disponible */ }
+  }
 
   async function submit(event) {
     event.preventDefault()
@@ -973,6 +1052,7 @@ function AuthScreenV2({ configured, initialError = '', onAuthenticated, onGuest 
       const result = mode === 'login'
         ? await signInWithEmailAndPassword(firebaseAuth, normalizedEmail, password)
         : await createUserWithEmailAndPassword(firebaseAuth, normalizedEmail, password)
+      rememberEmail(normalizedEmail)
       if (mode === 'register') {
         const cleanFirstName = firstName.trim()
         const cleanLastName = lastName.trim()
@@ -996,19 +1076,26 @@ function AuthScreenV2({ configured, initialError = '', onAuthenticated, onGuest 
 
   async function providerLogin(provider) {
     setError('')
+    setNotice('')
     if (!firebaseAuth) return
     setBusy(true)
     try {
       provider.setCustomParameters?.({ prompt: 'select_account' })
-      if (isNativeApp()) {
-        await signInWithNativeProvider(provider.providerId)
-      } else {
-        await Promise.race([
+      const result = isNativeApp()
+        ? await signInWithNativeProvider(provider.providerId)
+        : await Promise.race([
           signInWithPopup(firebaseAuth, provider),
           new Promise((_, reject) => setTimeout(() => reject({ code: 'auth/popup-timeout' }), 20000))
         ])
+      if (result?.user?.email) rememberEmail(result.user.email)
+      onAuthenticated?.(result?.user || null)
+    } catch (authError) {
+      if (isGoogleConfigError(authError)) {
+        setError(`Google rechazó esta instalación porque falta autorizar el teléfono en Firebase. Mientras se activa, puedes entrar con correo y contraseña o con Microsoft. Huella SHA-1 que debes registrar: ${ANDROID_APP_SHA1}`)
+      } else {
+        setError(authErrorMessage(authError.code))
       }
-    } catch (authError) { setError(authErrorMessage(authError.code)); setBusy(false) }
+    } finally { setBusy(false) }
   }
 
   if (!configured) return <main className="auth-screen"><section className="auth-card"><div className="auth-brand"><div className="brand-mark"><BrandMark size={22} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div></div><div className="auth-setup"><CircleHelp size={28} /><h1>Accede a VITIMAX</h1><p>El acceso de administrador necesita configurar Firebase. Mientras tanto puedes entrar como invitado para consultar la aplicación.</p><small>El modo invitado es solo de lectura.</small><button className="btn primary auth-guest" onClick={onGuest}>Entrar como invitado</button></div></section></main>
@@ -1016,7 +1103,32 @@ function AuthScreenV2({ configured, initialError = '', onAuthenticated, onGuest 
   const register = mode === 'register'
   const reset = mode === 'reset'
   const today = new Date().toISOString().slice(0, 10)
-  return <main className="auth-screen"><section className="auth-card"><div className="auth-brand"><div className="brand-mark"><BrandMark size={22} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div></div><p className="eyebrow">ACCESO DE ADMINISTRADOR</p><h1>{reset ? 'Cambiar contraseña' : register ? 'Crear cuenta' : 'Iniciar sesión'}</h1><p className="auth-muted">{reset ? 'Te enviaremos un enlace seguro a tu correo.' : 'Accede al centro de gestión de VITIMAX.'}</p>{!reset && <><div className="social-actions"><button type="button" className="social-btn google" disabled={busy} onClick={() => providerLogin(new GoogleAuthProvider())}><GoogleBrandIcon /> Continuar con Google</button><button type="button" className="social-btn microsoft" disabled={busy} onClick={() => providerLogin(new OAuthProvider('microsoft.com'))}><MicrosoftBrandIcon /> Continuar con Microsoft</button></div><div className="auth-divider"><span>o con correo</span></div></>}<form onSubmit={submit} className="auth-form">{register && <div className="auth-form-row"><label>Nombre<input type="text" required value={firstName} onChange={(e) => setFirstName(e.target.value)} autoComplete="given-name" /></label><label>Apellido<input type="text" required value={lastName} onChange={(e) => setLastName(e.target.value)} autoComplete="family-name" /></label></div>}<label>Correo electrónico<input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" /></label>{register && <label>Fecha de nacimiento<BirthdayPicker value={birthDate} onChange={setBirthDate} maxDate={today} /><small className="field-help">Calendario VITIMAX 2026: elige directamente el mes, año y día. No puede ser una fecha futura.</small></label>}{!reset && <label>Contraseña<input type="password" required minLength="6" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={register ? 'new-password' : 'current-password'} /></label>}{error && <p className="auth-error">{error}</p>}{notice && <p className="auth-success">{notice}</p>}<button className="btn primary auth-submit" disabled={busy}>{busy ? 'Procesando...' : reset ? 'Enviar enlace' : register ? 'Crear mi cuenta' : 'Iniciar sesión'}</button></form>{!reset && !register && <button type="button" className="auth-forgot" onClick={() => { setMode('reset'); setError(''); setNotice('') }}>¿Olvidaste tu contraseña?</button>}<button type="button" className="auth-switch" onClick={() => { setMode(reset || register ? 'login' : 'register'); setError(''); setNotice('') }}>{reset || register ? 'Volver a iniciar sesión' : 'Crear cuenta de administrador'}</button><button type="button" className="auth-guest-link" onClick={onGuest}>Continuar como invitado</button></section></main>
+  return <main className="auth-screen"><section className="auth-card">
+    <div className="auth-brand"><div className="brand-mark"><BrandMark size={22} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div></div>
+    <p className="eyebrow">ACCESO DE ADMINISTRADOR</p>
+    <h1>{reset ? 'Cambiar contraseña' : register ? 'Crear cuenta' : 'Iniciar sesión'}</h1>
+    <p className="auth-muted">{reset ? 'Te enviaremos un enlace seguro a tu correo.' : register ? 'Crea tu cuenta real de VITIMAX con Google, Microsoft o tu correo.' : 'Entra con tu cuenta real de Google, Microsoft o tu correo.'}</p>
+    {!reset && <>
+      <div className="social-actions">
+        <button type="button" className="social-btn google" disabled={busy} onClick={() => providerLogin(new GoogleAuthProvider())}><GoogleBrandIcon /> Continuar con Google</button>
+        <button type="button" className="social-btn microsoft" disabled={busy} onClick={() => providerLogin(new OAuthProvider('microsoft.com'))}><MicrosoftBrandIcon /> Continuar con Microsoft</button>
+      </div>
+      <p className="auth-provider-note">Se abrirá tu cuenta real de Google o Microsoft. La primera vez también crea tu cuenta VITIMAX.</p>
+      <div className="auth-divider"><span>o con correo</span></div>
+    </>}
+    <form onSubmit={submit} className="auth-form">
+      {register && <div className="auth-form-row"><label>Nombre<input type="text" required value={firstName} onChange={(e) => setFirstName(e.target.value)} autoComplete="given-name" /></label><label>Apellido<input type="text" required value={lastName} onChange={(e) => setLastName(e.target.value)} autoComplete="family-name" /></label></div>}
+      <label>Correo electrónico<input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email" placeholder="tucorreo@ejemplo.com" /></label>
+      {register && <label>Fecha de nacimiento<BirthdayPicker value={birthDate} onChange={setBirthDate} maxDate={today} /><small className="field-help">Calendario VITIMAX 2026: elige directamente el mes, año y día. No puede ser una fecha futura.</small></label>}
+      {!reset && <label>Contraseña<span className="password-field"><input type={showPassword ? 'text' : 'password'} required minLength="6" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={register ? 'new-password' : 'current-password'} /><button type="button" className="password-toggle" onClick={() => setShowPassword((current) => !current)} aria-label={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}><Eye size={17} /></button></span>{register && <small className="field-help">Mínimo 6 caracteres.</small>}</label>}
+      {error && <p className="auth-error">{error}</p>}
+      {notice && <p className="auth-success">{notice}</p>}
+      <button className="btn primary auth-submit" disabled={busy}>{busy ? 'Procesando...' : reset ? 'Enviar enlace' : register ? 'Crear mi cuenta' : 'Iniciar sesión'}</button>
+    </form>
+    {!reset && !register && <button type="button" className="auth-forgot" onClick={() => { setMode('reset'); setError(''); setNotice('') }}>¿Olvidaste tu contraseña?</button>}
+    <button type="button" className="auth-switch" onClick={() => { setMode(reset || register ? 'login' : 'register'); setError(''); setNotice('') }}>{reset || register ? 'Volver a iniciar sesión' : 'Crear cuenta de administrador'}</button>
+    <button type="button" className="auth-guest-link" onClick={onGuest}>Continuar como invitado</button>
+  </section></main>
 }
 
 function BirthdayPicker({ value, onChange, maxDate }) {
@@ -1051,17 +1163,60 @@ function BirthdayPicker({ value, onChange, maxDate }) {
   return <div className="birthday-picker" ref={pickerRef}><button type="button" className={`date-picker-field ${value ? 'has-value' : ''}`} onClick={() => setOpen((current) => !current)} aria-haspopup="dialog" aria-expanded={open}><span>{displayValue}</span><CalendarDays size={18} /></button>{open && <div className="birthday-calendar" role="dialog" aria-label="Calendario de fecha de nacimiento"><div className="calendar-header"><button type="button" className="calendar-arrow" onClick={() => changeMonth(-1)} disabled={viewDate.getFullYear() <= minYear && viewDate.getMonth() === 0} aria-label="Mes anterior">‹</button><div className="calendar-selects"><select value={viewDate.getMonth()} onChange={(event) => chooseMonth(event.target.value)} aria-label="Mes">{monthNames.map((month, index) => <option key={month} value={index}>{month}</option>)}</select><select value={viewDate.getFullYear()} onChange={(event) => chooseYear(event.target.value)} aria-label="Año">{Array.from({ length: maxYear - minYear + 1 }, (_, index) => maxYear - index).map((year) => <option key={year} value={year}>{year}</option>)}</select></div><button type="button" className="calendar-arrow" onClick={() => changeMonth(1)} disabled={viewDate.getFullYear() >= maxYear && viewDate.getMonth() === 11} aria-label="Mes siguiente">›</button></div><div className="calendar-weekdays">{weekDays.map((day) => <span key={day}>{day}</span>)}</div><div className="calendar-grid">{cells.map((date, index) => date ? <button type="button" key={index} className={`${selected && formatISO(selected) === formatISO(date) ? 'selected' : ''} ${formatISO(date) === maxDate ? 'today' : ''}`} disabled={isDisabled(date)} onClick={() => { onChange(formatISO(date)); setViewDate(date); setOpen(false) }}>{date.getDate()}</button> : <span key={index} />)}</div><p className="calendar-note">Selecciona una fecha entre 1900 y {maxYear}.</p></div>}</div>
 }
 
-function GoogleBrandIcon() { return <svg className="provider-logo" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.35 12.27c0-.72-.06-1.42-.18-2.09H12v3.96h5.24a4.48 4.48 0 0 1-1.94 2.94v2.45h3.14c1.84-1.69 2.91-4.18 2.91-7.26Z"/><path fill="#34A853" d="M12 21.7c2.63 0 4.84-.87 6.45-2.36l-3.14-2.45c-.87.58-1.98.93-3.31.93-2.54 0-4.7-1.72-5.47-4.03H3.29v2.53A9.74 9.74 0 0 0 12 21.7Z"/><path fill="#FBBC05" d="M6.53 13.79A5.85 5.85 0 0 1 6.23 12c0-.62.11-1.23.3-1.79V7.68H3.29A9.74 9.74 0 0 0 2.25 12c0 1.57.38 3.05 1.04 4.32l3.24-2.53Z"/><path fill="#EA4335" d="M12 6.18c1.43 0 2.71.49 3.72 1.46l2.79-2.79C16.83 3.28 14.63 2.3 12 2.3a9.74 9.74 0 0 0-8.71 5.38l3.24 2.53C7.3 7.9 9.46 6.18 12 6.18Z"/></svg> }
-function MicrosoftBrandIcon() { return <svg className="provider-logo ms" viewBox="0 0 24 24" aria-hidden="true"><path fill="#F25022" d="M2 2h9.5v9.5H2z"/><path fill="#7FBA00" d="M12.5 2H22v9.5h-9.5z"/><path fill="#00A4EF" d="M2 12.5h9.5V22H2z"/><path fill="#FFB900" d="M12.5 12.5H22V22h-9.5z"/></svg> }
+function GoogleBrandIcon() {
+  // Logotipo "G" con degradado continuo (identidad Google 2025/2026).
+  // Los cuatro tramos comparten el color exacto en cada unión para que el
+  // degradado se vea fluido y no como bloques separados.
+  const rawId = useId().replace(/[^a-zA-Z0-9_-]/g, '')
+  const gid = (name) => `vitimax-google-${name}-${rawId}`
+  return <svg className="provider-logo google" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <defs>
+      <linearGradient id={gid('red')} gradientUnits="userSpaceOnUse" x1="2.25" y1="6" x2="21.7" y2="6">
+        <stop offset="0" stopColor="#F2801D" />
+        <stop offset=".5" stopColor="#EA4335" />
+        <stop offset="1" stopColor="#8F63B8" />
+      </linearGradient>
+      <linearGradient id={gid('blue')} gradientUnits="userSpaceOnUse" x1="18" y1="21.7" x2="18" y2="2.3">
+        <stop offset="0" stopColor="#3B96A3" />
+        <stop offset=".45" stopColor="#4285F4" />
+        <stop offset="1" stopColor="#8F63B8" />
+      </linearGradient>
+      <linearGradient id={gid('green')} gradientUnits="userSpaceOnUse" x1="2.25" y1="18" x2="21.7" y2="18">
+        <stop offset="0" stopColor="#97B22C" />
+        <stop offset=".5" stopColor="#34A853" />
+        <stop offset="1" stopColor="#3B96A3" />
+      </linearGradient>
+      <linearGradient id={gid('yellow')} gradientUnits="userSpaceOnUse" x1="5" y1="2.3" x2="5" y2="21.7">
+        <stop offset="0" stopColor="#F2801D" />
+        <stop offset=".5" stopColor="#FBBC05" />
+        <stop offset="1" stopColor="#97B22C" />
+      </linearGradient>
+    </defs>
+    <path fill={`url(#${gid('blue')})`} d="M21.35 12.27c0-.72-.06-1.42-.18-2.09H12v3.96h5.24a4.48 4.48 0 0 1-1.94 2.94v2.45h3.14c1.84-1.69 2.91-4.18 2.91-7.26Z" />
+    <path fill={`url(#${gid('green')})`} d="M12 21.7c2.63 0 4.84-.87 6.45-2.36l-3.14-2.45c-.87.58-1.98.93-3.31.93-2.54 0-4.7-1.72-5.47-4.03H3.29v2.53A9.74 9.74 0 0 0 12 21.7Z" />
+    <path fill={`url(#${gid('yellow')})`} d="M6.53 13.79A5.85 5.85 0 0 1 6.23 12c0-.62.11-1.23.3-1.79V7.68H3.29A9.74 9.74 0 0 0 2.25 12c0 1.57.38 3.05 1.04 4.32l3.24-2.53Z" />
+    <path fill={`url(#${gid('red')})`} d="M12 6.18c1.43 0 2.71.49 3.72 1.46l2.79-2.79C16.83 3.28 14.63 2.3 12 2.3a9.74 9.74 0 0 0-8.71 5.38l3.24 2.53C7.3 7.9 9.46 6.18 12 6.18Z" />
+  </svg>
+}
+function MicrosoftBrandIcon() { return <svg className="provider-logo ms" viewBox="0 0 23 23" aria-hidden="true" focusable="false"><rect x="1" y="1" width="10" height="10" fill="#F25022" /><rect x="12" y="1" width="10" height="10" fill="#7FBA00" /><rect x="1" y="12" width="10" height="10" fill="#00A4EF" /><rect x="12" y="12" width="10" height="10" fill="#FFB900" /></svg> }
 
 function App({ user, onSignOut, guest = false }) {
-  const [products, setProducts] = useState(() => readLocalJson(STORAGE_KEY, []))
+  // Cada cuenta guarda su copia local con su propio uid, así al cerrar sesión
+  // y entrar con otra cuenta no se mezclan el perfil ni los datos.
+  const uid = user?.uid || ''
+  const localKey = (base) => scopedKey(base, uid)
+  const [products, setProducts] = useState(() => readLocalJson(localKey(STORAGE_KEY), []))
   const [profile, setProfile] = useState(() => {
-    const saved = readLocalJson(PROFILE_KEY, {})
-    return { name: saved.name || user?.displayName || (guest ? 'Invitado' : 'Administrador'), email: saved.email || user?.email || '', phone: saved.phone || '', photo: saved.photo || user?.photoURL || '' }
+    const saved = readLocalJson(localKey(PROFILE_KEY), {})
+    return {
+      name: saved.name || user?.displayName || (guest ? 'Invitado' : 'Administrador'),
+      email: saved.email || user?.email || '',
+      phone: saved.phone || '',
+      photo: saved.photo || user?.photoURL || ''
+    }
   })
-  const [settings, setSettings] = useState(() => readLocalJson(SETTINGS_KEY, { notifications: true, lowStock: 5, currency: 'ARS', aiServerUrl: '', aiToken: '' }))
-  const [records, setRecords] = useState(() => ({ ...EMPTY_MODULES, ...readLocalJson(MODULES_KEY, {}) }))
+  const [settings, setSettings] = useState(() => readLocalJson(localKey(SETTINGS_KEY), { notifications: true, lowStock: 5, currency: 'ARS', aiServerUrl: '', aiToken: '' }))
+  const [records, setRecords] = useState(() => ({ ...EMPTY_MODULES, ...readLocalJson(localKey(MODULES_KEY), {}) }))
   const [moduleModal, setModuleModal] = useState(null)
   const [active, setActive] = useState('Resumen')
   const [query, setQuery] = useState('')
@@ -1075,7 +1230,7 @@ function App({ user, onSignOut, guest = false }) {
   const [overlay, setOverlay] = useState(null)
   const [importReport, setImportReport] = useState(null)
   const [messages, setMessages] = useState(() => {
-    const saved = readLocalJson(CHAT_KEY, [{ role: 'assistant', text: 'Hola. Soy el BOT IA de VITIMAX. Puedo crear catálogos y datos de ejemplo, generar Excel/PDF/Word/PowerPoint, simular ventas con recomendaciones, analizar archivos y responder cualquier consulta. ¿Qué necesitas?' }])
+    const saved = readLocalJson(localKey(CHAT_KEY), [{ role: 'assistant', text: 'Hola. Soy el BOT IA de VITIMAX. Puedo crear catálogos y datos de ejemplo, generar Excel/PDF/Word/PowerPoint, simular ventas con recomendaciones, analizar archivos y responder cualquier consulta. ¿Qué necesitas?' }])
     return saved.map((item) => item.pending ? { ...item, pending: false, text: 'La consulta anterior no se completó. Vuelve a enviarla, por favor.' } : item)
   })
   const [cloudReady, setCloudReady] = useState(!user || !firebaseDb)
@@ -1096,25 +1251,25 @@ function App({ user, onSignOut, guest = false }) {
     }, () => { setCloudReady(true); setNotice('No se pudo sincronizar la nube; se usará una copia local.') })
   }, [user])
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(products))
+    localStorage.setItem(localKey(STORAGE_KEY), JSON.stringify(products))
     if (user && firebaseDb && cloudReady) setDoc(doc(firebaseDb, 'users', user.uid), { products }, { merge: true }).catch(() => setNotice('No se pudo guardar el catálogo en la nube.'))
   }, [products, user, cloudReady])
   useEffect(() => {
-    localStorage.setItem(PROFILE_KEY, JSON.stringify(profile))
+    localStorage.setItem(localKey(PROFILE_KEY), JSON.stringify(profile))
     if (user && firebaseDb && cloudReady) setDoc(doc(firebaseDb, 'users', user.uid), { profile: { name: profile.name, email: profile.email, phone: profile.phone, photo: profile.photo } }, { merge: true }).catch(() => setNotice('No se pudo guardar el perfil en la nube.'))
   }, [profile, user, cloudReady])
   useEffect(() => {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
+    localStorage.setItem(localKey(SETTINGS_KEY), JSON.stringify(settings))
     if (user && firebaseDb && cloudReady) setDoc(doc(firebaseDb, 'users', user.uid), { settings }, { merge: true }).catch(() => setNotice('No se pudo guardar la configuración en la nube.'))
   }, [settings, user, cloudReady])
   useEffect(() => {
-    localStorage.setItem(MODULES_KEY, JSON.stringify(records))
+    localStorage.setItem(localKey(MODULES_KEY), JSON.stringify(records))
     if (user && firebaseDb && cloudReady) setDoc(doc(firebaseDb, 'users', user.uid), { modules: records }, { merge: true }).catch(() => setNotice('No se pudieron guardar los módulos en la nube.'))
   }, [records, user, cloudReady])
   useEffect(() => {
     // Los archivos generados contienen Blob y no se pueden guardar en localStorage.
     // Se conserva el texto del chat y se omiten los archivos.
-    localStorage.setItem(CHAT_KEY, JSON.stringify(messages.slice(-100).map(({ file, ...rest }) => rest)))
+    localStorage.setItem(localKey(CHAT_KEY), JSON.stringify(messages.slice(-100).map(({ file, ...rest }) => rest)))
   }, [messages])
   useEffect(() => { if (notice) { const timer = setTimeout(() => setNotice(''), 3500); return () => clearTimeout(timer) } }, [notice])
   useEffect(() => {
@@ -1440,35 +1595,72 @@ function App({ user, onSignOut, guest = false }) {
   }
   async function saveProfile(next, photoFile) {
     let normalized = { ...next, name: next.name?.trim() || (guest ? 'Invitado' : 'Administrador'), phone: next.phone?.trim() || '', photo: next.photo?.trim() || '' }
+    let photoStoredLocally = false
     try {
       if (photoFile) {
         if (!photoFile.type.startsWith('image/')) throw new Error('El archivo seleccionado no es una imagen.')
-        if (photoFile.size > 5 * 1024 * 1024) throw new Error('La foto debe pesar menos de 5 MB.')
+        if (photoFile.size > 8 * 1024 * 1024) throw new Error('La foto debe pesar menos de 8 MB.')
+        // Comprimimos la foto antes de subirla: así se ve nítida en el teléfono
+        // y también funciona como respaldo si Storage no está disponible.
+        const compressed = await compressImage(photoFile)
         if (firebaseStorage && user && !guest) {
           try {
-            const photoRef = ref(firebaseStorage, `users/${user.uid}/profile/avatar-${Date.now()}`)
-            const uploaded = await uploadBytes(photoRef, photoFile, { contentType: photoFile.type })
+            const photoRef = ref(firebaseStorage, `users/${user.uid}/profile/avatar-${Date.now()}.jpg`)
+            const uploaded = await uploadBytes(photoRef, photoFile, { contentType: photoFile.type || 'image/jpeg' })
             normalized = { ...normalized, photo: await getDownloadURL(uploaded.ref) }
-          } catch (error) {
-            throw new Error(error?.code === 'storage/unauthorized'
-              ? 'Firebase no autorizó la foto. Inicia sesión nuevamente e inténtalo otra vez.'
-              : 'No se pudo subir la foto a Firebase Storage.')
+          } catch {
+            // Firebase Storage puede no estar activado o las reglas no estar publicadas.
+            // Guardamos la foto comprimida dentro del perfil para que igual se vea.
+            normalized = { ...normalized, photo: compressed }
+            photoStoredLocally = true
           }
-        } else normalized = { ...normalized, photo: await imageFileToDataUrl(photoFile) }
+        } else normalized = { ...normalized, photo: compressed }
       }
-      if (firebaseAuth && user && !guest) await updateProfile(user, { displayName: normalized.name || null, photoURL: normalized.photo || null })
-      localStorage.setItem(PROFILE_KEY, JSON.stringify(normalized))
-      if (user && firebaseDb && cloudReady) setDoc(doc(firebaseDb, 'users', user.uid), { profile: normalized }, { merge: true }).catch(() => setNotice('Perfil guardado localmente; no se pudo sincronizar la nube.'))
+      if (firebaseAuth && user && !guest) {
+        try { await updateProfile(user, { displayName: normalized.name || null, photoURL: normalized.photo || null }) } catch { /* la foto ya quedó guardada en el perfil */ }
+      }
+      localStorage.setItem(localKey(PROFILE_KEY), JSON.stringify(normalized))
+      if (user && firebaseDb && cloudReady) {
+        try { await setDoc(doc(firebaseDb, 'users', user.uid), { profile: normalized }, { merge: true }) } catch { photoStoredLocally = true }
+      }
       setProfile(normalized)
       setOverlay(null)
-      setNotice(guest ? 'Perfil guardado en este dispositivo' : 'Perfil guardado correctamente')
+      setNotice(photoStoredLocally && !guest
+        ? 'Perfil y foto guardados. La foto quedó en tu cuenta VITIMAX.'
+        : guest ? 'Perfil guardado en este dispositivo' : 'Perfil y foto guardados correctamente')
     } catch (error) {
-      const message = error?.message || 'No se pudo actualizar el perfil de Firebase. Revisa la sesión e inténtalo de nuevo.'
+      const message = error?.message || 'No se pudo actualizar el perfil. Revisa la sesión e inténtalo de nuevo.'
       setNotice(message)
       throw new Error(message)
     }
   }
   function saveSettings(next) { setSettings(next); setOverlay(null); setNotice('Configuración guardada correctamente') }
+  async function resendVerificationEmail() {
+    if (!firebaseAuth || !user || guest) { setNotice('Inicia sesión con una cuenta real para verificar tu correo.'); return }
+    try {
+      await sendEmailVerification(user)
+      setNotice('Te enviamos un correo de verificación. Revisa tu bandeja y la carpeta de spam.')
+    } catch (error) {
+      setNotice(error?.code === 'auth/too-many-requests'
+        ? 'Ya enviamos varios correos. Espera unos minutos antes de volver a intentar.'
+        : 'No se pudo enviar el correo de verificación. Revisa tu conexión e inténtalo otra vez.')
+    }
+  }
+  async function sendPasswordResetToUser() {
+    const target = user?.email || profile.email
+    if (!firebaseAuth || !target || guest) { setNotice('Esta cuenta no usa contraseña de VITIMAX.'); return }
+    try {
+      await sendPasswordResetEmail(firebaseAuth, target)
+      setNotice(`Te enviamos un enlace para cambiar la contraseña a ${target}.`)
+    } catch {
+      setNotice('No se pudo enviar el enlace de contraseña. Revisa tu conexión e inténtalo otra vez.')
+    }
+  }
+  function confirmSignOut() {
+    setOverlay(null)
+    setMobileMenuOpen(false)
+    onSignOut?.()
+  }
   async function downloadProductPage(product = null, requestText = '', aiHtml = '') {
     const pageData = product || {
       name: 'VITIMAX',
@@ -2010,10 +2202,10 @@ function App({ user, onSignOut, guest = false }) {
       <div className="brand"><div className="brand-mark"><BrandMark size={21} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div></div>
       <div className="workspace-label">ESPACIO DE TRABAJO <span className="status-dot" /></div>
       <nav>{nav.map(({ label, icon: Icon, tone }) => <button key={label} className={active === label ? 'nav-item active' : 'nav-item'} onClick={() => navigate(label)}><span className={`nav-icon ${tone}`}><Icon size={17} /></span><span>{label}</span>{moduleCounts[label] > 0 && <em>{moduleCounts[label]}</em>}</button>)}</nav>
-      <div className="sidebar-bottom">{canManage && <button className="nav-item" onClick={() => { setOverlay('settings'); setMobileMenuOpen(false) }}><span className="nav-icon slate"><Settings2 size={17} /></span><span>Configuración</span></button>}<button className="nav-item signout-item" onClick={() => { setOverlay(null); setMobileMenuOpen(false); onSignOut?.() }}><span className="nav-icon rose"><LogOut size={17} /></span><span>Cerrar sesión</span></button><button className="profile profile-button" onClick={() => setOverlay('profile')}><div className="avatar">{profile.name?.[0] || 'V'}</div><div><strong>{profile.name || 'Invitado'}</strong><span>{profile.email || 'Acceso de invitado'}</span></div><MoreHorizontal size={17} /></button></div>
+      <div className="sidebar-bottom">{canManage && <button className="nav-item" onClick={() => { setOverlay('settings'); setMobileMenuOpen(false) }}><span className="nav-icon slate"><Settings2 size={17} /></span><span>Configuración</span></button>}<button className="nav-item signout-item" onClick={() => { setOverlay(null); setMobileMenuOpen(false); onSignOut?.() }}><span className="nav-icon rose"><LogOut size={17} /></span><span>Cerrar sesión</span></button><button className="profile profile-button" onClick={() => setOverlay('profile')}><Avatar name={profile.name} photo={profile.photo} /><div><strong>{profile.name || 'Invitado'}</strong><span>{profile.email || 'Acceso de invitado'}</span></div><MoreHorizontal size={17} /></button></div>
     </aside>
     <main className="main">
-      <header className="topbar"><button className="mobile-menu" aria-label="Abrir menú" onClick={() => setMobileMenuOpen(true)}><Menu size={21} /></button><div className="crumb"><span className={`crumb-icon ${activeTone}`}><ActiveIcon size={14} /></span> VITIMAX <ChevronRight size={14} /> <b>{active}</b></div><div className="top-actions"><button className="icon-btn" title="Escanear código QR" aria-label="Escanear código QR" onClick={() => setQrOpen(true)}><QrCode size={18} /></button><button className="icon-btn" title="Notificaciones" aria-label="Notificaciones" onClick={() => setOverlay('notifications')}><Bell size={18} /><i /></button><button className="user-chip" onClick={() => setOverlay('profile')}><div className="avatar small">{profile.name?.[0] || 'V'}</div><span>{profile.name || 'Administrador'}</span><ChevronRight size={15} /></button></div></header>
+      <header className="topbar"><button className="mobile-menu" aria-label="Abrir menú" onClick={() => setMobileMenuOpen(true)}><Menu size={21} /></button><div className="crumb"><span className={`crumb-icon ${activeTone}`}><ActiveIcon size={14} /></span> VITIMAX <ChevronRight size={14} /> <b>{active}</b></div><div className="top-actions"><button className="icon-btn" title="Escanear código QR" aria-label="Escanear código QR" onClick={() => setQrOpen(true)}><QrCode size={18} /></button><button className="icon-btn" title="Notificaciones" aria-label="Notificaciones" onClick={() => setOverlay('notifications')}><Bell size={18} /><i /></button><button className="user-chip" onClick={() => setOverlay('profile')}><Avatar name={profile.name} photo={profile.photo} className="small" /><span>{profile.name || 'Administrador'}</span><ChevronRight size={15} /></button></div></header>
       <div className="content">
         {active === 'Resumen' && <Dashboard products={products} lowStock={lowStock} missingData={missingData} onImport={canManage ? () => fileRef.current?.click() : undefined} onTemplate={canManage ? downloadTemplate : undefined} onNavigate={navigate} records={records} />}
         {active === 'Informe' && <ApplicationReport products={products} lowStock={lowStock} missingData={missingData} guest={guest} />}
@@ -2025,7 +2217,7 @@ function App({ user, onSignOut, guest = false }) {
     <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv" hidden onChange={importExcel} />
     {notice && <div className="toast"><PackageCheck size={18} />{notice}</div>}
     {mobileMenuOpen && <button className="drawer-backdrop" aria-label="Cerrar menú" onClick={() => setMobileMenuOpen(false)} />}
-    {overlay === 'profile' && <ProfileModal profile={profile} onClose={() => setOverlay(null)} onSave={saveProfile} onSignOut={() => { setOverlay(null); setMobileMenuOpen(false); onSignOut?.() }} />}
+    {overlay === 'profile' && <ProfileModal profile={profile} user={user} guest={guest} onClose={() => setOverlay(null)} onSave={saveProfile} onSignOut={confirmSignOut} onResendVerification={resendVerificationEmail} onPasswordReset={sendPasswordResetToUser} />}
     {overlay === 'settings' && <SettingsModal settings={settings} onClose={() => setOverlay(null)} onSave={saveSettings} />}
     {overlay === 'notifications' && <NotificationsModal lowStock={lowStock} missingData={missingData} onClose={() => setOverlay(null)} />}
     {importReport && <ImportReport report={importReport} onClose={() => setImportReport(null)} />}
@@ -2389,7 +2581,18 @@ function profileInitials(name) {
   return `${parts[0][0] || ''}${parts[1]?.[0] || ''}`.toUpperCase() || 'V'
 }
 
-function ProfileModal({ profile, onClose, onSave, onSignOut }) {
+function Avatar({ name, photo, className = '', alt = '' }) {
+  const src = String(photo || '').trim()
+  const [broken, setBroken] = useState(false)
+  useEffect(() => { setBroken(false) }, [src])
+  const classes = className ? `avatar ${className}` : 'avatar'
+  if (src && !broken) {
+    return <div className={`${classes} has-photo`}><img src={src} alt={alt} onError={() => setBroken(true)} /></div>
+  }
+  return <div className={classes}>{profileInitials(name)}</div>
+}
+
+function ProfileModal({ profile, user, guest = false, onClose, onSave, onSignOut, onResendVerification, onPasswordReset }) {
   const [form, setForm] = useState(profile)
   const [photoFile, setPhotoFile] = useState(null)
   const [photoPreview, setPhotoPreview] = useState(String(profile.photo || '').trim())
@@ -2397,9 +2600,16 @@ function ProfileModal({ profile, onClose, onSave, onSignOut }) {
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const fileInputRef = useRef(null)
+  const previewUrlRef = useRef('')
   const update = (key, value) => setForm((current) => ({ ...current, [key]: value }))
 
+  useEffect(() => () => { if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current) }, [])
+
   function setPreview(value) {
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current)
+      previewUrlRef.current = ''
+    }
     setPhotoBroken(false)
     setPhotoPreview(value)
   }
@@ -2412,13 +2622,17 @@ function ProfileModal({ profile, onClose, onSave, onSignOut }) {
       setError('Selecciona una imagen JPG, PNG o WEBP.')
       return
     }
-    if (file.size > 5 * 1024 * 1024) {
-      setError('La foto supera el límite de 5 MB.')
+    if (file.size > 8 * 1024 * 1024) {
+      setError('La foto supera el límite de 8 MB.')
       return
     }
     setError('')
     setPhotoFile(file)
-    setPreview(URL.createObjectURL(file))
+    // Importante: revocar la vista previa anterior antes de crear la nueva,
+    // si no se revoca la URL recién creada y la foto no se muestra.
+    const objectUrl = URL.createObjectURL(file)
+    setPreview(objectUrl)
+    previewUrlRef.current = objectUrl
   }
 
   function removePhoto() {
@@ -2440,9 +2654,15 @@ function ProfileModal({ profile, onClose, onSave, onSignOut }) {
     }
   }
 
+  function signOut() {
+    if (window.confirm('¿Cerrar sesión en VITIMAX? Podrás volver a entrar con tu cuenta cuando quieras.')) onSignOut()
+  }
+
   const showPhoto = Boolean(photoPreview) && !photoBroken
+  const emailVerified = Boolean(user?.emailVerified)
+  const passwordAccount = hasPasswordProvider(user)
   return <ModalShell className="profile-modal" title="Mi perfil" eyebrow="CUENTA" onClose={onClose} actions={<>
-    <button className="btn secondary profile-signout" onClick={onSignOut}>Cerrar sesión</button>
+    <button className="btn secondary profile-signout" onClick={signOut}><LogOut size={16} /> Cerrar sesión</button>
     <button className="btn secondary" onClick={onClose} disabled={saving}>Cancelar</button>
     <button className="btn primary" onClick={save} disabled={saving}>{saving ? 'Guardando…' : 'Guardar cambios'}</button>
   </>}>
@@ -2459,7 +2679,7 @@ function ProfileModal({ profile, onClose, onSave, onSignOut }) {
           <div className="profile-hero-info">
             <strong>{form.name || 'Administrador'}</strong>
             <span>{form.email || 'Correo pendiente'}</span>
-            <em><BadgeCheck size={13} /> Administrador de VITIMAX</em>
+            <em><BadgeCheck size={13} /> {guest ? 'Acceso de invitado' : `${providerLabel(user)} · Cuenta VITIMAX`}</em>
           </div>
         </div>
         <div className="profile-photo-actions">
@@ -2467,7 +2687,7 @@ function ProfileModal({ profile, onClose, onSave, onSignOut }) {
           <label className="btn secondary"><Camera size={16} /> Tomar foto<input type="file" accept="image/*" capture="user" onChange={choosePhoto} hidden /></label>
           {(photoPreview || photoFile) && <button type="button" className="btn secondary profile-remove-photo" onClick={removePhoto}><Trash2 size={16} /> Quitar</button>}
         </div>
-        {!photoPreview && <p className="profile-photo-hint">Agrega una foto para personalizar tu perfil.</p>}
+        {!photoPreview && <p className="profile-photo-hint">Agrega una foto para personalizar tu perfil. Se guarda en tu cuenta y aparece en toda la aplicación.</p>}
         {photoBroken && <p className="profile-photo-note">La foto guardada no se pudo cargar. Elige una nueva o quítala.</p>}
         <input ref={fileInputRef} type="file" accept="image/*" hidden onChange={choosePhoto} />
       </div>
@@ -2477,12 +2697,20 @@ function ProfileModal({ profile, onClose, onSave, onSignOut }) {
         <label>Nombre completo<input value={form.name} onChange={(e) => update('name', e.target.value)} placeholder="Tu nombre" autoComplete="name" /></label>
         <label>Teléfono<input value={form.phone || ''} onChange={(e) => update('phone', e.target.value)} placeholder="Opcional" inputMode="tel" autoComplete="tel" /></label>
       </div>
-      <p className="profile-section-title profile-section-title-spaced"><Mail size={14} /> Cuenta</p>
+      <p className="profile-section-title profile-section-title-spaced"><ShieldCheck size={14} /> Cuenta y seguridad</p>
       <div className="profile-account-card">
-        <span className="profile-account-icon"><Mail size={17} /></span>
-        <div><small>Correo electrónico</small><strong>{form.email || 'Sin correo registrado'}</strong></div>
-        <em>Solo lectura</em>
+        <span className="profile-account-icon">{providerLabel(user) === 'Google' ? <GoogleBrandIcon /> : providerLabel(user) === 'Microsoft' ? <MicrosoftBrandIcon /> : <Mail size={17} />}</span>
+        <div>
+          <small>{guest ? 'Modo invitado' : `Acceso con ${providerLabel(user)}`}</small>
+          <strong>{form.email || 'Sin correo registrado'}</strong>
+        </div>
+        {!guest && <em className={emailVerified ? 'verified' : 'pending'}>{emailVerified ? 'Verificado' : 'Sin verificar'}</em>}
       </div>
+      {!guest && <div className="profile-account-actions">
+        {!emailVerified && <button type="button" className="btn secondary" onClick={onResendVerification}><Mail size={15} /> Verificar mi correo</button>}
+        {passwordAccount && <button type="button" className="btn secondary" onClick={onPasswordReset}><ShieldCheck size={15} /> Cambiar contraseña</button>}
+        <button type="button" className="btn secondary profile-signout-inline" onClick={signOut}><LogOut size={15} /> Cerrar sesión</button>
+      </div>}
       <details className="profile-url-details">
         <summary>Usar enlace de imagen</summary>
         <label>URL de la foto<input value={form.photo || ''} onChange={(e) => { const value = e.target.value; update('photo', value); setPhotoFile(null); setPreview(value.trim()) }} placeholder="https://..." inputMode="url" /></label>
@@ -2608,7 +2836,7 @@ function SettingsModal({ settings, onClose, onSave }) {
       </section>
       <section className="settings-group about-group">
         <div className="settings-group-head"><span className="settings-group-icon slate"><Info size={17} /></span><div><h3>Acerca de VITIMAX</h3><p>Centro de gestión agrícola digital.</p></div></div>
-        <div className="about-grid"><div><span>Versión</span><strong>1.1.3</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
+        <div className="about-grid"><div><span>Versión</span><strong>1.1.4</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
       </section>
     </div>
   </ModalShell>

@@ -632,3 +632,42 @@ h1,h2,h3,h4,p,small,strong,span,label,td,th{overflow-wrap:break-word}
   .quick-grid{grid-template-columns:1fr}
   .page-heading h1{font-size:21px}
 }
+
+/* ============================================================
+   VITIMAX 1.1.4 · perfil con foto, cuentas y acceso
+   ============================================================ */
+.avatar{overflow:hidden;flex-shrink:0}
+.avatar.has-photo{background:#e8f5ea}
+.avatar img{width:100%;height:100%;object-fit:cover;display:block;border-radius:50%}
+.profile-avatar-lg{display:grid;place-items:center}
+
+.auth-provider-note{margin:0 0 4px;font-size:10.5px;line-height:1.45;color:#8aa094;text-align:center}
+.auth-success{margin:0;padding:9px 11px;border-radius:8px;background:#eaf7ee;border:1px solid #cfe9d8;color:#1f7451;font-size:11px;line-height:1.45}
+
+.password-field{position:relative;display:block}
+.password-field input{width:100%;padding-right:44px}
+.password-toggle{position:absolute;right:4px;top:50%;transform:translateY(-50%);width:38px;height:38px;display:grid;place-items:center;border-radius:8px;color:#7a9287;background:transparent}
+.password-toggle:hover{background:#f1f5f2;color:#1f7451}
+
+.profile-account-card em.verified{color:#1f7451;background:#e8f5ea}
+.profile-account-card em.pending{color:#8a6a22;background:#fdf3d8}
+.profile-account-icon .provider-logo{width:19px;height:19px}
+.provider-logo{shape-rendering:geometricPrecision}
+.provider-logo.ms{width:19px;height:19px;flex-basis:19px}
+.social-btn .provider-logo{filter:drop-shadow(0 1px 1px rgba(23,60,44,.12))}
+.profile-account-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.profile-account-actions .btn{display:inline-flex;align-items:center;gap:6px;min-height:40px;font-size:11px}
+.profile-account-actions .profile-signout-inline{color:#b24b44;border-color:#f0d6d2;background:#fff8f7}
+.profile-account-actions .profile-signout-inline:hover{background:#ffefec}
+.profile-signout{display:inline-flex;align-items:center;gap:6px}
+
+@media(max-width:650px){
+  .profile-account-actions{display:grid;grid-template-columns:1fr}
+  .profile-account-actions .btn{width:100%;justify-content:center;min-height:44px}
+  .profile-account-card em{display:inline-flex}
+  .auth-provider-note{font-size:11px}
+}
+@media(max-width:380px){
+  .password-toggle{width:34px}
+  .password-field input{padding-right:40px}
+}
