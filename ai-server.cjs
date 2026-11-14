@@ -28,6 +28,7 @@ const rateLimitMax = Number(process.env.AI_RATE_LIMIT_PER_MINUTE || 30)
 const maxBodyBytes = 12 * 1024 * 1024
 const maxHistoryItems = 12
 const maxMessageLength = 4000
+const maxMemories = 100
 
 const rawOrigins = (process.env.AI_ALLOWED_ORIGINS || '*')
   .split(',')
@@ -51,6 +52,14 @@ Cuando el usuario pida un archivo o una acción, responde con un bloque \`\`\`js
 - Guardar productos en el catálogo: {"accion":"registrar_productos_en_app","productos":[{...}],"reemplazar":false}
 - Simular ventas: {"accion":"simular_ventas","periodoDias":30,"crecimientoMensual":0}
 - Documento PDF/Word/PowerPoint: {"accion":"crear_documento","documento":{"tipo":"pdf|word|ppt","titulo":"...","contenido":"# Título\\n## Sección\\n- Punto"}}
+- Guardar un recuerdo persistente: {"accion":"guardar_memoria","categoria":"Negocio|Preferencias|Instrucciones|Datos personales|Clientes|Productos|Finanzas|Otros","dato":"..."}
+- Olvidar o actualizar un recuerdo: {"accion":"olvidar_memoria","clave_o_id":"...","nuevo_dato":"..."}
+
+MEMORIA PERSISTENTE:
+- Si el usuario dice "recuerda que...", "mi nombre es...", "siempre aplica...", "ten en cuenta...", guarda el dato con la acción guardar_memoria.
+- Si dice que un dato cambió o ya no aplica, usa olvidar_memoria (con nuevo_dato para actualizarlo).
+- Aplica la memoria disponible de forma natural, sin repetirla robóticamente.
+- No guardes contraseñas, claves, tokens ni datos de tarjetas.
 
 REGLAS DE TRABAJO:
 - No uses "-" como dato. Si falta un dato, deja el campo vacío o escribe "Pendiente".
@@ -125,6 +134,43 @@ function sanitizeHistory(history) {
     .map((item) => ({ role: item.role, content: item.content.trim().slice(0, maxMessageLength) }))
 }
 
+function sanitizeMemories(memories) {
+  if (!Array.isArray(memories)) return []
+  const seen = new Set()
+  const list = []
+  for (const item of memories) {
+    if (!item || typeof item !== 'object') continue
+    const contenido = String(item.contenido ?? item.content ?? item.dato ?? '').trim().slice(0, 1200)
+    if (!contenido) continue
+    const categoria = String(item.categoria || item.category || 'Otros').trim().slice(0, 40) || 'Otros'
+    const key = `${categoria.toLowerCase()}|${contenido.toLowerCase()}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    list.push({ categoria, contenido })
+    if (list.length >= maxMemories) break
+  }
+  return list
+}
+
+function memoryBlock(memories) {
+  const list = sanitizeMemories(memories)
+  if (!list.length) return ''
+  const lines = []
+  let total = 0
+  for (const item of list) {
+    const line = `- [${item.categoria}] ${item.contenido.slice(0, 280)}`
+    if (total + line.length > 7000) break
+    lines.push(line)
+    total += line.length + 1
+  }
+  if (!lines.length) return ''
+  return `
+
+### MEMORIA PERSISTENTE DEL USUARIO Y NEGOCIO
+Datos que el usuario pidió recordar entre sesiones. Úsalos de forma natural, sin repetirlos robóticamente ni contradecirlos.
+${lines.join('\n')}`
+}
+
 function attachmentParts(attachment) {
   const parts = []
   if (!attachment || typeof attachment !== 'object') return parts
@@ -159,7 +205,7 @@ function attachmentParts(attachment) {
   return parts
 }
 
-async function askOpenRouter({ catalog, message, history, attachment, signal, system, maxTokens = 1500 }) {
+async function askOpenRouter({ catalog, message, history, attachment, signal, system, memories, maxTokens = 1500 }) {
   const content = []
   const attachmentItems = attachmentParts(attachment)
   const textBlocks = [`CATÁLOGO REAL DE VITIMAX:\n${catalog}`, `CONSULTA DEL USUARIO:\n${message}`]
@@ -172,7 +218,7 @@ async function askOpenRouter({ catalog, message, history, attachment, signal, sy
     if (item.kind === 'file') content.push({ type: 'file', file: { filename: item.name, file_data: `data:${item.mimeType};base64,${item.data}` } })
   }
   const messages = [
-    { role: 'system', content: system || systemInstruction },
+    { role: 'system', content: `${system || systemInstruction}${memoryBlock(memories)}` },
     ...history.map((item) => ({ role: item.role, content: item.content })),
     { role: 'user', content }
   ]
@@ -198,7 +244,7 @@ async function askOpenRouter({ catalog, message, history, attachment, signal, sy
   return { text: payload.choices?.[0]?.message?.content?.trim(), model: payload.model || model }
 }
 
-async function askGemini({ catalog, message, history, attachment, signal, system, maxTokens = 1500 }) {
+async function askGemini({ catalog, message, history, attachment, signal, system, memories, maxTokens = 1500 }) {
   const parts = [{ text: `CATÁLOGO REAL DE VITIMAX:\n${catalog}\n\nCONSULTA DEL USUARIO:\n${message}` }]
   for (const item of attachmentParts(attachment)) {
     if (item.kind === 'text') parts.push({ text: item.text })
@@ -215,7 +261,7 @@ async function askGemini({ catalog, message, history, attachment, signal, system
     signal,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      system_instruction: { parts: [{ text: system || systemInstruction }] },
+      system_instruction: { parts: [{ text: `${system || systemInstruction}${memoryBlock(memories)}` }] },
       contents,
       generationConfig: { temperature: 0.3, maxOutputTokens: Math.min(Math.max(Number(maxTokens) || 1500, 100), 8000) }
     })
@@ -270,7 +316,7 @@ const server = http.createServer(async (request, response) => {
 
   try {
     const body = JSON.parse(await readBody(request))
-    const { message, products = [], attachment, history = [], system, maxTokens } = body || {}
+    const { message, products = [], attachment, history = [], system, memories = [], maxTokens } = body || {}
     if (typeof message !== 'string' || !message.trim()) {
       return sendJson(request, response, 400, { error: 'La consulta está vacía.' })
     }
@@ -296,6 +342,7 @@ const server = http.createServer(async (request, response) => {
         attachment,
         signal: controller.signal,
         system: typeof system === 'string' && system.trim() ? system.slice(0, 4000) : undefined,
+        memories: sanitizeMemories(memories),
         maxTokens
       })
     } finally {

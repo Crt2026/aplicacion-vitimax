@@ -14,7 +14,7 @@ import { doc, onSnapshot, setDoc } from 'firebase/firestore'
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage'
 import { httpsCallable } from 'firebase/functions'
 import {
-  Activity, AlertCircle, AlertTriangle, ArrowDownToLine, ArrowUpRight, ArrowUpToLine, BadgeCheck, BarChart3, Bell, BookOpen, Bot, Boxes, Camera,
+  Activity, AlertCircle, AlertTriangle, ArrowDownToLine, ArrowUpRight, ArrowUpToLine, BadgeCheck, BarChart3, Bell, BookOpen, Bot, Boxes, Brain, Camera,
   Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, ClipboardCheck, ClipboardList, Clock, Cloud, Download, Eye, EyeOff,
   FileBarChart2, FileSpreadsheet, FileText, Filter, Flashlight, Globe, HeartHandshake, ImagePlus, Info, Layers, Loader2, Lock,
   LayoutDashboard, Leaf, ListChecks, LogOut, Mail, MapPin, Megaphone, Menu, MessageCircle, MessageSquare, MoreHorizontal,
@@ -28,8 +28,11 @@ import {
   ASSISTANT_TOOLS,
   DIRECT_AI_SYSTEM_PROMPT,
   EXCEL_SYSTEM_PROMPT,
+  MEMORY_CATEGORIES,
+  MEMORY_STORAGE_KEY,
   SALES_SYSTEM_PROMPT,
   buildDemoProducts,
+  buildMemorySection,
   buildSalesSheets,
   buildWorkbook,
   extractPdfText,
@@ -38,6 +41,8 @@ import {
   mergeWorkbookSheets,
   normalizeImportedProducts,
   normalizeImportedRecords,
+  normalizeMemories,
+  normalizeMemoryRecord,
   normalizeProduct,
   normalizeProducts,
   parseJsonBlock,
@@ -62,6 +67,19 @@ function readLocalJson(key, fallback) {
   } catch {
     return fallback
   }
+}
+
+// El historial guardado puede tener una consulta pendiente si la app se cerró
+// antes de que la IA respondiera. Al reabrir se marca para reenviarla.
+function restoreChatMessages(saved) {
+  if (!Array.isArray(saved)) return []
+  return saved
+    .filter((item) => item && typeof item === 'object' && typeof item.text === 'string')
+    .map((item) => item.pending ? { ...item, pending: false, text: 'La consulta anterior no se completó. Vuelve a enviarla, por favor.' } : item)
+}
+
+function persistableChat(messages) {
+  return messages.slice(-200).map(({ file, blob, ...rest }) => rest)
 }
 const emptyProduct = {
   name: '', category: '', price: '', previousPrice: '', stock: '',
@@ -1231,22 +1249,40 @@ function App({ user, onSignOut, guest = false }) {
   const [importReport, setImportReport] = useState(null)
   const [messages, setMessages] = useState(() => {
     const saved = readLocalJson(localKey(CHAT_KEY), [{ role: 'assistant', text: 'Hola. Soy el BOT IA de VITIMAX. Puedo crear catálogos y datos de ejemplo, generar Excel/PDF/Word/PowerPoint, simular ventas con recomendaciones, analizar archivos y responder cualquier consulta. ¿Qué necesitas?' }])
-    return saved.map((item) => item.pending ? { ...item, pending: false, text: 'La consulta anterior no se completó. Vuelve a enviarla, por favor.' } : item)
+    return restoreChatMessages(saved)
   })
+  const [memories, setMemories] = useState(() => normalizeMemories(readLocalJson(localKey(MEMORY_STORAGE_KEY), [])))
   const [cloudReady, setCloudReady] = useState(!user || !firebaseDb)
   const [saving, setSaving] = useState(false)
   const fileRef = useRef(null)
+  const messagesRef = useRef(messages)
+  const memoriesRef = useRef(memories)
+  const cloudSeededRef = useRef(false)
 
   useEffect(() => {
     if (!user || !firebaseDb) return undefined
     const workspace = doc(firebaseDb, 'users', user.uid)
     setCloudReady(false)
+    cloudSeededRef.current = false
     return onSnapshot(workspace, (snapshot) => {
       const data = snapshot.data() || {}
       if (Array.isArray(data.products)) setProducts(data.products)
       if (data.profile) setProfile((current) => ({ ...current, ...data.profile }))
       if (data.settings) setSettings((current) => ({ ...current, ...data.settings }))
       if (data.modules) setRecords((current) => ({ ...current, ...data.modules }))
+      // Al abrir la app se recupera el historial y la memoria guardados en la nube
+      // solo si este dispositivo todavía no tiene una copia local más completa.
+      if (!cloudSeededRef.current) {
+        cloudSeededRef.current = true
+        if (Array.isArray(data.assistantChat) && data.assistantChat.length > messagesRef.current.length) {
+          const restored = restoreChatMessages(data.assistantChat)
+          if (restored.length) { messagesRef.current = restored; setMessages(restored) }
+        }
+        if (Array.isArray(data.aiMemory) && data.aiMemory.length) {
+          const restored = normalizeMemories([...memoriesRef.current, ...data.aiMemory])
+          if (restored.length > memoriesRef.current.length) { memoriesRef.current = restored; setMemories(restored) }
+        }
+      }
       setCloudReady(true)
     }, () => { setCloudReady(true); setNotice('No se pudo sincronizar la nube; se usará una copia local.') })
   }, [user])
@@ -1266,11 +1302,25 @@ function App({ user, onSignOut, guest = false }) {
     localStorage.setItem(localKey(MODULES_KEY), JSON.stringify(records))
     if (user && firebaseDb && cloudReady) setDoc(doc(firebaseDb, 'users', user.uid), { modules: records }, { merge: true }).catch(() => setNotice('No se pudieron guardar los módulos en la nube.'))
   }, [records, user, cloudReady])
+  useEffect(() => { messagesRef.current = messages }, [messages])
+  useEffect(() => { memoriesRef.current = memories }, [memories])
   useEffect(() => {
     // Los archivos generados contienen Blob y no se pueden guardar en localStorage.
-    // Se conserva el texto del chat y se omiten los archivos.
-    localStorage.setItem(localKey(CHAT_KEY), JSON.stringify(messages.slice(-100).map(({ file, ...rest }) => rest)))
-  }, [messages])
+    // Se conserva el texto del chat (incluida la traza de herramientas) y se omiten los archivos.
+    const stored = persistableChat(messages)
+    localStorage.setItem(localKey(CHAT_KEY), JSON.stringify(stored))
+    if (user && firebaseDb && cloudReady) {
+      setDoc(doc(firebaseDb, 'users', user.uid), { assistantChat: stored, assistantChatUpdatedAt: new Date().toISOString() }, { merge: true })
+        .catch(() => { /* la copia local sigue disponible */ })
+    }
+  }, [messages, user, cloudReady])
+  useEffect(() => {
+    localStorage.setItem(localKey(MEMORY_STORAGE_KEY), JSON.stringify(memories))
+    if (user && firebaseDb && cloudReady) {
+      setDoc(doc(firebaseDb, 'users', user.uid), { aiMemory: memories, aiMemoryUpdatedAt: new Date().toISOString() }, { merge: true })
+        .catch(() => setNotice('No se pudo guardar la memoria de la IA en la nube; se conserva en este dispositivo.'))
+    }
+  }, [memories, user, cloudReady])
   useEffect(() => { if (notice) { const timer = setTimeout(() => setNotice(''), 3500); return () => clearTimeout(timer) } }, [notice])
   useEffect(() => {
     // En Android se piden todos los permisos la primera vez que se abre la app.
@@ -1306,6 +1356,50 @@ function App({ user, onSignOut, guest = false }) {
   function deleteModuleRecord(moduleKey, id) {
     setRecords((current) => ({ ...current, [moduleKey]: (current[moduleKey] || []).filter((row) => row.id !== id) }))
     setNotice('Registro eliminado')
+  }
+  // --- Memoria persistente del BOT IA ---------------------------------------
+  function applyMemories(next) {
+    memoriesRef.current = next
+    setMemories(next)
+    return next
+  }
+  function saveMemory(categoria, dato) {
+    const record = normalizeMemoryRecord({ categoria, contenido: dato })
+    if (!record) return null
+    const current = memoriesRef.current
+    const next = normalizeMemories([
+      record,
+      ...current.filter((item) => normalize(item.contenido) !== normalize(record.contenido))
+    ])
+    applyMemories(next)
+    return record
+  }
+  function updateMemory(id, categoria, contenido) {
+    const current = memoriesRef.current
+    const next = normalizeMemories(current.map((item) => item.id === id
+      ? { ...item, categoria: categoria || item.categoria, contenido: String(contenido || item.contenido).slice(0, 1200), fecha_actualizacion: new Date().toISOString() }
+      : item))
+    applyMemories(next)
+    return next.find((item) => item.id === id) || null
+  }
+  function forgetMemory(keyOrId, nuevoDato) {
+    const needle = normalize(keyOrId)
+    if (!needle) return { removed: 0, updated: 0 }
+    const current = memoriesRef.current
+    const match = current.find((item) => item.id === keyOrId)
+      || current.find((item) => normalize(`${item.categoria} ${item.contenido}`).includes(needle))
+    if (!match) return { removed: 0, updated: 0 }
+    if (String(nuevoDato || '').trim()) {
+      const updated = { ...match, contenido: String(nuevoDato).trim().slice(0, 1200), fecha_actualizacion: new Date().toISOString() }
+      applyMemories(normalizeMemories(current.map((item) => item.id === match.id ? updated : item)))
+      return { removed: 0, updated: 1, record: updated }
+    }
+    applyMemories(current.filter((item) => item.id !== match.id))
+    return { removed: 1, updated: 0, record: match }
+  }
+  function clearMemories() {
+    applyMemories([])
+    setNotice('Memoria de la IA borrada')
   }
   async function downloadTemplate() {
     const worksheet = XLSX.utils.json_to_sheet([emptyProduct])
@@ -1729,8 +1823,20 @@ function App({ user, onSignOut, guest = false }) {
     const userText = attachmentFile ? `${text}\n📎 ${attachmentFile.name}` : text
     const history = messages
       .filter((item) => !item.pending && item.text !== '…' && typeof item.text === 'string' && item.text.trim())
-      .slice(-10)
-      .map((item) => ({ role: item.role, content: item.text }))
+      .slice(-24)
+      .flatMap((item) => {
+        const rows = [{ role: item.role === 'tool' ? 'assistant' : item.role, content: item.text }]
+        if (Array.isArray(item.tools)) {
+          for (const tool of item.tools.slice(-6)) {
+            rows.push({ role: 'assistant', content: `[Herramienta ${tool.name || 'IA'}] ${JSON.stringify(tool.result || {}).slice(0, 500)}` })
+          }
+        }
+        return rows
+      })
+    // La memoria se lee justo antes de cada consulta para incluir lo que la IA
+    // acaba de guardar en el mismo turno o en sesiones anteriores.
+    const memorySection = () => buildMemorySection(memoriesRef.current)
+    const withMemory = (base) => `${base || DIRECT_AI_SYSTEM_PROMPT}${memorySection()}`
     const catalogForAi = (list = workingProducts) => JSON.stringify(list.map(({ id, name, category, price, stock, format, description, usage, recommendations, features, source }) => ({
       id, name, category, price, stock, format, description, usage, recommendations, features, source
     })))
@@ -1831,11 +1937,14 @@ function App({ user, onSignOut, guest = false }) {
     const requestId = makeId()
     setMessages((items) => [...items, { role: 'user', text: userText }, { role: 'assistant', text: 'El asistente está pensando…', requestId, pending: true }])
     const replace = (nextText, extra = {}) => setMessages((items) => items.map((item) => item.requestId === requestId ? { ...item, text: nextText, pending: false, ...extra } : item))
-    const finish = (messageText, created = [], registered = []) => {
+    const finish = (messageText, created = [], registered = [], tools = []) => {
       const last = [...created].reverse().find((item) => item?.blob)
       const regNote = registered?.length ? `\n\n✅ ${registered.length} productos generados por IA quedaron guardados en el catálogo de VITIMAX.` : ''
       const textOut = `${String(messageText || 'Listo.').trim()}${regNote}`
-      replace(textOut, last ? { file: toFileExtra(last) } : {})
+      const extra = {}
+      if (last) extra.file = toFileExtra(last)
+      if (tools?.length) extra.tools = tools
+      replace(textOut, extra)
     }
     const executeTool = async (name, args = {}) => {
       if (name === 'crear_excel') {
@@ -1877,11 +1986,21 @@ function App({ user, onSignOut, guest = false }) {
         const saved = await generateAssistantFile(args.tipo || 'pdf', args.titulo || text, args.contenido || '', args.filename || '')
         return { ok: true, archivo: saved.filename, ubicacion: saved.location, file: toFileExtra(saved) }
       }
+      if (name === 'guardar_memoria') {
+        const record = saveMemory(args.categoria, args.dato || args.contenido || args.dato_a_recordar)
+        if (!record) return { ok: false, error: 'El dato para recordar está vacío.' }
+        return { ok: true, guardado: record, total: memoriesRef.current.length, mensaje: 'Dato guardado en la memoria persistente de VITIMAX.' }
+      }
+      if (name === 'olvidar_memoria') {
+        const result = forgetMemory(args.clave_o_id || args.id || args.clave, args.nuevo_dato)
+        if (!result.removed && !result.updated) return { ok: false, error: `No encontré un recuerdo que coincida con "${args.clave_o_id || args.clave || ''}".` }
+        return { ok: true, ...result, total: memoriesRef.current.length, mensaje: result.updated ? 'Recuerdo actualizado.' : 'Recuerdo eliminado.' }
+      }
       return { ok: false, error: `Herramienta no reconocida: ${name}` }
     }
     const callDirectAgent = async ({ message, systemPrompt = DIRECT_AI_SYSTEM_PROMPT, maxTokens = 3000, conversation = history, attachment: fileAttachment = attachment, tools = ASSISTANT_TOOLS, toolChoice = 'auto' }) => {
       const messagesForAi = [
-        { role: 'system', content: systemPrompt },
+        { role: 'system', content: withMemory(systemPrompt) },
         ...conversation.map((item) => ({ role: item.role, content: item.content })),
         {
           role: 'user',
@@ -1893,6 +2012,7 @@ function App({ user, onSignOut, guest = false }) {
       ]
       const created = []
       const registered = []
+      const toolTrace = []
       let lastText = ''
       for (let step = 0; step < 5; step += 1) {
         const result = await askOpenRouterMessages({
@@ -1903,7 +2023,7 @@ function App({ user, onSignOut, guest = false }) {
           maxTokens
         })
         lastText = result.content
-        if (!result.toolCalls.length) return { text: result.content, created, registered }
+        if (!result.toolCalls.length) return { text: result.content, created, registered, tools: toolTrace }
         messagesForAi.push({ role: 'assistant', content: result.content || '', tool_calls: result.toolCalls })
         for (const call of result.toolCalls) {
           let args = {}
@@ -1916,6 +2036,7 @@ function App({ user, onSignOut, guest = false }) {
           }
           if (toolResult?.file) created.push(toolResult.file)
           if (Array.isArray(toolResult?.registered)) registered.push(...toolResult.registered)
+          toolTrace.push({ role: 'tool', name: call.function?.name || 'herramienta', arguments: args, result: toolResult })
           messagesForAi.push({
             role: 'tool',
             tool_call_id: call.id || makeId('tool'),
@@ -1923,7 +2044,7 @@ function App({ user, onSignOut, guest = false }) {
           })
         }
       }
-      return { text: lastText || 'Listo. Ejecuté las acciones solicitadas.', created, registered }
+      return { text: lastText || 'Listo. Ejecuté las acciones solicitadas.', created, registered, tools: toolTrace }
     }
     const callProxyOrCloud = async ({ message, systemPrompt, maxTokens = 2000, conversation = history, attachment: fileAttachment = attachment }) => {
       const remoteModes = modes.filter((mode) => mode !== 'direct')
@@ -1935,13 +2056,13 @@ function App({ user, onSignOut, guest = false }) {
             const httpResponse = await fetchWithTimeout(`${aiUrl}/api/assistant`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', ...(aiToken ? { 'X-Vitimax-Token': aiToken } : {}) },
-              body: JSON.stringify({ message, products: workingProducts, attachment: fileAttachment, history: conversation, system: systemPrompt, maxTokens })
+              body: JSON.stringify({ message, products: workingProducts, attachment: fileAttachment, history: conversation, system: withMemory(systemPrompt), memories: memoriesRef.current, maxTokens })
             }, 90_000)
             const data = await httpResponse.json().catch(() => ({}))
             if (!httpResponse.ok) throw new Error(data.error || 'La IA no respondió.')
             answer = data.text
           } else {
-            const request = httpsCallable(firebaseFunctions, 'vitimaxAssistant')({ message, products: workingProducts, attachment: fileAttachment, system: systemPrompt, maxTokens })
+            const request = httpsCallable(firebaseFunctions, 'vitimaxAssistant')({ message, products: workingProducts, attachment: fileAttachment, system: withMemory(systemPrompt), memories: memoriesRef.current, maxTokens })
             const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('La IA remota tardó demasiado.')), 30_000))
             const { data } = await Promise.race([request, timeout])
             answer = data.text
@@ -1958,7 +2079,7 @@ function App({ user, onSignOut, guest = false }) {
       let lastError = null
       if (directKey) {
         try {
-          const result = await askOpenRouterDirect({ message, products: workingProducts, history: [], attachment: fileAttachment, apiKey: directKey, systemPrompt, maxTokens })
+          const result = await askOpenRouterDirect({ message, products: workingProducts, history: [], attachment: fileAttachment, apiKey: directKey, systemPrompt: withMemory(systemPrompt), maxTokens })
           if (result.content) return result.content
         } catch (error) { lastError = error }
       }
@@ -2005,6 +2126,25 @@ function App({ user, onSignOut, guest = false }) {
     const runJsonAction = async (action) => {
       if (!action || typeof action !== 'object') return null
       const kind = normalize(action.accion || action.action || action.tipo || action.type || '')
+      if (kind.includes('guardar_memoria') || action.guardar_memoria) {
+        const record = saveMemory(action.categoria, action.dato || action.contenido)
+        if (!record) return null
+        return {
+          text: `Listo, lo recordaré: ${record.contenido}`,
+          created: [],
+          registered: [],
+          tools: [{ role: 'tool', name: 'guardar_memoria', arguments: action, result: { ok: true, guardado: record } }]
+        }
+      }
+      if (kind.includes('olvidar_memoria') || action.olvidar_memoria) {
+        const result = forgetMemory(action.clave_o_id || action.id || action.clave, action.nuevo_dato)
+        return {
+          text: result.updated ? 'Actualicé ese recuerdo en mi memoria.' : result.removed ? 'Listo, olvidé ese dato.' : 'No encontré un recuerdo que coincida.',
+          created: [],
+          registered: [],
+          tools: [{ role: 'tool', name: 'olvidar_memoria', arguments: action, result }]
+        }
+      }
       if (action.sheets || action.hojas || kind.includes('excel')) {
         const built = await workbookFromData({
           ...action,
@@ -2127,18 +2267,18 @@ function App({ user, onSignOut, guest = false }) {
             const action = parseJsonBlock(result.text)
             if (action) {
               const handled = await runJsonAction(action)
-              if (handled) { finish(handled.text, handled.created, handled.registered); return }
+              if (handled) { finish(handled.text, handled.created, handled.registered, handled.tools); return }
             }
           }
           const answer = stripActionJson(result.text) || (result.created.length ? `✅ Archivo generado: ${result.created[result.created.length - 1].filename}` : 'Listo.')
-          finish(answer, result.created, result.registered)
+          finish(answer, result.created, result.registered, result.tools)
           return
         }
         const answer = await callProxyOrCloud({ message: text })
         const action = parseJsonBlock(answer)
         if (action) {
           const handled = await runJsonAction(action)
-          if (handled) { finish(handled.text, handled.created, handled.registered); return }
+          if (handled) { finish(handled.text, handled.created, handled.registered, handled.tools); return }
         }
         finish(stripActionJson(answer) || 'Listo.')
       } catch (error) {
@@ -2222,7 +2362,7 @@ function App({ user, onSignOut, guest = false }) {
     {overlay === 'notifications' && <NotificationsModal lowStock={lowStock} missingData={missingData} onClose={() => setOverlay(null)} />}
     {importReport && <ImportReport report={importReport} onClose={() => setImportReport(null)} />}
     <button className="assistant-fab" onClick={() => setAssistantOpen(true)} aria-label="Abrir BOT IA VITIMAX"><img className="assistant-bot-image" src="/bot-vitimax.png" alt="" /><span>BOT IA VITIMAX</span></button>
-    {assistantOpen && <Assistant messages={messages} onClose={() => setAssistantOpen(false)} onAsk={askAssistant} onDownload={downloadMessageFile} onOpen={openMessageFile} aiReady={Boolean(resolveAiUrl(settings) || resolveDirectKey(settings) || (firebaseFunctions && import.meta.env.VITE_ENABLE_CLOUD_ASSISTANT === 'true' && !guest))} />}
+    {assistantOpen && <Assistant messages={messages} onClose={() => setAssistantOpen(false)} onAsk={askAssistant} onDownload={downloadMessageFile} onOpen={openMessageFile} aiReady={Boolean(resolveAiUrl(settings) || resolveDirectKey(settings) || (firebaseFunctions && import.meta.env.VITE_ENABLE_CLOUD_ASSISTANT === 'true' && !guest))} memories={memories} onSaveMemory={saveMemory} onDeleteMemory={(id) => forgetMemory(id)} onClearMemories={clearMemories} />}
     {qrOpen && <QrScanner onClose={() => setQrOpen(false)} onResult={handleQrResult} />}
     {moduleModal && canManage && <ModuleFormModal config={MODULE_CONFIG[moduleModal.module]} record={moduleModal.record} onClose={() => setModuleModal(null)} onSave={(values) => saveModuleRecord(MODULE_CONFIG[moduleModal.module].key, values, moduleModal.record)} />}
     {showProduct && canManage && <ProductModal product={editing || emptyProduct} onClose={() => setShowProduct(false)} onSave={saveProduct} onDelete={deleteProduct} saving={saving} />}
@@ -2836,7 +2976,7 @@ function SettingsModal({ settings, onClose, onSave }) {
       </section>
       <section className="settings-group about-group">
         <div className="settings-group-head"><span className="settings-group-icon slate"><Info size={17} /></span><div><h3>Acerca de VITIMAX</h3><p>Centro de gestión agrícola digital.</p></div></div>
-        <div className="about-grid"><div><span>Versión</span><strong>1.1.5</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
+        <div className="about-grid"><div><span>Versión</span><strong>1.1.6</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
       </section>
     </div>
   </ModalShell>
@@ -3032,17 +3172,33 @@ function AssistantIcon() {
   return <span className="assistant-logo" aria-hidden="true"><svg viewBox="0 0 32 32" role="img"><path className="assistant-antenna" d="M16 5V2m0 0-2 2m2-2 2 2" /><rect x="5" y="7" width="22" height="18" rx="6" /><path d="M10 15h.01M22 15h.01M11 20c3 2 7 2 10 0" /><path className="assistant-ear" d="M5 14H2m25 0h3" /></svg><b>IA</b></span>
 }
 
-function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady }) {
+function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memories = [], onSaveMemory, onDeleteMemory, onClearMemories }) {
   const [text, setText] = useState('')
   const [attachment, setAttachment] = useState(null)
   const [attachError, setAttachError] = useState('')
+  const [memoryOpen, setMemoryOpen] = useState(false)
+  const [memoryCategory, setMemoryCategory] = useState(MEMORY_CATEGORIES[0])
+  const [memoryText, setMemoryText] = useState('')
   const fileInputRef = useRef(null)
   const bodyRef = useRef(null)
 
   useEffect(() => {
     const body = bodyRef.current
     if (body) body.scrollTop = body.scrollHeight
-  }, [messages])
+  }, [messages, memoryOpen])
+
+  function addMemory(event) {
+    event.preventDefault()
+    const value = memoryText.trim()
+    if (!value || !onSaveMemory) return
+    onSaveMemory(memoryCategory, value)
+    setMemoryText('')
+  }
+
+  function memoryDate(value) {
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString('es-CL', { day: '2-digit', month: 'short', year: 'numeric' })
+  }
 
   function chooseAttachment(event) {
     const file = event.target.files?.[0]
@@ -3072,10 +3228,40 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady }) {
     <div className="assistant-head">
       <div className="assistant-title">
         <div className="bot-avatar"><img className="assistant-bot-image panel-bot-image" src="/bot-vitimax.png" alt="Robot BOT IA VITIMAX" /></div>
-        <div><strong>BOT IA VITIMAX</strong><span>{aiReady ? 'IA conectada · Catálogo · Archivos · Páginas' : 'IA no configurada · respuestas locales'}</span></div>
+        <div><strong>BOT IA VITIMAX</strong><span>{aiReady ? 'IA conectada · Catálogo · Archivos · Memoria' : 'IA no configurada · respuestas locales'}</span></div>
       </div>
-      <button className="icon-btn" aria-label="Cerrar asistente" onClick={onClose}><X size={18} /></button>
+      <div className="assistant-head-actions">
+        <button type="button" className={`assistant-memory-btn${memoryOpen ? ' active' : ''}`} onClick={() => setMemoryOpen((current) => !current)} aria-expanded={memoryOpen} title="Ver lo que la IA recuerda">
+          <Brain size={14} /><span>Memoria</span>{memories.length > 0 && <b>{memories.length}</b>}
+        </button>
+        <button className="icon-btn" aria-label="Cerrar asistente" onClick={onClose}><X size={18} /></button>
+      </div>
     </div>
+    {memoryOpen ? <div className="assistant-memory">
+      <div className="assistant-memory-head">
+        <div><strong>Memoria de la IA</strong><span>{memories.length ? `${memories.length} recuerdo(s) guardado(s)` : 'Aún no hay recuerdos guardados'}</span></div>
+        {memories.length > 0 && onClearMemories && <button type="button" className="assistant-memory-clear" onClick={onClearMemories}><Trash2 size={13} /> Borrar todo</button>}
+      </div>
+      <form className="assistant-memory-form" onSubmit={addMemory}>
+        <select value={memoryCategory} onChange={(event) => setMemoryCategory(event.target.value)} aria-label="Categoría del recuerdo">
+          {MEMORY_CATEGORIES.map((item) => <option key={item} value={item}>{item}</option>)}
+        </select>
+        <input value={memoryText} onChange={(event) => setMemoryText(event.target.value)} placeholder="Ej: Siempre aplica 19% de IVA" aria-label="Nota para recordar" maxLength={1200} />
+        <button type="submit" disabled={!memoryText.trim()}><Plus size={14} /> Guardar</button>
+      </form>
+      <div className="assistant-memory-list">
+        {!memories.length && <p className="assistant-memory-empty">Pídele al BOT “recuerda que mi nombre es…” o “siempre aplica 19% de IVA”. También puedes agregar una nota manual aquí.</p>}
+        {memories.map((item) => <article className="assistant-memory-item" key={item.id}>
+          <div>
+            <span className="assistant-memory-tag">{item.categoria}</span>
+            <p>{item.contenido}</p>
+            {memoryDate(item.fecha_actualizacion) && <small>{memoryDate(item.fecha_actualizacion)}</small>}
+          </div>
+          {onDeleteMemory && <button type="button" onClick={() => onDeleteMemory(item.id)} aria-label={`Borrar recuerdo: ${item.contenido.slice(0, 40)}`} title="Borrar recuerdo"><Trash2 size={14} /></button>}
+        </article>)}
+      </div>
+      <small className="assistant-memory-note">La IA usa estos datos para personalizar sus respuestas y los conserva al cerrar la app.</small>
+    </div> : <>
     <div className="assistant-body" ref={bodyRef}>
       {messages.map((m, i) => <div className={`chat ${m.role}${m.pending ? ' pending' : ''}`} key={i}>
         <div>
@@ -3111,6 +3297,7 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady }) {
       <button type="submit" className="assistant-send" disabled={busy} aria-label="Enviar mensaje"><ArrowUpToLine size={17} /></button>
     </form>
     <small>Adjunta imágenes, PDF, Excel/CSV o texto (máximo 8 MB). Excel/CSV se analizan como texto y los PDF se leen directamente. Verifica diagnósticos y aplicaciones con un especialista.</small>
+    </>}
   </div>
 }
 

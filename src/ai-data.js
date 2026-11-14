@@ -1124,6 +1124,64 @@ export function summarizeSimulation(simulation) {
 // Prompts del BOT
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Memoria persistente del BOT IA
+// ---------------------------------------------------------------------------
+export const MEMORY_STORAGE_KEY = 'vitimax_ai_memory'
+export const MEMORY_CATEGORIES = ['Negocio', 'Preferencias', 'Instrucciones', 'Datos personales', 'Clientes', 'Productos', 'Finanzas', 'Otros']
+
+function memoryId() {
+  return `mem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+export function normalizeMemoryRecord(raw = {}) {
+  const contenido = String(raw.contenido ?? raw.content ?? raw.dato ?? raw.texto ?? '').trim()
+  if (!contenido) return null
+  return {
+    id: String(raw.id || raw.clave || memoryId()).slice(0, 80),
+    categoria: String(raw.categoria || raw.category || 'Otros').trim().slice(0, 40) || 'Otros',
+    contenido: contenido.slice(0, 1200),
+    fecha_actualizacion: raw.fecha_actualizacion || raw.updatedAt || raw.fecha || new Date().toISOString()
+  }
+}
+
+// Une memorias evitando duplicados por contenido y conserva la más reciente.
+export function normalizeMemories(list) {
+  if (!Array.isArray(list)) return []
+  const map = new Map()
+  for (const item of list) {
+    const record = normalizeMemoryRecord(item)
+    if (!record) continue
+    const key = `${record.categoria.toLowerCase()}|${record.contenido.toLowerCase()}`
+    const previous = map.get(key)
+    if (!previous || String(record.fecha_actualizacion) >= String(previous.fecha_actualizacion)) map.set(key, record)
+  }
+  return [...map.values()].sort((a, b) => String(b.fecha_actualizacion).localeCompare(String(a.fecha_actualizacion)))
+}
+
+// Bloque que se inyecta en el system prompt antes de cada consulta a la IA.
+export function buildMemorySection(memories = []) {
+  const list = normalizeMemories(memories)
+  if (!list.length) return ''
+  const lines = []
+  let total = 0
+  for (const item of list) {
+    const line = `- [${item.categoria}] ${item.contenido.slice(0, 280)}`
+    if (total + line.length > 7000) break
+    lines.push(line)
+    total += line.length + 1
+  }
+  if (!lines.length) return ''
+  return `
+
+### MEMORIA PERSISTENTE DEL USUARIO Y NEGOCIO
+Estos son datos que el usuario te pidió recordar entre sesiones. Úsalos de forma natural para personalizar tus respuestas: NO los repitas robóticamente, NO los enumeres si no viene al caso y NO los contradigas.
+${lines.join('\n')}
+
+Cuando el usuario diga "recuerda que...", "mi nombre es...", "siempre aplica...", "ten en cuenta..." o cambie un dato anterior, llama a guardar_memoria con una categoría y un dato breve y claro. Si dice que algo cambió o ya no aplica, llama a olvidar_memoria (puedes actualizar el recuerdo con "nuevo_dato"). Si no puedes usar herramientas, devuelve un bloque \`\`\`json con {"accion":"guardar_memoria","categoria":"...","dato":"..."} o {"accion":"olvidar_memoria","clave_o_id":"..."} para que la app lo ejecute.
+No guardes contraseñas, claves, tokens ni datos de tarjetas.`
+}
+
 export const DIRECT_AI_SYSTEM_PROMPT = `Eres el BOT IA oficial de VITIMAX, una plataforma para administrar catálogo, inventario, pedidos, clientes, asesorías y soluciones agrícolas.
 Responde siempre en español, de forma clara, cercana y práctica. Puedes ayudar con CUALQUIER tema o tarea: catálogo, inventario, ventas, Excel, PDF, Word, PowerPoint, páginas web, marketing, análisis de archivos, agricultura, negocios, cálculos, redacción, código y consultas generales.
 
@@ -1139,10 +1197,14 @@ HERRAMIENTAS DISPONIBLES:
 - registrar_productos_en_app: guarda en el catálogo real de VITIMAX los productos generados para que aparezcan en el panel y en el catálogo de la app. Úsala cuando el usuario quiera que los productos queden guardados o cuando pida crear un catálogo desde cero.
 - simular_ventas: calcula una proyección de ventas y devuelve recomendaciones comerciales.
 - crear_documento: crea un PDF, Word o PowerPoint real con el contenido estructurado que indiques.
+- guardar_memoria: guarda un dato importante del usuario o del negocio para recordarlo en futuras sesiones (nombre, preferencias, IVA, moneda, formato, clientes, productos, instrucciones). Úsala cuando el usuario diga "recuerda que...", "mi nombre es...", "siempre aplica...", "ten en cuenta...".
+- olvidar_memoria: elimina o actualiza un recuerdo cuando el usuario diga que un dato cambió o ya no aplica.
 
 REGLAS DE TRABAJO:
 - Si el usuario pide un archivo, usa la herramienta correspondiente y confirma al final qué archivo creaste y cuántas hojas o productos incluye.
 - Si generas productos y el usuario quiere usarlos en la app, inclúyelos en "productos" de crear_excel y/o llama a registrar_productos_en_app.
+- Si el usuario te pide recordar algo, llama a guardar_memoria con una categoría adecuada (Negocio, Preferencias, Instrucciones, Datos personales, Clientes, Productos, Finanzas u Otros) y un dato breve. No guardes contraseñas, claves ni datos de tarjetas.
+- Aplica la memoria persistente de forma natural, sin repetirla en cada respuesta ni anunciar que la estás usando.
 - No uses "-" como dato. Si falta un dato, deja el campo vacío o escribe "Pendiente".
 - Para fotografías de plantas o cultivos, ofrece orientación preliminar, explica la incertidumbre y recomienda revisión de un especialista antes de aplicar productos.
 - No confirmes diagnósticos fitosanitarios definitivos ni dosis oficiales si no están en una ficha técnica; si son ejemplos, indícalo.
@@ -1273,6 +1335,36 @@ export const ASSISTANT_TOOLS = [
           filename: { type: 'string' }
         },
         required: ['tipo', 'contenido']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'guardar_memoria',
+      description: 'Guarda un dato importante del usuario o del negocio en la memoria persistente de VITIMAX para recordarlo en futuras sesiones (nombre, preferencias, IVA, moneda, formato, clientes, productos, instrucciones).',
+      parameters: {
+        type: 'object',
+        properties: {
+          categoria: { type: 'string', enum: MEMORY_CATEGORIES, description: 'Categoría del recuerdo' },
+          dato: { type: 'string', description: 'Dato breve y claro que debe recordarse, por ejemplo "El IVA siempre es 19%" o "El usuario se llama Juan Pérez".' }
+        },
+        required: ['categoria', 'dato']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'olvidar_memoria',
+      description: 'Elimina un recuerdo persistente o lo actualiza cuando el usuario indica que un dato cambió o ya no aplica.',
+      parameters: {
+        type: 'object',
+        properties: {
+          clave_o_id: { type: 'string', description: 'ID del recuerdo o texto/clave que permita identificarlo (por ejemplo "IVA" o "mi nombre").' },
+          nuevo_dato: { type: 'string', description: 'Si se indica, actualiza el recuerdo con este nuevo contenido en lugar de eliminarlo.' }
+        },
+        required: ['clave_o_id']
       }
     }
   }

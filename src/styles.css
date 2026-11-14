@@ -735,3 +735,38 @@ h1,h2,h3,h4,p,small,strong,span,label,td,th{overflow-wrap:break-word}
   .auth-tabs button{font-size:11.5px}
   .social-btn{font-size:11.5px;gap:8px}
 }
+
+/* ============================================================
+   VITIMAX 1.1.6 · Memoria persistente del BOT IA
+   ============================================================ */
+.assistant-head-actions{display:flex;align-items:center;gap:6px;flex:0 0 auto}
+.assistant-memory-btn{display:inline-flex;align-items:center;gap:5px;height:30px;padding:0 9px;border-radius:8px;border:1px solid #dfe9e1;background:#f6faf6;color:#3f7a5c;font-size:10px;font-weight:700;cursor:pointer}
+.assistant-memory-btn:hover{background:#eaf5ec}
+.assistant-memory-btn.active{background:#173d2b;border-color:#173d2b;color:#fff}
+.assistant-memory-btn b{display:grid;place-items:center;min-width:16px;height:16px;padding:0 4px;border-radius:99px;background:#d8f55f;color:#173d2b;font-size:9px}
+.assistant-memory{flex:1 1 auto;min-height:0;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:10px;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+.assistant-memory-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.assistant-memory-head strong{display:block;font-size:13px;color:var(--ink)}
+.assistant-memory-head span{display:block;font-size:10px;color:var(--muted);margin-top:1px}
+.assistant-memory-clear{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;color:#b24b44;background:#fff2f0;border:1px solid #f4d9d4;border-radius:7px;padding:6px 8px;cursor:pointer}
+.assistant-memory-form{display:grid;grid-template-columns:auto 1fr auto;gap:6px;align-items:stretch}
+.assistant-memory-form select,.assistant-memory-form input{min-width:0;border:1px solid #dfe9e1;border-radius:8px;background:#fff;padding:8px;font-size:11px;color:var(--ink)}
+.assistant-memory-form select{max-width:96px}
+.assistant-memory-form button{display:inline-flex;align-items:center;gap:4px;border:0;border-radius:8px;background:var(--green);color:#fff;font-size:11px;font-weight:700;padding:0 10px;cursor:pointer}
+.assistant-memory-form button:disabled{opacity:.5;cursor:not-allowed}
+.assistant-memory-list{display:grid;gap:7px}
+.assistant-memory-item{display:flex;align-items:flex-start;gap:8px;padding:9px 10px;border:1px solid #e6efe7;border-radius:10px;background:#fff}
+.assistant-memory-item>div{min-width:0;flex:1}
+.assistant-memory-tag{display:inline-block;font-size:8.5px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#2f7a4f;background:#eaf6ec;border-radius:99px;padding:2px 7px;margin-bottom:4px}
+.assistant-memory-item p{margin:0;font-size:11.5px;line-height:1.45;color:var(--ink);overflow-wrap:anywhere}
+.assistant-memory-item small{display:block;margin-top:3px;font-size:9px;color:var(--muted)}
+.assistant-memory-item>button{flex:0 0 auto;width:28px;height:28px;border-radius:7px;display:grid;place-items:center;color:#b24b44;background:#fff2f0;border:0;cursor:pointer}
+.assistant-memory-empty{margin:4px 0;padding:14px 12px;border:1px dashed #d9e7dc;border-radius:10px;background:#f8fbf8;font-size:11px;line-height:1.5;color:#6c8877;text-align:center}
+.assistant-memory-note{display:block;font-size:9.5px;line-height:1.4;color:var(--muted);text-align:center;padding-bottom:2px}
+@media(max-width:650px){
+  .assistant-memory-btn span{display:none}
+  .assistant-memory-form{grid-template-columns:1fr auto}
+  .assistant-memory-form select{grid-column:1/-1;max-width:none}
+  .assistant-memory-form input{font-size:16px}
+  .assistant-memory{max-height:min(52dvh,380px)}
+}
