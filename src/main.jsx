@@ -79,7 +79,38 @@ function restoreChatMessages(saved) {
 }
 
 function persistableChat(messages) {
-  return messages.slice(-200).map(({ file, blob, ...rest }) => rest)
+  return messages.slice(-150).map(({ file, blob, ...rest }) => {
+    const copy = { ...rest, text: String(rest.text || '').slice(0, 10000) }
+    if (Array.isArray(copy.tools)) {
+      copy.tools = copy.tools.slice(-6).map((tool) => {
+        if (typeof tool.result === 'string') {
+          return { role: 'tool', name: tool.name, arguments: tool.arguments, result: tool.result.slice(0, 1500) }
+        }
+        const { registered, file: toolFile, ...result } = (tool.result && typeof tool.result === 'object') ? tool.result : {}
+        return {
+          role: 'tool',
+          name: tool.name,
+          arguments: tool.arguments,
+          result: JSON.stringify(result).slice(0, 1500)
+        }
+      })
+    }
+    return copy
+  })
+}
+
+// Firestore limita cada documento a 1 MB: se guarda la parte más reciente
+// del chat que quepa con margen, sin perder la copia local completa.
+function cloudChat(messages) {
+  const list = []
+  let size = 0
+  for (const item of persistableChat(messages).reverse()) {
+    const length = JSON.stringify(item).length
+    if (size + length > 600000) break
+    list.unshift(item)
+    size += length
+  }
+  return list
 }
 const emptyProduct = {
   name: '', category: '', price: '', previousPrice: '', stock: '',
@@ -1310,7 +1341,7 @@ function App({ user, onSignOut, guest = false }) {
     const stored = persistableChat(messages)
     localStorage.setItem(localKey(CHAT_KEY), JSON.stringify(stored))
     if (user && firebaseDb && cloudReady) {
-      setDoc(doc(firebaseDb, 'users', user.uid), { assistantChat: stored, assistantChatUpdatedAt: new Date().toISOString() }, { merge: true })
+      setDoc(doc(firebaseDb, 'users', user.uid), { assistantChat: cloudChat(messages), assistantChatUpdatedAt: new Date().toISOString() }, { merge: true })
         .catch(() => { /* la copia local sigue disponible */ })
     }
   }, [messages, user, cloudReady])
@@ -1828,7 +1859,8 @@ function App({ user, onSignOut, guest = false }) {
         const rows = [{ role: item.role === 'tool' ? 'assistant' : item.role, content: item.text }]
         if (Array.isArray(item.tools)) {
           for (const tool of item.tools.slice(-6)) {
-            rows.push({ role: 'assistant', content: `[Herramienta ${tool.name || 'IA'}] ${JSON.stringify(tool.result || {}).slice(0, 500)}` })
+            const detail = typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result || {})
+            rows.push({ role: 'assistant', content: `[Herramienta ${tool.name || 'IA'}] ${detail.slice(0, 500)}` })
           }
         }
         return rows
