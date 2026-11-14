@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import * as XLSX from 'xlsx'
 import { jsPDF } from 'jspdf'
@@ -14,9 +14,9 @@ import { doc, onSnapshot, setDoc } from 'firebase/firestore'
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage'
 import { httpsCallable } from 'firebase/functions'
 import {
-  Activity, AlertTriangle, ArrowDownToLine, ArrowUpRight, ArrowUpToLine, BadgeCheck, BarChart3, Bell, BookOpen, Bot, Boxes, Camera,
-  Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, ClipboardCheck, ClipboardList, Clock, Cloud, Download, Eye,
-  FileBarChart2, FileSpreadsheet, FileText, Filter, Flashlight, Globe, HeartHandshake, ImagePlus, Info, Layers,
+  Activity, AlertCircle, AlertTriangle, ArrowDownToLine, ArrowUpRight, ArrowUpToLine, BadgeCheck, BarChart3, Bell, BookOpen, Bot, Boxes, Camera,
+  Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, ClipboardCheck, ClipboardList, Clock, Cloud, Download, Eye, EyeOff,
+  FileBarChart2, FileSpreadsheet, FileText, Filter, Flashlight, Globe, HeartHandshake, ImagePlus, Info, Layers, Loader2, Lock,
   LayoutDashboard, Leaf, ListChecks, LogOut, Mail, MapPin, Megaphone, Menu, MessageCircle, MessageSquare, MoreHorizontal,
   PackageCheck, Palette, Paperclip, PenLine, Phone, PieChart, Plus, QrCode, ReceiptText, RotateCcw, Search, Send,
   Settings2, ShieldCheck, ShoppingBag, SlidersHorizontal, Sparkles, Sprout, Star, SwitchCamera, Tags, Target, Trash2,
@@ -251,6 +251,15 @@ async function compressImage(file, maxSide = 640, quality = 0.85) {
   } catch {
     return dataUrl
   }
+}
+
+function passwordStrength(value) {
+  const text = String(value || '')
+  if (!text) return 0
+  let score = 1
+  if (text.length >= 10) score += 1
+  if ((/[A-Z]/.test(text) && /[a-z]/.test(text)) || /\d/.test(text) || /[^A-Za-z0-9]/.test(text)) score += 1
+  return Math.min(3, score)
 }
 
 function authErrorMessage(code) {
@@ -1103,31 +1112,47 @@ function AuthScreenV2({ configured, initialError = '', initialNotice = '', onAut
   const register = mode === 'register'
   const reset = mode === 'reset'
   const today = new Date().toISOString().slice(0, 10)
+  const strength = passwordStrength(password)
+  const strengthLabel = ['', 'Débil', 'Buena', 'Fuerte'][strength]
+  function switchMode(next) { setMode(next); setError(''); setNotice('') }
   return <main className="auth-screen"><section className="auth-card">
     <div className="auth-brand"><div className="brand-mark"><BrandMark size={22} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div></div>
-    <p className="eyebrow">ACCESO DE ADMINISTRADOR</p>
-    <h1>{reset ? 'Cambiar contraseña' : register ? 'Crear cuenta' : 'Iniciar sesión'}</h1>
-    <p className="auth-muted">{reset ? 'Te enviaremos un enlace seguro a tu correo.' : register ? 'Crea tu cuenta real de VITIMAX con Google, Microsoft o tu correo.' : 'Entra con tu cuenta real de Google, Microsoft o tu correo.'}</p>
+    {!reset && <div className="auth-tabs" role="tablist" aria-label="Acceso a VITIMAX">
+      <button type="button" role="tab" aria-selected={!register} className={register ? '' : 'active'} onClick={() => switchMode('login')}>Iniciar sesión</button>
+      <button type="button" role="tab" aria-selected={register} className={register ? 'active' : ''} onClick={() => switchMode('register')}>Crear cuenta</button>
+    </div>}
+    <div className="auth-heading">
+      <p className="eyebrow">{reset ? 'RECUPERAR ACCESO' : 'ACCESO DE ADMINISTRADOR'}</p>
+      <h1>{reset ? 'Cambiar contraseña' : register ? 'Crea tu cuenta' : 'Bienvenido de nuevo'}</h1>
+      <p className="auth-muted">{reset ? 'Escribe tu correo y te enviaremos un enlace seguro para crear una nueva contraseña.' : register ? 'Usa tu cuenta real de Google, Microsoft o tu correo electrónico.' : 'Entra con tu cuenta real de Google, Microsoft o tu correo electrónico.'}</p>
+    </div>
     {!reset && <>
       <div className="social-actions">
-        <button type="button" className="social-btn google" disabled={busy} onClick={() => providerLogin(new GoogleAuthProvider())}><GoogleBrandIcon /> Continuar con Google</button>
-        <button type="button" className="social-btn microsoft" disabled={busy} onClick={() => providerLogin(new OAuthProvider('microsoft.com'))}><MicrosoftBrandIcon /> Continuar con Microsoft</button>
+        <button type="button" className="social-btn google" disabled={busy} onClick={() => providerLogin(new GoogleAuthProvider())}><GoogleBrandIcon /><span>Continuar con Google</span></button>
+        <button type="button" className="social-btn microsoft" disabled={busy} onClick={() => providerLogin(new OAuthProvider('microsoft.com'))}><MicrosoftBrandIcon /><span>Continuar con Microsoft</span></button>
       </div>
-      <p className="auth-provider-note">Se abrirá tu cuenta real de Google o Microsoft. La primera vez también crea tu cuenta VITIMAX.</p>
-      <div className="auth-divider"><span>o con correo</span></div>
+      <p className="auth-provider-note">Se abrirá tu cuenta real. Si es tu primera vez, se crea tu cuenta VITIMAX automáticamente.</p>
+      <div className="auth-divider"><span>o con tu correo</span></div>
     </>}
     <form onSubmit={submit} className="auth-form">
-      {register && <div className="auth-form-row"><label>Nombre<input type="text" required value={firstName} onChange={(e) => setFirstName(e.target.value)} autoComplete="given-name" /></label><label>Apellido<input type="text" required value={lastName} onChange={(e) => setLastName(e.target.value)} autoComplete="family-name" /></label></div>}
-      <label>Correo electrónico<input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email" placeholder="tucorreo@ejemplo.com" /></label>
-      {register && <label>Fecha de nacimiento<BirthdayPicker value={birthDate} onChange={setBirthDate} maxDate={today} /><small className="field-help">Calendario VITIMAX 2026: elige directamente el mes, año y día. No puede ser una fecha futura.</small></label>}
-      {!reset && <label>Contraseña<span className="password-field"><input type={showPassword ? 'text' : 'password'} required minLength="6" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={register ? 'new-password' : 'current-password'} /><button type="button" className="password-toggle" onClick={() => setShowPassword((current) => !current)} aria-label={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}><Eye size={17} /></button></span>{register && <small className="field-help">Mínimo 6 caracteres.</small>}</label>}
-      {error && <p className="auth-error">{error}</p>}
-      {notice && <p className="auth-success">{notice}</p>}
-      <button className="btn primary auth-submit" disabled={busy}>{busy ? 'Procesando...' : reset ? 'Enviar enlace' : register ? 'Crear mi cuenta' : 'Iniciar sesión'}</button>
+      {register && <div className="auth-form-row">
+        <label>Nombre<span className="auth-input"><UserRound size={16} /><input type="text" required value={firstName} onChange={(e) => setFirstName(e.target.value)} autoComplete="given-name" placeholder="Tu nombre" /></span></label>
+        <label>Apellido<span className="auth-input"><UserRound size={16} /><input type="text" required value={lastName} onChange={(e) => setLastName(e.target.value)} autoComplete="family-name" placeholder="Tu apellido" /></span></label>
+      </div>}
+      <label>Correo electrónico<span className="auth-input"><Mail size={16} /><input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email" autoCapitalize="none" spellCheck={false} placeholder="tucorreo@ejemplo.com" /></span></label>
+      {register && <label>Fecha de nacimiento<BirthdayPicker value={birthDate} onChange={setBirthDate} maxDate={today} /><small className="field-help">Elige el día en el calendario. No puede ser una fecha futura.</small></label>}
+      {!reset && <label>Contraseña<span className="auth-input"><Lock size={16} /><input type={showPassword ? 'text' : 'password'} required minLength="6" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={register ? 'new-password' : 'current-password'} placeholder={register ? 'Crea una contraseña' : 'Tu contraseña'} /><button type="button" className="password-toggle" onClick={() => setShowPassword((current) => !current)} aria-label={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}>{showPassword ? <EyeOff size={17} /> : <Eye size={17} />}</button></span>
+        {register && password && <span className={`password-strength s${strength}`}><i /><i /><i /><em>{strengthLabel}</em></span>}
+        {register && <small className="field-help">Mínimo 6 caracteres. Usa mayúsculas y números para una clave más segura.</small>}
+      </label>}
+      {error && <p className="auth-error" role="alert"><AlertCircle size={15} /><span>{error}</span></p>}
+      {notice && <p className="auth-success" role="status"><CheckCircle2 size={15} /><span>{notice}</span></p>}
+      <button className="btn primary auth-submit" disabled={busy}>{busy ? <><Loader2 className="auth-spin" size={16} /> Procesando…</> : reset ? 'Enviar enlace' : register ? 'Crear mi cuenta' : 'Iniciar sesión'}</button>
     </form>
-    {!reset && !register && <button type="button" className="auth-forgot" onClick={() => { setMode('reset'); setError(''); setNotice('') }}>¿Olvidaste tu contraseña?</button>}
-    <button type="button" className="auth-switch" onClick={() => { setMode(reset || register ? 'login' : 'register'); setError(''); setNotice('') }}>{reset || register ? 'Volver a iniciar sesión' : 'Crear cuenta de administrador'}</button>
-    <button type="button" className="auth-guest-link" onClick={onGuest}>Continuar como invitado</button>
+    {!reset && !register && <button type="button" className="auth-forgot" onClick={() => switchMode('reset')}>¿Olvidaste tu contraseña?</button>}
+    {reset && <button type="button" className="auth-switch" onClick={() => switchMode('login')}>Volver a iniciar sesión</button>}
+    <div className="auth-guest-row"><span>¿Solo quieres mirar?</span><button type="button" className="auth-guest-link" onClick={onGuest}>Entrar como invitado</button></div>
+    {register && <p className="auth-terms">Tu cuenta queda protegida por Firebase y puedes cerrar sesión cuando quieras.</p>}
   </section></main>
 }
 
@@ -1164,38 +1189,13 @@ function BirthdayPicker({ value, onChange, maxDate }) {
 }
 
 function GoogleBrandIcon() {
-  // Logotipo "G" con degradado continuo (identidad Google 2025/2026).
-  // Los cuatro tramos comparten el color exacto en cada unión para que el
-  // degradado se vea fluido y no como bloques separados.
-  const rawId = useId().replace(/[^a-zA-Z0-9_-]/g, '')
-  const gid = (name) => `vitimax-google-${name}-${rawId}`
+  // Logotipo oficial de Google con los cuatro colores de marca.
+  // Trazado nítido y proporcionado para que se vea bien en cualquier pantalla.
   return <svg className="provider-logo google" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-    <defs>
-      <linearGradient id={gid('red')} gradientUnits="userSpaceOnUse" x1="2.25" y1="6" x2="21.7" y2="6">
-        <stop offset="0" stopColor="#F2801D" />
-        <stop offset=".5" stopColor="#EA4335" />
-        <stop offset="1" stopColor="#8F63B8" />
-      </linearGradient>
-      <linearGradient id={gid('blue')} gradientUnits="userSpaceOnUse" x1="18" y1="21.7" x2="18" y2="2.3">
-        <stop offset="0" stopColor="#3B96A3" />
-        <stop offset=".45" stopColor="#4285F4" />
-        <stop offset="1" stopColor="#8F63B8" />
-      </linearGradient>
-      <linearGradient id={gid('green')} gradientUnits="userSpaceOnUse" x1="2.25" y1="18" x2="21.7" y2="18">
-        <stop offset="0" stopColor="#97B22C" />
-        <stop offset=".5" stopColor="#34A853" />
-        <stop offset="1" stopColor="#3B96A3" />
-      </linearGradient>
-      <linearGradient id={gid('yellow')} gradientUnits="userSpaceOnUse" x1="5" y1="2.3" x2="5" y2="21.7">
-        <stop offset="0" stopColor="#F2801D" />
-        <stop offset=".5" stopColor="#FBBC05" />
-        <stop offset="1" stopColor="#97B22C" />
-      </linearGradient>
-    </defs>
-    <path fill={`url(#${gid('blue')})`} d="M21.35 12.27c0-.72-.06-1.42-.18-2.09H12v3.96h5.24a4.48 4.48 0 0 1-1.94 2.94v2.45h3.14c1.84-1.69 2.91-4.18 2.91-7.26Z" />
-    <path fill={`url(#${gid('green')})`} d="M12 21.7c2.63 0 4.84-.87 6.45-2.36l-3.14-2.45c-.87.58-1.98.93-3.31.93-2.54 0-4.7-1.72-5.47-4.03H3.29v2.53A9.74 9.74 0 0 0 12 21.7Z" />
-    <path fill={`url(#${gid('yellow')})`} d="M6.53 13.79A5.85 5.85 0 0 1 6.23 12c0-.62.11-1.23.3-1.79V7.68H3.29A9.74 9.74 0 0 0 2.25 12c0 1.57.38 3.05 1.04 4.32l3.24-2.53Z" />
-    <path fill={`url(#${gid('red')})`} d="M12 6.18c1.43 0 2.71.49 3.72 1.46l2.79-2.79C16.83 3.28 14.63 2.3 12 2.3a9.74 9.74 0 0 0-8.71 5.38l3.24 2.53C7.3 7.9 9.46 6.18 12 6.18Z" />
+    <path fill="#4285F4" d="M21.35 12.27c0-.72-.06-1.42-.18-2.09H12v3.96h5.24a4.48 4.48 0 0 1-1.94 2.94v2.45h3.14c1.84-1.69 2.91-4.18 2.91-7.26Z" />
+    <path fill="#34A853" d="M12 21.7c2.63 0 4.84-.87 6.45-2.36l-3.14-2.45c-.87.58-1.98.93-3.31.93-2.54 0-4.7-1.72-5.47-4.03H3.29v2.53A9.74 9.74 0 0 0 12 21.7Z" />
+    <path fill="#FBBC05" d="M6.53 13.79A5.85 5.85 0 0 1 6.23 12c0-.62.11-1.23.3-1.79V7.68H3.29A9.74 9.74 0 0 0 2.25 12c0 1.57.38 3.05 1.04 4.32l3.24-2.53Z" />
+    <path fill="#EA4335" d="M12 6.18c1.43 0 2.71.49 3.72 1.46l2.79-2.79C16.83 3.28 14.63 2.3 12 2.3a9.74 9.74 0 0 0-8.71 5.38l3.24 2.53C7.3 7.9 9.46 6.18 12 6.18Z" />
   </svg>
 }
 function MicrosoftBrandIcon() { return <svg className="provider-logo ms" viewBox="0 0 23 23" aria-hidden="true" focusable="false"><rect x="1" y="1" width="10" height="10" fill="#F25022" /><rect x="12" y="1" width="10" height="10" fill="#7FBA00" /><rect x="1" y="12" width="10" height="10" fill="#00A4EF" /><rect x="12" y="12" width="10" height="10" fill="#FFB900" /></svg> }
@@ -2836,7 +2836,7 @@ function SettingsModal({ settings, onClose, onSave }) {
       </section>
       <section className="settings-group about-group">
         <div className="settings-group-head"><span className="settings-group-icon slate"><Info size={17} /></span><div><h3>Acerca de VITIMAX</h3><p>Centro de gestión agrícola digital.</p></div></div>
-        <div className="about-grid"><div><span>Versión</span><strong>1.1.4</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
+        <div className="about-grid"><div><span>Versión</span><strong>1.1.5</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
       </section>
     </div>
   </ModalShell>

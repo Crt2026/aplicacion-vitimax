@@ -654,7 +654,6 @@ h1,h2,h3,h4,p,small,strong,span,label,td,th{overflow-wrap:break-word}
 .profile-account-icon .provider-logo{width:19px;height:19px}
 .provider-logo{shape-rendering:geometricPrecision}
 .provider-logo.ms{width:19px;height:19px;flex-basis:19px}
-.social-btn .provider-logo{filter:drop-shadow(0 1px 1px rgba(23,60,44,.12))}
 .profile-account-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
 .profile-account-actions .btn{display:inline-flex;align-items:center;gap:6px;min-height:40px;font-size:11px}
 .profile-account-actions .profile-signout-inline{color:#b24b44;border-color:#f0d6d2;background:#fff8f7}
@@ -670,4 +669,69 @@ h1,h2,h3,h4,p,small,strong,span,label,td,th{overflow-wrap:break-word}
 @media(max-width:380px){
   .password-toggle{width:34px}
   .password-field input{padding-right:40px}
+}
+
+/* ============================================================
+   VITIMAX 1.1.5 · acceso y registro mejorados
+   ============================================================ */
+.auth-tabs{display:grid;grid-template-columns:1fr 1fr;gap:4px;background:#edf4ee;border:1px solid #e0eae2;border-radius:11px;padding:4px;margin-bottom:18px}
+.auth-tabs button{height:40px;border-radius:8px;font-size:12px;font-weight:700;color:#6c8877;transition:background .15s,color .15s,box-shadow .15s}
+.auth-tabs button:hover{color:#1f5c42}
+.auth-tabs button.active{background:#fff;color:#143d2b;box-shadow:0 1px 5px #173c2c1a}
+.auth-heading .eyebrow{margin-bottom:7px}
+.auth-heading h1{margin:0 0 7px}
+.auth-heading .auth-muted{margin:0 0 18px}
+
+.auth-input{display:flex;align-items:center;gap:9px;border:1px solid #dfe9e1;border-radius:9px;background:#fff;padding:0 11px;color:#93a89c;transition:border-color .15s,box-shadow .15s}
+.auth-input:focus-within{border-color:#7aab8b;box-shadow:0 0 0 3px #7aab8b1f;color:#3f7a5c}
+.auth-input>svg{flex:0 0 auto}
+.auth-form .auth-input input{border:0;outline:0;background:transparent;padding:12px 0;font-size:13px;color:var(--ink);width:100%;min-width:0}
+.auth-form .auth-input input:focus{border:0;box-shadow:none}
+.auth-input .password-toggle{position:static;transform:none;width:34px;height:34px;flex:0 0 34px;display:grid;place-items:center;border-radius:7px;color:#7a9287;background:transparent}
+.auth-input .password-toggle:hover{background:#eef5f0;color:#1f7451}
+
+.password-strength{display:flex;align-items:center;gap:4px;margin-top:2px}
+.password-strength i{display:block;height:4px;flex:1;max-width:46px;border-radius:99px;background:#e2ebe4}
+.password-strength em{font-style:normal;font-size:10px;font-weight:700;color:#7d9387;margin-left:3px}
+.password-strength.s1 i:nth-child(1){background:#d9604f}
+.password-strength.s1 em{color:#b85243}
+.password-strength.s2 i:nth-child(-n+2){background:#dfa72b}
+.password-strength.s2 em{color:#a97f1f}
+.password-strength.s3 i{background:#2f8f5b}
+.password-strength.s3 em{color:#25754a}
+
+.auth-error,.auth-success{display:flex;align-items:flex-start;gap:7px;line-height:1.5}
+.auth-error svg,.auth-success svg{flex:0 0 auto;margin-top:1px}
+.auth-error span,.auth-success span{min-width:0;overflow-wrap:anywhere}
+
+.auth-guest-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:4px 6px;margin-top:15px;color:#8aa094;font-size:11px}
+.auth-guest-row .auth-guest-link{margin:0}
+.auth-terms{margin:14px 0 0;text-align:center;font-size:9.5px;line-height:1.5;color:#9aada1}
+
+.social-btn:disabled{opacity:.65;cursor:progress}
+.social-btn.google:hover{background:#f7faff;border-color:#d8e4f8}
+.social-btn.microsoft:hover{background:#f7fafa;border-color:#d8e6e6}
+.auth-submit:disabled{opacity:.8;cursor:progress}
+@keyframes vitimax-spin{to{transform:rotate(360deg)}}
+.auth-spin{animation:vitimax-spin .8s linear infinite}
+
+/* Calendario de nacimiento más legible en pantallas pequeñas */
+.birthday-calendar{width:min(272px,calc(100vw - 24px));padding:8px}
+.calendar-selects select{font-size:11px;padding:6px 3px}
+.calendar-arrow{width:28px;height:28px;font-size:19px}
+.calendar-weekdays span{font-size:8px;padding:2px 0}
+.calendar-grid button,.calendar-grid span{min-height:27px;font-size:10px;border-radius:5px}
+.calendar-note{font-size:8px;margin-top:6px}
+.date-picker-field{font-size:12px}
+
+@media(max-width:650px){
+  .auth-form .auth-input input{font-size:16px}
+  .auth-tabs button{height:42px}
+  .auth-heading h1{font-size:23px}
+  .auth-card{padding:22px 17px}
+  .auth-guest-row{font-size:11.5px}
+}
+@media(max-width:380px){
+  .auth-tabs button{font-size:11.5px}
+  .social-btn{font-size:11.5px;gap:8px}
 }
