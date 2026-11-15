@@ -23,6 +23,7 @@
     "@capacitor/ios": "^7.6.10",
     "@capacitor/share": "^7.0.4",
     "docx": "^9.15.1",
+    "exceljs": "^4.4.0",
     "html5-qrcode": "^2.3.8",
     "jspdf": "^4.2.1",
     "lucide-react": "^0.468.0",

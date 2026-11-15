@@ -70,10 +70,6 @@ const SHEET_COLUMNS = {
   Proveedores: ['ID', 'Proveedor', 'Contacto', 'Teléfono', 'Correo', 'Ciudad', 'Productos', 'Condiciones']
 }
 
-const HEADER_FILL = '173524'
-const HEADER_TEXT = 'FFFFFF'
-const SUBTLE_FILL = 'EAF2E7'
-
 export function makeId(prefix = 'vitimax') {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
@@ -86,7 +82,8 @@ export function cleanCell(value) {
   // El usuario pidió quitar los "-" que aparecían como dato vacío.
   if (/^[-–—]+$/.test(text)) return ''
   if (/^(n\/?a|sin dato|no aplica)$/i.test(text)) return ''
-  if (/^=/.test(text)) text = `'${text}`
+  // Las fórmulas se conservan tal cual: el escritor avanzado las convierte en
+  // fórmulas reales de Excel. Si se escaparan, el archivo perdería el cálculo.
   return text
 }
 
@@ -916,6 +913,14 @@ export function mergeWorkbookSheets(aiSheets, products = [], records = {}, optio
       provided.set(sheet.name.toLowerCase().replace(/\s+/g, ''), sheet)
     })
   }
+  const canonicalKeys = new Set(SHEET_NAMES.map((name) => name.toLowerCase().replace(/\s+/g, '')))
+  const extras = [...provided.entries()].filter(([key]) => !canonicalKeys.has(key))
+  const hasCanonical = [...provided.keys()].some((key) => canonicalKeys.has(key))
+  // Si la IA entregó solo hojas propias (auditoría, KPIs, datos limpios), se
+  // respeta ese libro tal cual y no se rellenan las 7 hojas de VITIMAX.
+  if (provided.size && !hasCanonical) {
+    return [...provided.values()]
+  }
   const allowDemo = options.allowDemo ?? !products.length
   const merged = SHEET_NAMES.map((name) => {
     const ai = provided.get(name.toLowerCase().replace(/\s+/g, ''))
@@ -929,13 +934,14 @@ export function mergeWorkbookSheets(aiSheets, products = [], records = {}, optio
     const fallback = defaultSheetRows(name, products, records, { ...options, allowDemo })
     return { name, columns: fallback.columns.length ? fallback.columns : SHEET_COLUMNS[name] || [], rows: fallback.rows }
   })
-  if (options.keepExtra) {
-    const canonical = new Set(SHEET_NAMES.map((name) => name.toLowerCase().replace(/\s+/g, '')))
-    provided.forEach((sheet, key) => {
-      if (!canonical.has(key)) merged.push({ name: sheet.name, columns: sheet.columns, rows: sheet.rows })
-    })
-  }
-  return merged
+  // Las hojas de resumen/KPIs van primero; el resto de hojas propias al final.
+  const summaryExtras = extras.filter(([, sheet]) => /resumen|kpi|dashboard|indicador/i.test(sheet.name))
+  const otherExtras = extras.filter(([, sheet]) => !/resumen|kpi|dashboard|indicador/i.test(sheet.name))
+  return [
+    ...summaryExtras.map(([, sheet]) => sheet),
+    ...merged,
+    ...otherExtras.map(([, sheet]) => sheet)
+  ]
 }
 
 function safeSheetName(name, index) {
@@ -943,18 +949,145 @@ function safeSheetName(name, index) {
   return cleaned || `Hoja ${index + 1}`
 }
 
-function columnWidths(columns, rows) {
-  return columns.map((column, index) => {
-    const longest = rows.reduce((max, row) => Math.max(max, String(row[index] ?? '').length), 0)
-    const width = Math.max(String(column || '').length + 2, Math.min(52, longest + 2), 12)
-    return { wch: width }
+const EXCEL_COLORS = {
+  headerFill: 'FF276B3B',
+  headerText: 'FFFFFFFF',
+  zebraFill: 'FFF7FAF5',
+  border: 'FFDDE7DA',
+  kpiFill: 'FFEDF5EE',
+  alertFill: 'FFF8D7D7',
+  alertText: 'FF9B1C1C',
+  okFill: 'FFE3F4E4',
+  okText: 'FF1E6B34'
+}
+
+const NUMERIC_HEADER = /(precio|stock|cantidad|unidades|total|subtotal|iva|margen|valor|monto|ingreso|costo|utilidad|d[ií]as|porcentaje|rotaci[oó]n|tasa|inventario|existencia)/i
+const MONEY_HEADER = /(precio|valor|monto|ingreso|costo|utilidad|margen|total|subtotal|iva|inventario)/i
+const PERCENT_HEADER = /(porcentaje|%|tasa|iva|margen|rotaci[oó]n)/i
+const DATE_HEADER = /(fecha|date|d[ií]a|periodo|mes|año|ano)/i
+const ALERT_HEADER = /(alerta|estado|situaci[oó]n|disponibilidad)/i
+const STOCK_HEADER = /(stock|inventario|existencia)/i
+const MARGIN_HEADER = /(margen|utilidad|rentabilidad|resultado)/i
+const ALERT_BAD = ['quiebre', 'crítico', 'critico', 'agotado', 'sin stock', 'bajo', 'reponer', 'negativo', 'pérdida', 'perdida', 'vencido', 'atrasado']
+const ALERT_GOOD = ['óptimo', 'optimo', 'ok', 'disponible', 'normal', 'completo', 'suficiente', 'positivo', 'vigente', 'al día', 'al dia', 'saludable']
+
+function excelColumnLetter(index) {
+  let value = Number(index) || 1
+  let letters = ''
+  while (value > 0) {
+    const remainder = (value - 1) % 26
+    letters = String.fromCharCode(65 + remainder) + letters
+    value = Math.floor((value - 1) / 26)
+  }
+  return letters || 'A'
+}
+
+function excelCellValue(value, header) {
+  if (value === null || value === undefined) return null
+  if (value instanceof Date) return value
+  if (typeof value === 'number' || typeof value === 'boolean') return value
+  const text = String(value).replace(/\u00a0/g, ' ').trim()
+  if (!text) return null
+  // Una cadena que empieza con "=" es una fórmula real, no texto.
+  if (text.startsWith('=')) return { formula: text.slice(1) }
+  if (PERCENT_HEADER.test(header) && /%\s*$/.test(text)) {
+    const percent = toNumber(text)
+    if (Number.isFinite(percent)) return percent / 100
+  }
+  if (NUMERIC_HEADER.test(header) && /^-?[$€]?\s?\d[\d.,]*$/.test(text)) {
+    const numeric = toNumber(text)
+    if (Number.isFinite(numeric)) return numeric
+  }
+  return text
+}
+
+function excelColumnMeta(columns, rows) {
+  return columns.map((header, index) => {
+    const values = rows.map((row) => row[index]).filter((value) => value !== '' && value !== null && value !== undefined)
+    const numeric = values.length > 0 && values.every((value) => {
+      if (typeof value === 'number') return true
+      if (typeof value === 'string' && value.trim().startsWith('=')) return true
+      return typeof value === 'string' && /^-?[$€]?\s?\d[\d.,]*$/.test(value.trim())
+    })
+    const decimals = numeric && values.some((value) => {
+      const text = String(value).trim()
+      return /[.,]\d{1,2}$/.test(text) && !/[.,]\d{3}$/.test(text)
+    })
+    let numFmt = null
+    if (numeric && PERCENT_HEADER.test(header)) numFmt = '0.0%'
+    else if (numeric && MONEY_HEADER.test(header)) numFmt = decimals ? '#,##0.00' : '#,##0'
+    else if (numeric && DATE_HEADER.test(header)) numFmt = 'yyyy-mm-dd'
+    else if (numeric) numFmt = decimals ? '#,##0.00' : '#,##0'
+    return { numeric, numFmt }
   })
 }
 
-export function buildWorkbook(sheets) {
-  const workbook = XLSX.utils.book_new()
+function excelWidths(columns, rows) {
+  return columns.map((header, index) => {
+    const longest = rows.reduce((max, row) => {
+      const value = row[index]
+      const text = typeof value === 'object' && value?.formula ? `=${value.formula}` : String(value ?? '')
+      return Math.max(max, text.length)
+    }, 0)
+    const width = Math.max(12, Math.min(52, Math.max(String(header || '').length + 2, longest + 2)))
+    return { width }
+  })
+}
+
+function applyExcelConditionalFormatting(worksheet, columns, rows) {
+  if (!rows.length) return
+  const lastRow = rows.length + 1
+  columns.forEach((header, index) => {
+    const label = String(header || '')
+    const letter = excelColumnLetter(index + 1)
+    const ref = `${letter}2:${letter}${lastRow}`
+    const values = rows.map((row) => row[index]).filter((value) => value !== '' && value !== null && value !== undefined)
+    if (!values.length) return
+    const numeric = values.every((value) => typeof value === 'number'
+      || (typeof value === 'string' && value.trim().startsWith('='))
+      || (typeof value === 'string' && /^-?[$€]?\s?\d[\d.,]*$/.test(value.trim())))
+    const alertStyle = {
+      fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: EXCEL_COLORS.alertFill } },
+      font: { color: { argb: EXCEL_COLORS.alertText } }
+    }
+    const okStyle = {
+      fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: EXCEL_COLORS.okFill } },
+      font: { color: { argb: EXCEL_COLORS.okText } }
+    }
+    const rules = []
+    if (ALERT_HEADER.test(label)) {
+      if (numeric) {
+        rules.push({ type: 'expression', formulae: [`$${letter}2<=0`], priority: 1, style: alertStyle })
+        rules.push({ type: 'expression', formulae: [`$${letter}2>0`], priority: 2, style: okStyle })
+      } else {
+        let priority = 1
+        ALERT_BAD.forEach((text) => rules.push({ type: 'containsText', operator: 'containsText', text, priority: priority++, style: alertStyle }))
+        ALERT_GOOD.forEach((text) => rules.push({ type: 'containsText', operator: 'containsText', text, priority: priority++, style: okStyle }))
+      }
+    } else if (numeric && MARGIN_HEADER.test(label)) {
+      rules.push({ type: 'expression', formulae: [`$${letter}2<0`], priority: 1, style: alertStyle })
+      rules.push({ type: 'expression', formulae: [`$${letter}2>=0`], priority: 2, style: okStyle })
+    } else if (numeric && STOCK_HEADER.test(label)) {
+      rules.push({ type: 'expression', formulae: [`$${letter}2<=0`], priority: 1, style: alertStyle })
+      rules.push({ type: 'expression', formulae: [`$${letter}2>0`], priority: 2, style: okStyle })
+    }
+    if (rules.length) worksheet.addConditionalFormatting({ ref, rules })
+  })
+}
+
+/**
+ * Escribe un .xlsx real con ExcelJS: fórmulas activas, formato condicional,
+ * encabezados congelados, autofiltro, anchos y estilos profesionales.
+ */
+export async function createExcelBlob(sheets, options = {}) {
+  const ExcelJS = (await import('exceljs')).default
+  const workbook = new ExcelJS.Workbook()
+  workbook.creator = 'VITIMAX IA'
+  workbook.created = new Date()
+  workbook.modified = new Date()
   const used = new Set()
-  sheets.forEach((sheet, index) => {
+  const list = Array.isArray(sheets) && sheets.length ? sheets : [{ name: 'Hoja 1', columns: [], rows: [] }]
+  list.forEach((sheet, index) => {
     let name = safeSheetName(sheet.name, index)
     let suffix = 1
     while (used.has(name.toLowerCase())) {
@@ -963,43 +1096,211 @@ export function buildWorkbook(sheets) {
     used.add(name.toLowerCase())
     const columns = (sheet.columns || []).map((column) => cleanCell(column))
     const rows = (sheet.rows || []).map((row) => columns.map((_, i) => cleanCell(row[i])))
-    const data = [columns, ...rows]
-    const worksheet = XLSX.utils.aoa_to_sheet(data)
-    worksheet['!cols'] = columnWidths(columns, rows)
-    worksheet['!rows'] = [{ hpt: 26 }]
-    if (columns.length && rows.length) {
-      worksheet['!autofilter'] = {
-        ref: XLSX.utils.encode_range({ s: { c: 0, r: 0 }, e: { c: columns.length - 1, r: rows.length } })
-      }
-    }
-    // Encabezado con color corporativo (SheetJS lo conserva en Excel compatible).
-    columns.forEach((_, columnIndex) => {
-      const cell = worksheet[XLSX.utils.encode_cell({ c: columnIndex, r: 0 })]
-      if (!cell) return
-      cell.s = {
-        font: { bold: true, color: { rgb: HEADER_TEXT }, sz: 11 },
-        fill: { patternType: 'solid', fgColor: { rgb: HEADER_FILL } },
-        alignment: { vertical: 'center', horizontal: 'left', wrapText: true }
-      }
+    const worksheet = workbook.addWorksheet(name, {
+      views: [{ state: 'frozen', ySplit: 1 }],
+      properties: { defaultRowHeight: 18 }
     })
-    rows.forEach((_, rowIndex) => {
-      columns.forEach((__, columnIndex) => {
-        const cell = worksheet[XLSX.utils.encode_cell({ c: columnIndex, r: rowIndex + 1 })]
-        if (!cell) return
-        cell.s = {
-          alignment: { vertical: 'top', wrapText: true },
-          fill: rowIndex % 2 ? { patternType: 'solid', fgColor: { rgb: 'F7FAF5' } } : { patternType: 'solid', fgColor: { rgb: SUBTLE_FILL } }
-        }
+    const meta = excelColumnMeta(columns, rows)
+    worksheet.columns = excelWidths(columns, rows)
+    const headerRow = worksheet.addRow(columns)
+    headerRow.height = 26
+    headerRow.eachCell((cell) => {
+      cell.font = { bold: true, color: { argb: EXCEL_COLORS.headerText }, size: 11 }
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: EXCEL_COLORS.headerFill } }
+      cell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true }
+      cell.border = { bottom: { style: 'thin', color: { argb: EXCEL_COLORS.headerFill } } }
+    })
+    rows.forEach((row, rowIndex) => {
+      const excelRow = worksheet.addRow(row.map((value, columnIndex) => excelCellValue(value, columns[columnIndex] || '')))
+      excelRow.height = 20
+      excelRow.eachCell((cell, columnIndex) => {
+        cell.alignment = { vertical: 'top', wrapText: true }
+        cell.border = { bottom: { style: 'hair', color: { argb: EXCEL_COLORS.border } } }
+        if (rowIndex % 2) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: EXCEL_COLORS.zebraFill } }
+        const format = meta[columnIndex - 1]?.numFmt
+        if (format && !cell.formula) cell.numFmt = format
+        if (cell.formula) cell.numFmt = format || '#,##0'
       })
     })
-    XLSX.utils.book_append_sheet(workbook, worksheet, name)
+    if (columns.length && rows.length) {
+      worksheet.autoFilter = {
+        from: { row: 1, column: 1 },
+        to: { row: 1, column: columns.length }
+      }
+    }
+    const kpiSheet = /resumen|kpi|dashboard|indicador/i.test(name)
+    if (kpiSheet) {
+      worksheet.getColumn(1).font = { bold: true }
+      if (columns.length > 1) {
+        worksheet.getColumn(2).font = { bold: true, size: 12, color: { argb: EXCEL_COLORS.headerFill.slice(2) } }
+        worksheet.getColumn(2).alignment = { horizontal: 'right' }
+      }
+      for (let rowIndex = 2; rowIndex <= rows.length + 1; rowIndex += 1) {
+        worksheet.getCell(rowIndex, 1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: EXCEL_COLORS.kpiFill } }
+      }
+    }
+    applyExcelConditionalFormatting(worksheet, columns, rows)
   })
-  return workbook
+  const buffer = await workbook.xlsx.writeBuffer()
+  return new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
 }
 
-export function workbookBlob(workbook) {
-  const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array', cellStyles: true })
-  return new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+// ---------------------------------------------------------------------------
+// Auditoría de libros adjuntos: todas las hojas, tipos, estadísticas y calidad
+// ---------------------------------------------------------------------------
+
+function numericCell(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value !== 'string') return null
+  const text = value.trim()
+  if (!text || text.startsWith('=')) return null
+  if (!/^-?[$€]?\s?\d[\d.,]*%?$/.test(text)) return null
+  const numeric = toNumber(text)
+  return Number.isFinite(numeric) ? numeric : null
+}
+
+function detectExcelType(values) {
+  let numbers = 0
+  let dates = 0
+  let texts = 0
+  let booleans = 0
+  values.forEach((value) => {
+    if (!hasValue(value)) return
+    if (value instanceof Date) { dates += 1; return }
+    if (typeof value === 'boolean') { booleans += 1; return }
+    if (typeof value === 'number') { numbers += 1; return }
+    const text = String(value).trim()
+    if (/^\d{1,4}[-/]\d{1,2}[-/]\d{1,4}/.test(text) || /^\d{4}-\d{2}-\d{2}/.test(text)) { dates += 1; return }
+    if (numericCell(value) !== null) { numbers += 1; return }
+    texts += 1
+  })
+  if (numbers && !dates && !texts && !booleans) return 'número'
+  if (dates && !numbers && !texts && !booleans) return 'fecha'
+  if (texts && !numbers && !dates && !booleans) return 'texto'
+  if (booleans && !numbers && !dates && !texts) return 'booleano'
+  const total = numbers + dates + texts + booleans
+  if (!total) return 'vacío'
+  return 'mixto'
+}
+
+function formatStat(value) {
+  if (!Number.isFinite(value)) return '0'
+  return String(Number(value.toFixed(2)))
+}
+
+function columnStatistics(values) {
+  const present = values.filter((value) => hasValue(value))
+  const numericValues = present.map(numericCell).filter((value) => value !== null)
+  const unique = new Set(present.map((value) => value instanceof Date ? value.toISOString().slice(0, 10) : String(value).trim().toLowerCase()))
+  const stats = {
+    type: detectExcelType(present),
+    present: present.length,
+    empty: values.length - present.length,
+    unique: unique.size
+  }
+  if (numericValues.length && numericValues.length === present.length) {
+    stats.sum = numericValues.reduce((sum, value) => sum + value, 0)
+    stats.average = stats.sum / numericValues.length
+    stats.min = Math.min(...numericValues)
+    stats.max = Math.max(...numericValues)
+  } else if (present.length) {
+    const counts = new Map()
+    present.forEach((value) => {
+      const key = value instanceof Date ? value.toISOString().slice(0, 10) : String(value).trim().slice(0, 60)
+      counts.set(key, (counts.get(key) || 0) + 1)
+    })
+    stats.top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
+  }
+  return stats
+}
+
+function analyzeSheet(matrix) {
+  if (!matrix.length) return null
+  const sampleLimit = Math.min(matrix.length, 12)
+  let headerIndex = 0
+  let bestScore = -1
+  for (let index = 0; index < sampleLimit; index += 1) {
+    const score = matrix[index].filter(hasValue).length
+    if (score > bestScore) { bestScore = score; headerIndex = index }
+  }
+  const rawHeaders = matrix[headerIndex] || []
+  const headers = rawHeaders.map((header, index) => cleanCell(header) || `Columna ${index + 1}`)
+  const dataRows = matrix.slice(headerIndex + 1).filter((row) => row.some(hasValue))
+  const columns = headers.map((header, index) => ({
+    header,
+    ...columnStatistics(dataRows.map((row) => row[index]))
+  }))
+  const signatures = new Map()
+  dataRows.forEach((row) => {
+    const key = headers.map((_, index) => String(row[index] ?? '').trim().toLowerCase()).join('|')
+    if (!key.replace(/\|/g, '')) return
+    signatures.set(key, (signatures.get(key) || 0) + 1)
+  })
+  const duplicateRows = [...signatures.values()].reduce((sum, count) => sum + Math.max(0, count - 1), 0)
+  return { headers, columns, dataRows, duplicateRows }
+}
+
+/**
+ * Resume todas las hojas de un libro con encabezados, tipos y estadísticas.
+ * El texto resultante se inyecta en el contexto de la IA para que pueda
+ * auditar, limpiar, cruzar y transformar los datos reales del archivo.
+ */
+export function analyzeWorkbook(workbook, options = {}) {
+  const fileName = options.fileName || 'libro.xlsx'
+  if (!workbook?.SheetNames?.length) return { text: '', sheets: [] }
+  const maxSheets = Math.min(workbook.SheetNames.length, Number(options.maxSheets) || 30)
+  const perSheetChars = Number(options.perSheetChars) || 5200
+  const totalChars = Number(options.totalChars) || 30000
+  const sheets = []
+  const chunks = []
+  workbook.SheetNames.slice(0, maxSheets).forEach((sheetName, sheetIndex) => {
+    const sheet = workbook.Sheets[sheetName]
+    if (!sheet) return
+    const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', blankrows: false, raw: true })
+    const analysis = analyzeSheet(matrix)
+    if (!analysis) {
+      sheets.push({ name: sheetName, rows: 0, columns: [] })
+      chunks.push(`HOJA ${sheetIndex + 1}: "${sheetName}" — vacía.`)
+      return
+    }
+    const { headers, columns, dataRows, duplicateRows } = analysis
+    sheets.push({
+      name: sheetName,
+      rows: dataRows.length,
+      columns: columns.map((column) => ({ header: column.header, type: column.type, empty: column.empty, unique: column.unique }))
+    })
+    const lines = [
+      `HOJA ${sheetIndex + 1}: "${sheetName}" — ${dataRows.length} filas de datos · ${headers.length} columnas`,
+      `Encabezados: ${headers.join(' | ')}`,
+      `Tipos: ${columns.map((column) => `${column.header}=${column.type}`).join(', ')}`,
+      'Estadísticas por columna:'
+    ]
+    columns.forEach((column) => {
+      const parts = [`${column.header}: ${column.type}`, `vacíos ${column.empty}`, `únicos ${column.unique}`]
+      if (Number.isFinite(column.sum)) {
+        parts.push(`suma ${formatStat(column.sum)}`, `promedio ${formatStat(column.average)}`, `mín ${formatStat(column.min)}`, `máx ${formatStat(column.max)}`)
+      } else if (column.top?.length) {
+        parts.push(`frecuentes ${column.top.map(([value, count]) => `${value} (${count})`).join(', ')}`)
+      }
+      lines.push(`- ${parts.join(' · ')}`)
+    })
+    if (duplicateRows) lines.push(`Filas duplicadas detectadas: ${duplicateRows}`)
+    if (dataRows.length) {
+      lines.push('Muestra de datos:')
+      dataRows.slice(0, 8).forEach((row) => {
+        lines.push(row.slice(0, headers.length).map((cell) => {
+          if (cell instanceof Date) return cell.toISOString().slice(0, 10)
+          return String(cell ?? '').replace(/\s+/g, ' ').trim().slice(0, 70)
+        }).join(' | '))
+      })
+    }
+    const text = lines.join('\n')
+    chunks.push(text.length > perSheetChars ? `${text.slice(0, perSheetChars)}\n[Hoja recortada]` : text)
+  })
+  if (workbook.SheetNames.length > maxSheets) chunks.push(`[${workbook.SheetNames.length - maxSheets} hojas adicionales no incluidas]`)
+  const header = `LIBRO "${fileName}" — ${workbook.SheetNames.length} hoja(s), ${sheets.reduce((sum, sheet) => sum + (sheet.rows || 0), 0)} fila(s) de datos.`
+  const text = `${header}\n\n${chunks.join('\n\n')}`.slice(0, totalChars)
+  return { text, sheets }
 }
 
 export function parseJsonBlock(text) {  const source = String(text || '').trim()
@@ -1206,6 +1507,33 @@ FORMATO SEGÚN LA TAREA
 - Documentos descargables: usa herramientas reales (crear_excel, crear_pdf, crear_word, crear_ppt, crear_html) cuando el usuario pida un archivo. Diseño profesional, contenido completo y fórmulas activas en Excel.
 - No uses tablas para respuestas de una línea ni Markdown decorativo excesivo. No muestres JSON de acciones al usuario salvo que sea imprescindible.
 
+INTENCIÓN REAL Y HERRAMIENTAS
+- Prioriza siempre la intención explícita del usuario. Verbos como genera, crea, exporta, descarga, analiza, calcula, programa o resume indican una acción concreta.
+- Si pide un PDF, Word, PowerPoint, Excel, HTML o una página, usa la herramienta correspondiente. No actives simulaciones de ventas ni respuestas prearmadas por una palabra suelta.
+- Si pide analizar un archivo adjunto, trabaja sobre sus datos reales. Solo simula ventas cuando lo pida de forma explícita (simula, proyecta, pronostica ventas).
+- Puedes encadenar varias herramientas en un mismo turno: por ejemplo, auditar un Excel, crear el Excel corregido con KPIs y además un informe ejecutivo en PDF.
+
+RAZONAMIENTO Y VERIFICACIÓN MATEMÁTICA
+- Antes de dar resultados financieros, porcentajes, márgenes, impuestos, proyecciones o fórmulas, calcula paso a paso y verifica el resultado.
+- Muestra el cálculo cuando aporte claridad (fórmula, sustitución y resultado), con unidades coherentes (CLP, %, unidades, días).
+- En los archivos generados, los cálculos deben ser fórmulas reales de Excel, no números escritos a mano: =SUM(), =AVERAGE(), =COUNTIF(), =IF(), =ROUND(), referencias entre celdas y entre hojas.
+- Nunca inventes cifras para que un total cuadre. Si falta un dato, dilo o usa un supuesto explícito.
+- Verifica signos, redondeos y porcentajes: el IVA de 19% se aplica como precio × 0.19 (o × 1.19 para el total con IVA).
+
+ANÁLISIS DE DATOS ADJUNTOS
+- Cuando recibas un Excel/CSV, el contexto incluye todas las hojas con encabezados, tipos de datos, sumas, promedios, mínimos, máximos, vacíos, duplicados y una muestra de filas. Úsalo como fuente de verdad.
+- Audita primero la calidad: estructura, columnas vacías, tipos inconsistentes, registros duplicados, valores atípicos y totales que no cuadran. Resume los hallazgos antes de transformar.
+- Luego puedes limpiar, normalizar, cruzar hojas, calcular columnas y devolver un Excel corregido, un informe ejecutivo en PDF/Word o una presentación con los hallazgos.
+- Distingue siempre datos originales, datos corregidos y datos estimados. No presentes una estimación como dato del archivo.
+- Si una fila está incompleta, consérvala con sus campos vacíos y reporta el hallazgo; no inventes nombres, precios, correos ni categorías para "rellenar". Si propones un valor, márcalo explícitamente como sugerencia.
+
+EXCEL AVANZADO
+- Para análisis, auditoría o reportes, la primera hoja debe ser "Resumen Ejecutivo" con KPIs y fórmulas reales que referencien las hojas de datos (por ejemplo =SUM(Ventas!E2:E50), =AVERAGE(Productos!D2:D40), =COUNTIF(Inventario!F2:F40,"Quiebre")).
+- Agrega columnas calculadas cuando aporten valor: IVA 19%, margen bruto, valor total de inventario, ingresos, utilidad y alertas de stock.
+- En las columnas de alerta usa textos claros como "Quiebre crítico", "Stock bajo" u "Óptimo": la app aplica formato condicional suave (rojo para alertas, verde para estados óptimos) y congela la fila de encabezados automáticamente.
+- Usa la propiedad "kpis" de crear_excel para el resumen ejecutivo y escribe las fórmulas empezando con "=". No escapes las fórmulas con apóstrofes.
+- Si el usuario pide una planilla de catálogo general, mantén las 7 hojas de VITIMAX; si pide auditoría o análisis, usa las hojas que los datos necesiten.
+
 MEMORIA
 - Usa los recuerdos disponibles (nombre, preferencias, reglas del negocio, moneda, IVA, clientes, productos) de forma natural, como si ya conocieras al usuario. No digas "según mi base de datos", "como te dije antes" ni anuncies que consultas memoria.
 - Si el usuario pide recordar algo, cambia un dato o da una instrucción permanente, usa guardar_memoria u olvidar_memoria. No guardes contraseñas, claves, tokens ni datos de tarjetas.
@@ -1233,18 +1561,26 @@ HERRAMIENTAS
 CONTEXTO
 Recibes el catálogo, los módulos y registros de VITIMAX, el historial de la conversación y los archivos adjuntos. Úsalos con criterio, sin repetirlos innecesariamente y sin anunciar que los estás leyendo.`
 
-export const EXCEL_SYSTEM_PROMPT = `Eres el generador de Excel de VITIMAX. Creas planillas reales, completas y listas para usar.
+export const EXCEL_SYSTEM_PROMPT = `Eres el generador de Excel de VITIMAX. Creas planillas reales, completas y listas para usar, con fórmulas activas y formato profesional.
 Debes llamar a la herramienta crear_excel (o devolver SOLO un objeto JSON si la herramienta no está disponible) con esta forma:
 {
-  "filename": "catalogo-vitimax.xlsx",
+  "filename": "reporte-vitimax.xlsx",
   "resumen": "Descripción breve del contenido",
   "productos": [ { "name": "...", "category": "...", "price": 9990, "stock": 20, "format": "...", "description": "...", "usage": "...", "recommendations": "...", "features": "..." } ],
+  "kpis": [
+    { "nombre": "Ventas totales", "formula": "=SUM(Ventas!E2:E50)", "unidad": "CLP", "interpretacion": "Ingresos del periodo" }
+  ],
   "sheets": [
-    { "name": "Productos", "columns": ["ID","Nombre","Categoría","Precio CLP","Stock","Formato","Descripción","Modo de uso / dosis","Recomendaciones","Características","Origen"], "rows": [["...","...",9990,20,"...","...","...","...","...","...","..."]] }
+    { "name": "Productos", "columns": ["ID","Nombre","Categoría","Precio CLP","Costo","IVA 19%","Margen bruto","Stock","Valor inventario","Alerta"], "rows": [["P-01","...",9990,6000,"=D2*0.19","=D2-E2-F2",20,"=D2*H2","=IF(H2<=0,\"Quiebre crítico\",IF(H2<=5,\"Stock bajo\",\"Óptimo\"))"]] }
   ]
 }
 Reglas obligatorias:
-- Incluye SIEMPRE las 7 hojas con estos nombres exactos: Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores.
+- Para un catálogo general incluye las 7 hojas: Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores. Para una auditoría, análisis o reporte, usa solo las hojas que los datos necesiten.
+- La primera hoja de un análisis debe ser "Resumen Ejecutivo" con KPIs y fórmulas reales (=SUM, =AVERAGE, =COUNTIF, =IF) que referencien las demás hojas.
+- Las fórmulas deben empezar con "=" y usar referencias reales de fila/columna. No escapes las fórmulas ni escribas el resultado calculado a mano cuando deba ser una fórmula.
+- Agrega columnas calculadas cuando aporten: IVA 19%, margen bruto, valor de inventario, ingresos, utilidad y alertas de stock.
+- En las columnas de alerta usa "Quiebre crítico", "Stock bajo" u "Óptimo" para que la app aplique formato condicional suave en rojo/verde.
+- La app congela automáticamente la fila de encabezados y ajusta el ancho de columnas; no necesitas indicarlo.
 - Si el catálogo real está vacío y el usuario pide un catálogo general, productos de ejemplo, plantas, tierra, abonos o precios, GENERA datos completos y realistas. No dejes las hojas vacías y no te niegues.
 - Si hay catálogo real, úsalo como base; puedes combinarlo con datos nuevos solo si el usuario lo pidió.
 - Precios en CLP como números, sin símbolos ni separadores. Stock y cantidades como números.
@@ -1288,16 +1624,31 @@ export const ASSISTANT_TOOLS = [
     type: 'function',
     function: {
       name: 'crear_excel',
-      description: 'Crea un archivo Excel .xlsx real con hojas, columnas y filas generadas. Úsalo para catálogo, inventario, ventas, clientes, plantas, asesorías, proveedores o cualquier planilla.',
+      description: 'Crea un archivo Excel .xlsx real con hojas, columnas, filas y fórmulas activas. Úsalo para catálogo, inventario, ventas, auditoría de datos, KPIs, clientes, plantas, asesorías, proveedores o cualquier planilla. La app aplica encabezados congelados, estilos, autofiltro y formato condicional suave.',
       parameters: {
         type: 'object',
         properties: {
           filename: { type: 'string', description: 'Nombre del archivo .xlsx' },
           resumen: { type: 'string', description: 'Resumen breve del contenido' },
           productos: { type: 'array', items: productSchema, description: 'Productos que deben guardarse en la app. Inclúyelos si el usuario quiere verlos en el catálogo o pidió crear un catálogo.' },
+          kpis: {
+            type: 'array',
+            description: 'Indicadores para la hoja "Resumen Ejecutivo". Usa fórmulas reales que referencien las hojas de datos.',
+            items: {
+              type: 'object',
+              properties: {
+                nombre: { type: 'string', description: 'Nombre del KPI' },
+                formula: { type: 'string', description: 'Fórmula Excel que empieza con "=", por ejemplo =SUM(Ventas!E2:E50)' },
+                valor: { type: 'string', description: 'Valor literal si no aplica una fórmula' },
+                unidad: { type: 'string', description: 'CLP, %, unidades, días…' },
+                interpretacion: { type: 'string', description: 'Lectura breve del indicador' }
+              },
+              required: ['nombre']
+            }
+          },
           sheets: {
             type: 'array',
-            description: 'Hojas del libro. Para catálogo general usa las 7 hojas: Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores.',
+            description: 'Hojas del libro. Para catálogo general usa las 7 hojas: Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores. Para auditorías usa las hojas necesarias y agrega "Resumen Ejecutivo" primero. Las celdas con fórmulas deben empezar con "=".',
             items: {
               type: 'object',
               properties: {

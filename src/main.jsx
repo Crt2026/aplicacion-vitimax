@@ -27,14 +27,12 @@ import { firebaseAuth, firebaseConfigured, firebaseDb, firebaseFunctions, fireba
 import {
   ASSISTANT_TOOLS,
   DIRECT_AI_SYSTEM_PROMPT,
-  EXCEL_SYSTEM_PROMPT,
   MEMORY_CATEGORIES,
   MEMORY_STORAGE_KEY,
-  SALES_SYSTEM_PROMPT,
+  analyzeWorkbook,
   buildDemoProducts,
   buildMemorySection,
-  buildSalesSheets,
-  buildWorkbook,
+  createExcelBlob,
   extractPdfText,
   mergeImportedProducts,
   mergeImportedRecords,
@@ -49,8 +47,7 @@ import {
   parseWorkbookImport,
   productToRow,
   simulateSales,
-  summarizeSimulation,
-  workbookBlob
+  summarizeSimulation
 } from './ai-data.js'
 
 const STORAGE_KEY = 'vitimax-products-v1'
@@ -426,17 +423,18 @@ async function fileToAttachment(file) {
     mimeType: header.match(/data:(.*);base64/)?.[1] || file.type || 'application/octet-stream',
     data
   }
-  // Excel/CSV: se convierten a texto para que la IA pueda analizarlos de verdad.
+  // Excel/CSV: se analizan TODAS las hojas con encabezados, tipos de datos,
+  // estadísticas, vacíos y duplicados para que la IA trabaje sobre datos reales.
   if (/\.(xlsx|xls|csv)$/i.test(file.name) || /sheet|csv|excel/i.test(attachment.mimeType)) {
     try {
       const buffer = await file.arrayBuffer()
-      const workbook = XLSX.read(new Uint8Array(buffer), { type: 'array' })
-      attachment.text = workbook.SheetNames.slice(0, 5).map((name) => {
-        const csv = XLSX.utils.sheet_to_csv(workbook.Sheets[name])
-        return `HOJA "${name}":\n${csv.slice(0, 14_000)}${csv.length > 14_000 ? '\n[Contenido recortado]' : ''}`
-      }).join('\n\n')
-    } catch {
+      const workbook = XLSX.read(new Uint8Array(buffer), { type: 'array', cellDates: true })
+      const analysis = analyzeWorkbook(workbook, { fileName: file.name })
+      attachment.text = analysis.text
+      attachment.analysis = analysis.sheets
+    } catch (error) {
       attachment.text = ''
+      attachment.analysisError = error?.message || 'No se pudo analizar el libro.'
     }
   } else if (attachment.mimeType === 'application/pdf' || /\.pdf$/i.test(file.name)) {
     try {
@@ -508,7 +506,7 @@ function attachmentContentParts(attachment) {
   if (fileText) {
     parts.push({
       type: 'text',
-      text: `ARCHIVO ADJUNTO "${attachment.name}":\n${fileText.slice(0, 24_000)}${fileText.length > 24_000 ? '\n[Contenido recortado]' : ''}`
+      text: `ARCHIVO ADJUNTO "${attachment.name}":\n${fileText.slice(0, 32_000)}${fileText.length > 32_000 ? '\n[Contenido recortado]' : ''}`
     })
   }
   if (attachment.mimeType?.startsWith('image/')) {
@@ -541,7 +539,7 @@ async function askOpenRouterChatOnce({ messages, apiKey, tools, toolChoice, maxT
       'X-Title': 'VITIMAX'
     },
     body: JSON.stringify(body)
-  }, 120_000)
+  }, 240_000)
   let response = await send()
   let payload = await response.json().catch(() => ({}))
   // Algunos modelos gratuitos no aceptan function calling: reintentamos sin herramientas.
@@ -1470,8 +1468,7 @@ function App({ user, onSignOut, guest = false }) {
     const sheets = template
       ? mergeWorkbookSheets([], [], records, { allowDemo: false }).map((sheet) => ({ ...sheet, rows: [] }))
       : mergeWorkbookSheets(aiSheets, baseProducts, records, { allowDemo: !products.length, ...options })
-    const workbook = buildWorkbook(sheets)
-    const blob = workbookBlob(workbook)
+    const blob = await createExcelBlob(sheets)
     const name = filename || (template ? 'plantilla-vitimax-7-hojas.xlsx' : 'catalogo-vitimax-ia.xlsx')
     const saved = await saveBlob(blob, name)
     setNotice(template
@@ -1831,23 +1828,20 @@ function App({ user, onSignOut, guest = false }) {
   }
   async function askAssistant(text, attachmentFile = null) {
     const promptNormalized = normalize(text)
-    const analysisIntent = /analiz|revis|resum|explic|que dice|contenido/.test(promptNormalized)
-    const explicitGeneration = /genera|generar|crea|crear|descarga|descargar|hazme|elabora|prepara|plantilla|exporta|simula|simular/.test(promptNormalized)
-    const analysisOnly = Boolean(attachmentFile) && analysisIntent && !explicitGeneration
-    const excelHelp = (promptNormalized.includes('ayuda') || promptNormalized.includes('ayudame') || promptNormalized.includes('organizar') || promptNormalized.includes('analizar')) && !explicitGeneration
-    const excelRequested = !excelHelp && !analysisOnly && /excel|xlsx|hoja de calculo|hoja calculo|planilla/.test(promptNormalized)
-    const templateRequested = excelRequested && /plantilla|vacio|vacío/.test(promptNormalized)
-    const fileType = analysisOnly ? null
-      : /pdf/.test(promptNormalized) ? 'pdf'
-        : /word|docx/.test(promptNormalized) ? 'word'
-          : /powerpoint|ppt|presentacion|diapositiva/.test(promptNormalized) ? 'ppt'
-            : /codigo|programa/.test(promptNormalized) ? 'code'
-              : null
-    const pageRequested = !fileType && !analysisOnly && /crear pagina|pagina web|sitio web|landing|pagina promocional/.test(promptNormalized)
-    const salesRequested = !fileType && !pageRequested && (/simul|proyecc|pronostico|pronóstico/.test(promptNormalized)
-      || (/venta/.test(promptNormalized) && /recomend|estrategia|analiz|plan|mejorar|aumentar/.test(promptNormalized)))
+    // Estas señales SOLO alimentan el respaldo local cuando no hay ningún
+    // modelo de IA disponible. Con IA, la intención real la decide el modelo
+    // mediante herramientas y tool_choice: "auto"; ningún verbo o palabra
+    // suelta dispara simulaciones ni respuestas prearmadas.
+    const localExcel = /excel|xlsx|hoja de calculo|hoja calculo|planilla/.test(promptNormalized)
+    const localTemplate = localExcel && /plantilla|vacio|vacío/.test(promptNormalized)
+    const localFileType = /pdf/.test(promptNormalized) ? 'pdf'
+      : /word|docx/.test(promptNormalized) ? 'word'
+        : /powerpoint|ppt|presentacion|diapositiva/.test(promptNormalized) ? 'ppt'
+          : /codigo|programa/.test(promptNormalized) ? 'code'
+            : null
+    const localPage = !localFileType && /crear pagina|pagina web|sitio web|landing|pagina promocional/.test(promptNormalized)
     const pageTerms = promptNormalized.split(/\s+/).filter((term) => term.length > 3 && !['crear', 'pagina', 'web', 'promocional', 'promocion', 'sitio'].includes(term))
-    const pageProduct = pageRequested && (products.length === 1 ? products[0] : products.find((item) => pageTerms.some((term) => normalize(item.name).includes(term))))
+    const pageProduct = localPage && (products.length === 1 ? products[0] : products.find((item) => pageTerms.some((term) => normalize(item.name).includes(term))))
     const cloudAssistantEnabled = import.meta.env.VITE_ENABLE_CLOUD_ASSISTANT === 'true'
     const aiUrl = resolveAiUrl(settings)
     const aiToken = resolveAiToken(settings)
@@ -1930,49 +1924,14 @@ function App({ user, onSignOut, guest = false }) {
       const columns = sheet.columns || []
       return normalizeProducts((sheet.rows || []).map((row) => Object.fromEntries(columns.map((column, index) => [column, row[index]]))), { generated: true })
     }
-    // Si piden simular ventas y el catálogo está vacío, se generan productos de ejemplo
-    // para que la simulación y las recomendaciones tengan datos reales sobre los que trabajar.
-    const salesDemoRequested = salesRequested && !workingProducts.length
-      && /simul|proyecc|pronostico|ejemplo|demo|genera|crea|recomend/.test(promptNormalized)
-    if (salesDemoRequested) {
-      const demo = buildDemoProducts()
-      if (demo.length) {
-        registerProductsInApp(demo)
-        workingProducts = demo
-      }
-    }
-    const low = workingProducts.filter((product) => Number(product.stock) > 0 && Number(product.stock) <= Number(settings.lowStock))
-    const terms = promptNormalized.split(/\s+/).filter((term) => term.length > 2)
-    const matches = workingProducts.filter((product) => {
-      const haystack = normalize(Object.values(product).join(' '))
-      return !terms.length || terms.some((term) => haystack.includes(term))
-    })
-    const product = matches[0]
-    const simulated = salesRequested ? simulateSales(workingProducts, { periodoDias: 30 }) : null
-    let response = ''
-    if (salesRequested && simulated) {
-      response = `${summarizeSimulation(simulated)}${salesDemoRequested ? '\n\n📊 Generé productos de ejemplo porque el catálogo estaba vacío. Están marcados como "Generado por IA (ejemplo)".' : ''}`
-    } else if (!workingProducts.length) {
-      response = `El catálogo está vacío, pero no estoy bloqueado. Puedo generar productos, precios en CLP, plantas, tierra, abonos y datos de ejemplo, y crear Excel/PDF/Word/PowerPoint.\n\nPrueba con:\n• "Crea un catálogo de 10 productos con precios en CLP y genera el Excel con las 7 hojas"\n• "Genera un PDF con una guía de suelos y fertilizantes"\n• "Simula ventas de 30 días y dame recomendaciones"`
-    } else if (promptNormalized.includes('inventario') || promptNormalized.includes('stock') || promptNormalized.includes('reporte')) {
-      response = `INFORME DE INVENTARIO\n\nProductos registrados: ${workingProducts.length}\nUnidades contabilizadas: ${workingProducts.reduce((sum, item) => sum + (Number(item.stock) || 0), 0)}\nStock bajo: ${low.length}\n\n${low.length ? `Requieren atención: ${low.map((item) => `${item.name || 'Sin nombre'} (${item.stock})`).join(', ')}` : 'No hay productos dentro del umbral configurado.'}`
-    } else if (promptNormalized.includes('descripcion') || promptNormalized.includes('publicacion') || promptNormalized.includes('redes') || promptNormalized.includes('contenido')) {
-      response = product
-        ? `BORRADOR DE CONTENIDO\n\n${product.name || 'Producto pendiente'}\n\n${product.description || 'La descripción todavía está pendiente de completar.'}\n\nDatos disponibles: ${[product.category, product.format, product.features].filter(Boolean).join(' · ') || 'Sin características registradas.'}\n\nPrecio: ${money(product.price)} · Stock: ${productPending(product, 'stock') ? 'Pendiente' : product.stock}`
-        : 'Puedo redactar el contenido que necesites. Si quieres que use un producto del catálogo, escribe su nombre.'
-    } else if (promptNormalized.includes('dosis') || promptNormalized.includes('aplicar') || promptNormalized.includes('tratamiento') || promptNormalized.includes('sirve')) {
-      response = product
-        ? `INFORMACIÓN DE ${product.name || 'PRODUCTO'}\n\nModo de uso: ${product.usage || 'Pendiente de ficha técnica.'}\nRecomendaciones: ${product.recommendations || 'Pendientes de ficha técnica.'}\n\nVerifica siempre la etiqueta oficial y consulta a un especialista antes de aplicar cualquier producto.`
-        : 'Puedo darte una orientación general o generar una ficha de ejemplo. Confirma siempre la dosis con la etiqueta oficial y un especialista.'
-    } else {
-      response = `Encontré ${matches.length} coincidencia(s) en el catálogo.${matches.length ? `\n\n${matches.slice(0, 5).map((item) => `• ${item.name || 'Sin nombre'} · ${money(item.price)} · Stock: ${productPending(item, 'stock') ? 'Pendiente' : item.stock}`).join('\n')}` : '\n\nNo encontré coincidencias exactas. Puedo buscar en el catálogo, generar datos de ejemplo o crear el archivo que necesites.'}`
-    }
-    const localFallback = attachmentNote ? `${response}\n\n${attachmentNote}` : response
+    const localFallback = attachmentNote
+      ? `Leí el archivo "${attachmentFile.name}" en modo local.\n\n${attachmentNote}`
+      : 'No hay un modelo de IA configurado ahora mismo. Puedo generar archivos locales con los datos de VITIMAX; para razonamiento avanzado, auditoría de datos y documentos redactados por IA, agrega una clave de OpenRouter en Configuración.'
     const generateLocalFiles = async () => {
       const created = []
-      if (excelRequested) {
+      if (localExcel) {
         try {
-          const saved = await generateAssistantExcel(templateRequested, [], [], '')
+          const saved = await generateAssistantExcel(localTemplate, [], [], '')
           created.push(saved)
           if (!workingProducts.length) {
             const fromSheet = productsFromSheets(saved.sheets)
@@ -1980,10 +1939,10 @@ function App({ user, onSignOut, guest = false }) {
           }
         } catch (error) { setNotice(error?.message || 'No se pudo generar el archivo Excel.') }
       }
-      if (fileType) {
-        try { created.push(await generateAssistantFile(fileType, text)) } catch (error) { setNotice(error?.message || 'No se pudo generar el archivo.') }
+      if (localFileType) {
+        try { created.push(await generateAssistantFile(localFileType, text)) } catch (error) { setNotice(error?.message || 'No se pudo generar el archivo.') }
       }
-      if (pageRequested) {
+      if (localPage) {
         try { created.push(await downloadProductPage(pageProduct, text)) } catch (error) { setNotice(error?.message || 'No se pudo generar la página web.') }
       }
       return created
@@ -1992,18 +1951,43 @@ function App({ user, onSignOut, guest = false }) {
     setMessages((items) => [...items, { role: 'user', text: userText }, { role: 'assistant', text: 'El asistente está pensando…', requestId, pending: true }])
     const replace = (nextText, extra = {}) => setMessages((items) => items.map((item) => item.requestId === requestId ? { ...item, text: nextText, pending: false, ...extra } : item))
     const finish = (messageText, created = [], registered = [], tools = []) => {
-      const last = [...created].reverse().find((item) => item?.blob)
+      // Se adjuntan TODOS los archivos generados en el turno (por ejemplo, un
+      // Excel corregido + un informe PDF), no solo el último.
+      const files = created.map(toFileExtra).filter(Boolean)
       const regNote = registered?.length ? `\n\n✅ ${registered.length} productos generados por IA quedaron guardados en el catálogo de VITIMAX.` : ''
       const textOut = `${String(messageText || 'Listo.').trim()}${regNote}`
       const extra = {}
-      if (last) extra.file = toFileExtra(last)
+      if (files.length) {
+        extra.files = files
+        extra.file = files[files.length - 1]
+      }
       if (tools?.length) extra.tools = tools
       replace(textOut, extra)
     }
     const executeTool = async (name, args = {}) => {
       if (name === 'crear_excel') {
         const aiProducts = normalizeProducts(args.productos || [], { generated: true })
-        const saved = await generateAssistantExcel(false, args.sheets || [], aiProducts, args.filename || '')
+        const sheets = Array.isArray(args.sheets) ? [...args.sheets] : []
+        // Hoja de Resumen Ejecutivo / KPIs al inicio, con fórmulas reales.
+        if (Array.isArray(args.kpis) && args.kpis.length) {
+          // Si el modelo ya incluyó una hoja de resumen vacía, se reemplaza por
+          // la construida desde "kpis" para no duplicar hojas.
+          const withoutEmptySummary = sheets.filter((sheet) => !(
+            /resumen|kpi|dashboard|indicador/i.test(sheet?.name || '') && !(sheet?.rows || []).length
+          ))
+          sheets.length = 0
+          sheets.push({
+            name: 'Resumen Ejecutivo',
+            columns: ['KPI', 'Valor', 'Unidad', 'Interpretación'],
+            rows: args.kpis.map((kpi) => [
+              kpi?.nombre || kpi?.name || 'KPI',
+              kpi?.formula || kpi?.valor || '',
+              kpi?.unidad || '',
+              kpi?.interpretacion || kpi?.nota || ''
+            ])
+          }, ...withoutEmptySummary)
+        }
+        const saved = await generateAssistantExcel(false, sheets, aiProducts, args.filename || '')
         let registered = []
         if (aiProducts.length) {
           registerProductsInApp(aiProducts, Boolean(args.reemplazar))
@@ -2139,54 +2123,30 @@ function App({ user, onSignOut, guest = false }) {
       }
       throw lastError || new Error('La IA no respondió.')
     }
-    const generateText = async ({ message, systemPrompt, maxTokens = 3000, attachment: fileAttachment = attachment }) => {
-      let lastError = null
-      if (directKey) {
-        try {
-          const result = await askOpenRouterDirect({ message, products: workingProducts, history: [], attachment: fileAttachment, apiKey: directKey, systemPrompt: withMemory(systemPrompt), maxTokens })
-          if (result.content) return result.content
-        } catch (error) { lastError = error }
-      }
-      try {
-        return await callProxyOrCloud({ message, systemPrompt, maxTokens, conversation: [], attachment: fileAttachment })
-      } catch (error) { lastError = error }
-      throw lastError || new Error('La IA no respondió.')
-    }
     const workbookFromData = async (data) => {
       const aiProducts = normalizeProducts(data.productos || data.products || [], { generated: true })
-      const saved = await generateAssistantExcel(false, data.sheets || data.hojas || [], aiProducts, data.filename || '')
+      let sheets = [...(data.sheets || data.hojas || [])]
+      if (Array.isArray(data.kpis) && data.kpis.length) {
+        sheets = sheets.filter((sheet) => !(
+          /resumen|kpi|dashboard|indicador/i.test(sheet?.name || '') && !(sheet?.rows || []).length
+        ))
+        sheets.unshift({
+          name: 'Resumen Ejecutivo',
+          columns: ['KPI', 'Valor', 'Unidad', 'Interpretación'],
+          rows: data.kpis.map((kpi) => [
+            kpi?.nombre || kpi?.name || 'KPI',
+            kpi?.formula || kpi?.valor || '',
+            kpi?.unidad || '',
+            kpi?.interpretacion || kpi?.nota || ''
+          ])
+        })
+      }
+      const saved = await generateAssistantExcel(false, sheets, aiProducts, data.filename || '')
       if (aiProducts.length) {
         registerProductsInApp(aiProducts, Boolean(data.reemplazar))
         workingProducts = data.reemplazar ? aiProducts : mergeProducts(workingProducts, aiProducts)
       }
       return { saved, text: data.resumen || data.summary || '', registered: aiProducts }
-    }
-    const generateWorkbookWithAI = async (requestText, fileAttachment) => {
-      const instruction = `Genera el Excel completo para esta solicitud: "${requestText}".\n\nCATÁLOGO ACTUAL (${workingProducts.length} productos):\n${catalogForAi()}\n\nMÓDULOS Y REGISTROS:\n${recordsForAi()}\n\nInstrucciones obligatorias:\n- Usa la herramienta crear_excel.\n- Llena SIEMPRE las 7 hojas: Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores.\n- Si el catálogo está vacío o el usuario pide ejemplos, genera datos completos y realistas (IDs, categorías, precios CLP, stock, dosis, descripciones) y márcalos como "Generado por IA (ejemplo)".\n- No uses "-" como dato: deja "" si falta.\n- Incluye en "productos" los productos que deban quedar guardados en el catálogo de la app.`
-      if (directKey) {
-        try {
-          const result = await callDirectAgent({
-            message: instruction,
-            systemPrompt: EXCEL_SYSTEM_PROMPT,
-            maxTokens: 6000,
-            conversation: [],
-            attachment: fileAttachment,
-            tools: [ASSISTANT_TOOLS[0]],
-            toolChoice: { type: 'function', function: { name: 'crear_excel' } },
-            temperature: 0.35
-          })
-          if (result.created.length) return { saved: result.created[0], text: result.text, registered: result.registered }
-          const data = parseJsonBlock(result.text)
-          if (data?.sheets) return workbookFromData(data)
-        } catch { /* se intenta el siguiente modo */ }
-      }
-      try {
-        const answer = await callProxyOrCloud({ message: instruction, systemPrompt: EXCEL_SYSTEM_PROMPT, maxTokens: 6000, conversation: [], attachment: fileAttachment })
-        const data = parseJsonBlock(answer)
-        if (data?.sheets) return workbookFromData(data)
-      } catch { /* respaldo local */ }
-      const saved = await generateAssistantExcel(false, [], [], '')
-      return { saved, text: '', registered: [] }
     }
     const runJsonAction = async (action) => {
       if (!action || typeof action !== 'object') return null
@@ -2252,87 +2212,15 @@ function App({ user, onSignOut, guest = false }) {
           finish(localFallback, localCreated)
           return
         }
-        if (templateRequested) {
-          const saved = await generateAssistantExcel(true)
-          finish(`✅ Plantilla Excel generada\n\nArchivo: ${saved.filename}\n${saved.location ? `Guardado en: ${saved.location}` : 'Se guardó en tu dispositivo.'}\n\nIncluye las 7 hojas con encabezados formateados y columnas autoajustadas.`, [saved])
-          return
-        }
-        if (salesRequested && simulated) {
-          let advice = ''
-          try {
-            advice = await generateText({
-              message: `Analiza esta simulación de ventas y entrega recomendaciones comerciales concretas.\n\nSIMULACIÓN:\n${JSON.stringify(simulated)}\n\nSolicitud original: ${text}`,
-              systemPrompt: SALES_SYSTEM_PROMPT,
-              maxTokens: 2200,
-              attachment: undefined
-            })
-          } catch { advice = '' }
-          const created = []
-          if (excelRequested || /archivo|descarg|planilla/.test(promptNormalized)) {
-            try {
-              const sheets = buildSalesSheets(simulated, workingProducts, records)
-              const saved = await generateAssistantExcel(false, sheets, [], 'simulacion-ventas-vitimax.xlsx', { keepExtra: true })
-              created.push(saved)
-            } catch (error) { setNotice(error?.message || 'No se pudo generar el Excel de ventas.') }
-          }
-          const demoNote = salesDemoRequested ? '\n\n📊 El catálogo estaba vacío, así que generé productos de ejemplo marcados como "Generado por IA (ejemplo)" para poder simular. Puedes reemplazarlos por tus productos reales.' : ''
-          finish(`${advice ? `${summarizeSimulation(simulated)}\n\n${advice}` : summarizeSimulation(simulated)}${demoNote}`, created)
-          return
-        }
-        if (excelRequested) {
-          // Si el usuario pide exportar SU catálogo real, se genera directo desde los datos
-          // guardados, sin pedirle a la IA que invente hojas ni productos.
-          const wantsOwnCatalog = /mi catalogo|mis productos|mi inventario|catalogo actual|mis datos|productos reales/.test(promptNormalized)
-          if (wantsOwnCatalog && products.length) {
-            const saved = await generateAssistantExcel(false, [], workingProducts, 'catalogo-vitimax.xlsx')
-            const count = (saved.sheets || []).length || 7
-            finish(`✅ Excel generado con tu catálogo real\n\nArchivo: ${saved.filename}\n${saved.location ? `Guardado en: ${saved.location}` : 'Se guardó en tu dispositivo.'}\n\nHojas incluidas: ${count}.\nProductos exportados: ${products.length}.\nClientes, pedidos y asesorías se incluyen si están registrados.`, [saved])
-            return
-          }
-          const { saved } = await generateWorkbookWithAI(text, attachment)
-          if (!workingProducts.length) {
-            const fromSheet = productsFromSheets(saved.sheets)
-            if (fromSheet.length) { registerProductsInApp(fromSheet); workingProducts = fromSheet }
-          }
-          const count = (saved.sheets || []).length || 7
-          const productCount = workingProducts.length
-          finish(`✅ Excel generado\n\nArchivo: ${saved.filename}\n${saved.location ? `Guardado en: ${saved.location}` : 'Se guardó en tu dispositivo.'}\n\nHojas incluidas: ${count}.${productCount ? `\nProductos en el catálogo: ${productCount}.` : '\nEl archivo incluye datos generados por IA claramente marcados como ejemplo.'}`, [saved])
-          return
-        }
-        if (pageRequested || fileType) {
-          const systemPrompt = pageRequested ? PAGE_SYSTEM_PROMPT : fileType === 'code' ? CODE_SYSTEM_PROMPT : DOCUMENT_SYSTEM_PROMPT
-          const realData = catalogForAi()
-          const instruction = pageRequested
-            ? `Crea una página web completa para esta solicitud: "${text}".\nCatálogo actual: ${realData}.\nProducto principal: ${JSON.stringify(pageProduct || {})}.\nCorreo de contacto: ${profile.email || 'no configurado'}.\nSi no hay producto, crea una página general de VITIMAX con contenido de ejemplo claramente marcado.`
-            : fileType === 'code'
-              ? `Genera el código completo para esta solicitud: "${text}".\nSi el código usa datos de VITIMAX, usa estos datos: ${realData}.`
-              : `Redacta el contenido completo para esta solicitud: "${text}".\nDatos de VITIMAX: ${realData}.\nSi el catálogo está vacío y se piden ejemplos, genera datos completos y márcalos como "Generado por IA (ejemplo)".\nTipo de archivo: ${fileType.toUpperCase()}.`
-          let aiAnswer = await generateText({ message: instruction, systemPrompt, maxTokens: 4500 })
-          let saved = null
-          let kind = ''
-          if (pageRequested) {
-            let html = extractHtml(aiAnswer)
-            if (!html) {
-              aiAnswer = await generateText({
-                message: `${instruction}\n\nDevuelve SOLO el HTML completo, empezando con <!doctype html> y terminando con </html>. Sin explicaciones.`,
-                systemPrompt: PAGE_SYSTEM_PROMPT,
-                maxTokens: 4500
-              })
-              html = extractHtml(aiAnswer)
-            }
-            if (!html) throw new Error('La IA no devolvió un HTML válido.')
-            saved = await downloadProductPage(pageProduct, text, html)
-            kind = 'Página web'
-          } else {
-            saved = await generateAssistantFile(fileType, text, aiAnswer)
-            kind = fileType === 'pdf' ? 'PDF' : fileType === 'word' ? 'Word' : fileType === 'ppt' ? 'PowerPoint' : 'Código'
-          }
-          const generated = kind === 'Página web' ? 'generada' : 'generado'
-          finish(`✅ ${kind} ${generated} con IA\n\nArchivo: ${saved.filename}\n${saved.location ? `Guardado en: ${saved.location}` : 'Se guardó en tu dispositivo.'}\n\nPuedes pedirme cambios y lo vuelvo a generar.`, [saved])
-          return
-        }
+        // Con un modelo directo disponible, TODA la intención pasa por el
+        // agente: él elige la herramienta correcta con tool_choice: "auto".
         if (directKey) {
-          const result = await callDirectAgent({ message: text, systemPrompt: DIRECT_AI_SYSTEM_PROMPT, maxTokens: 3500, conversation: history })
+          const result = await callDirectAgent({
+            message: text,
+            systemPrompt: DIRECT_AI_SYSTEM_PROMPT,
+            maxTokens: 7000,
+            conversation: history
+          })
           if (!result.created.length) {
             const action = parseJsonBlock(result.text)
             if (action) {
@@ -2340,10 +2228,11 @@ function App({ user, onSignOut, guest = false }) {
               if (handled) { finish(handled.text, handled.created, handled.registered, handled.tools); return }
             }
           }
-          const answer = stripActionJson(result.text) || (result.created.length ? `✅ Archivo generado: ${result.created[result.created.length - 1].filename}` : 'Listo.')
+          const answer = stripActionJson(result.text) || (result.created.length ? `Listo. Generé ${result.created.length} archivo(s); puedes descargarlos desde este mensaje.` : 'Listo.')
           finish(answer, result.created, result.registered, result.tools)
           return
         }
+        // Sin modelo directo: el proxy/cloud devuelve acciones JSON que la app ejecuta.
         const answer = await callProxyOrCloud({ message: text })
         const action = parseJsonBlock(answer)
         if (action) {
@@ -2352,6 +2241,21 @@ function App({ user, onSignOut, guest = false }) {
         }
         finish(stripActionJson(answer) || 'Listo.')
       } catch (error) {
+        // Si el modelo directo falla, se intenta el respaldo remoto antes de
+        // caer al modo local, sin inventar simulaciones ni respuestas armadas.
+        if (modes.some((mode) => mode !== 'direct')) {
+          try {
+            const answer = await callProxyOrCloud({ message: text })
+            const action = parseJsonBlock(answer)
+            if (action) {
+              const handled = await runJsonAction(action)
+              if (handled) { finish(handled.text, handled.created, handled.registered, handled.tools); return }
+            }
+            finish(stripActionJson(answer) || localFallback)
+            setNotice(aiErrorMessage(error, 'La IA directa no respondió. Se usó el respaldo remoto.'))
+            return
+          } catch { /* se conserva el respaldo local */ }
+        }
         let localCreated = []
         try { localCreated = await generateLocalFiles() } catch { /* el aviso ya se muestra */ }
         finish(localFallback, localCreated)
@@ -3046,7 +2950,7 @@ function SettingsModal({ settings, onClose, onSave }) {
       </section>
       <section className="settings-group about-group">
         <div className="settings-group-head"><span className="settings-group-icon slate"><Info size={17} /></span><div><h3>Acerca de VITIMAX</h3><p>Centro de gestión agrícola digital.</p></div></div>
-        <div className="about-grid"><div><span>Versión</span><strong>1.1.7</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
+        <div className="about-grid"><div><span>Versión</span><strong>1.1.8</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
       </section>
     </div>
   </ModalShell>
@@ -3336,10 +3240,12 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
       {messages.map((m, i) => <div className={`chat ${m.role}${m.pending ? ' pending' : ''}`} key={i}>
         <div>
           {m.text}
-          {m.file && onDownload && <div className="chat-file-actions">
-            <button type="button" className="chat-download" onClick={() => onDownload(m.file, i)}><ArrowDownToLine size={14} /><span>Descargar {m.file.name}</span></button>
-            {m.file.native && m.file.uri && onOpen && <button type="button" className="chat-open" onClick={() => onOpen(m.file)}><ExternalLink size={14} /><span>Abrir archivo</span></button>}
-          </div>}
+          {onDownload && (m.files?.length ? m.files : m.file ? [m.file] : []).map((file, fileIndex) => (
+            <div className="chat-file-actions" key={`${file.name}-${fileIndex}`}>
+              <button type="button" className="chat-download" onClick={() => onDownload(file, i)}><ArrowDownToLine size={14} /><span>Descargar {file.name}</span></button>
+              {file.native && file.uri && onOpen && <button type="button" className="chat-open" onClick={() => onOpen(file)}><ExternalLink size={14} /><span>Abrir archivo</span></button>}
+            </div>
+          ))}
         </div>
       </div>)}
     </div>
