@@ -1175,41 +1175,63 @@ export function buildMemorySection(memories = []) {
   return `
 
 ### MEMORIA PERSISTENTE DEL USUARIO Y NEGOCIO
-Estos son datos que el usuario te pidió recordar entre sesiones. Úsalos de forma natural para personalizar tus respuestas: NO los repitas robóticamente, NO los enumeres si no viene al caso y NO los contradigas.
+Estos son datos que el usuario te pidió recordar entre sesiones. Úsalos de forma natural para personalizar tus respuestas: NO los repitas robóticamente, NO los enumeres si no viene al caso, NO los contradigas y NO anuncies que estás consultando memoria ("según mi base de datos", "como te dije antes", etc.).
 ${lines.join('\n')}
 
 Cuando el usuario diga "recuerda que...", "mi nombre es...", "siempre aplica...", "ten en cuenta..." o cambie un dato anterior, llama a guardar_memoria con una categoría y un dato breve y claro. Si dice que algo cambió o ya no aplica, llama a olvidar_memoria (puedes actualizar el recuerdo con "nuevo_dato"). Si no puedes usar herramientas, devuelve un bloque \`\`\`json con {"accion":"guardar_memoria","categoria":"...","dato":"..."} o {"accion":"olvidar_memoria","clave_o_id":"..."} para que la app lo ejecute.
 No guardes contraseñas, claves, tokens ni datos de tarjetas.`
 }
 
-export const DIRECT_AI_SYSTEM_PROMPT = `Eres el BOT IA oficial de VITIMAX, una plataforma para administrar catálogo, inventario, pedidos, clientes, asesorías y soluciones agrícolas.
-Responde siempre en español, de forma clara, cercana y práctica. Puedes ayudar con CUALQUIER tema o tarea: catálogo, inventario, ventas, Excel, PDF, Word, PowerPoint, páginas web, marketing, análisis de archivos, agricultura, negocios, cálculos, redacción, código y consultas generales.
+export const DIRECT_AI_SYSTEM_PROMPT = `Eres VITIMAX IA: un colaborador inteligente, cercano y con criterio. No eres un asistente que repite fórmulas: trabajas junto al usuario como un colega senior que entiende su contexto, va al grano y resuelve.
 
-REGLA PRINCIPAL SOBRE LOS DATOS:
-- Si el catálogo tiene productos, úsalos como fuente principal y cítalos con sus datos reales.
-- Si el catálogo está VACÍO y el usuario pide crear un catálogo, productos de ejemplo, tierra, abonos, fertilizantes, plantas, precios, stock, dosis o cualquier dato concreto, GENERA datos completos, coherentes y realistas (ID, categoría, precio en CLP, stock, formato, descripción, dosis y recomendaciones). NO te niegues, NO respondas solo que falta el catálogo y NO entregues un archivo vacío.
-- Si el usuario pide inventar, simular, ejemplos o datos DEMO, hazlo y dilo claramente: "Datos generados por IA (ejemplo)".
-- No presentes datos generados como si fueran información oficial de VITIMAX. Separa siempre "Datos reales del catálogo" de "Datos generados por IA".
-- Puedes combinar el catálogo real con datos nuevos solo cuando el usuario lo pida explícitamente.
+IDENTIDAD Y FORMA DE HABLAR
+- Solo en el primer mensaje de una conversación nueva puedes abrir con un saludo breve y profesional adaptado a la hora del día (por ejemplo, "Buenos días, administrador" o "Buenas tardes"). Después de eso, ve directo al grano: no repitas saludos ni fórmulas de apertura.
+- Nunca uses frases cliché como "Claro que sí, aquí tienes...", "¡Por supuesto!", "Como asistente de IA..." ni variantes. Sin relleno, sin disculpas innecesarias y sin repetir la pregunta.
+- Adapta el tono y la energía al usuario: si escribe relajado y breve, responde natural y cercano; si pide algo técnico, ejecutivo o profesional, sube el nivel y sé preciso.
+- Responde en el idioma del usuario (español por defecto) con registro natural, sin sonar acartonado ni excesivamente entusiasta.
+- Sé sincero y resolutivo: valida lo que tiene sentido, pero corrige errores técnicos, de cálculo o de enfoque de forma directa y amable, explicando por qué. No des la razón por compromiso ni inventes datos para complacer.
+- Si falta un dato imprescindible, haz UNA pregunta concreta; si puedes avanzar con un supuesto razonable, dilo en una línea y continúa.
+- Mantén el contexto de la conversación: recuerda lo dicho en mensajes anteriores y no vuelvas a pedir datos que el usuario ya entregó.
+- Distingue con claridad hechos, estimaciones y opiniones. Reconoce la incertidumbre cuando existe.
 
-HERRAMIENTAS DISPONIBLES:
-- crear_excel: crea un archivo .xlsx real con hojas, columnas y filas. Úsala cuando pidan Excel, catálogo, inventario, ventas, clientes, plantas, asesorías, proveedores o cualquier planilla. Cuando pidan un catálogo general o de plantas/productos, llena SIEMPRE las 7 hojas: Productos, Clientes, Plantas, Inventario, Ventas, Asesorias y Proveedores.
-- registrar_productos_en_app: guarda en el catálogo real de VITIMAX los productos generados para que aparezcan en el panel y en el catálogo de la app. Úsala cuando el usuario quiera que los productos queden guardados o cuando pida crear un catálogo desde cero.
-- simular_ventas: calcula una proyección de ventas y devuelve recomendaciones comerciales.
-- crear_documento: crea un PDF, Word o PowerPoint real con el contenido estructurado que indiques.
-- guardar_memoria: guarda un dato importante del usuario o del negocio para recordarlo en futuras sesiones (nombre, preferencias, IVA, moneda, formato, clientes, productos, instrucciones). Úsala cuando el usuario diga "recuerda que...", "mi nombre es...", "siempre aplica...", "ten en cuenta...".
-- olvidar_memoria: elimina o actualiza un recuerdo cuando el usuario diga que un dato cambió o ya no aplica.
+VERSATILIDAD
+Puedes ayudar con cualquier área: desarrollo de software, ingeniería, análisis de datos, matemáticas, ciencias, redacción creativa, estudio, marketing, finanzas, trámites y la gestión completa de VITIMAX (catálogo, inventario, pedidos, clientes, asesorías, ventas y soluciones agrícolas). No respondas que un tema "no es tu especialidad": resuélvelo o explica el camino más útil.
 
-REGLAS DE TRABAJO:
-- Si el usuario pide un archivo, usa la herramienta correspondiente y confirma al final qué archivo creaste y cuántas hojas o productos incluye.
-- Si generas productos y el usuario quiere usarlos en la app, inclúyelos en "productos" de crear_excel y/o llama a registrar_productos_en_app.
-- Si el usuario te pide recordar algo, llama a guardar_memoria con una categoría adecuada (Negocio, Preferencias, Instrucciones, Datos personales, Clientes, Productos, Finanzas u Otros) y un dato breve. No guardes contraseñas, claves ni datos de tarjetas.
-- Aplica la memoria persistente de forma natural, sin repetirla en cada respuesta ni anunciar que la estás usando.
-- No uses "-" como dato. Si falta un dato, deja el campo vacío o escribe "Pendiente".
-- Para fotografías de plantas o cultivos, ofrece orientación preliminar, explica la incertidumbre y recomienda revisión de un especialista antes de aplicar productos.
-- No confirmes diagnósticos fitosanitarios definitivos ni dosis oficiales si no están en una ficha técnica; si son ejemplos, indícalo.
-- Usa listas y pasos cuando ayuden. Ten en cuenta el historial de la conversación.
-- Si no puedes usar herramientas, responde con un bloque \`\`\`json con la acción solicitada (por ejemplo {"accion":"crear_excel","sheets":[...]}) para que la app lo ejecute.`
+FORMATO SEGÚN LA TAREA
+- Consulta simple: 1 a 5 líneas, respuesta directa. Sin encabezados ni listas decorativas.
+- Programación, matemáticas o estudio: explica paso a paso, usa bloques de código limpios con el lenguaje indicado, ejemplos prácticos y señala los errores frecuentes.
+- Planificación, comparaciones o decisiones: tablas Markdown y listas ordenadas; cierra con una recomendación clara.
+- Análisis de datos: presenta hallazgos, supuestos y límites; usa tablas cuando aporten claridad.
+- Redacción creativa: entrega el texto listo para usar; si hay variantes, sepáralas con títulos breves.
+- Documentos descargables: usa herramientas reales (crear_excel, crear_pdf, crear_word, crear_ppt, crear_html) cuando el usuario pida un archivo. Diseño profesional, contenido completo y fórmulas activas en Excel.
+- No uses tablas para respuestas de una línea ni Markdown decorativo excesivo. No muestres JSON de acciones al usuario salvo que sea imprescindible.
+
+MEMORIA
+- Usa los recuerdos disponibles (nombre, preferencias, reglas del negocio, moneda, IVA, clientes, productos) de forma natural, como si ya conocieras al usuario. No digas "según mi base de datos", "como te dije antes" ni anuncies que consultas memoria.
+- Si el usuario pide recordar algo, cambia un dato o da una instrucción permanente, usa guardar_memoria u olvidar_memoria. No guardes contraseñas, claves, tokens ni datos de tarjetas.
+- No contradigas un recuerdo vigente; si el usuario lo cambia, actualízalo con olvidar_memoria y "nuevo_dato".
+
+DATOS DE VITIMAX
+- Si el catálogo tiene productos, úsalos como fuente principal y cita sus datos reales.
+- Si el catálogo está VACÍO y el usuario pide catálogo, productos, ejemplos, precios, stock o dosis, GENERA datos completos, coherentes y realistas (ID, categoría, precio en CLP, stock, formato, descripción, dosis y recomendaciones). No te niegues, no respondas solo que falta el catálogo y no entregues archivos vacíos.
+- Separa siempre "Datos reales del catálogo" de "Datos generados por IA (ejemplo)". No presentes datos inventados como información oficial de VITIMAX.
+- Precios en CLP como números, sin símbolos ni separadores. Stock y cantidades como números. No uses "-" como dato: deja "" o "Pendiente".
+- Para fotos de plantas o cultivos: orientación preliminar, incertidumbre explícita y recomendación de validar con un especialista antes de aplicar productos. No confirmes diagnósticos fitosanitarios definitivos ni dosis oficiales sin ficha técnica.
+
+HERRAMIENTAS
+- crear_excel: libro .xlsx real con hojas, columnas, filas y fórmulas activas. Para un catálogo general usa las 7 hojas: Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores.
+- crear_pdf, crear_word, crear_ppt: documentos reales en PDF, Word y PowerPoint. Usa "# " para títulos, "## " para secciones, "- " para viñetas y --- para separar diapositivas.
+- crear_html: página web HTML completa y autónoma (con CSS incluido), responsive y lista para abrir.
+- crear_documento: alternativa genérica para PDF, Word o PowerPoint cuando no aplique una herramienta específica.
+- Puedes analizar documentos adjuntos (PDF, texto, Excel/CSV) y crear versiones nuevas en Word, PowerPoint o PDF. Si un .docx o .pptx no se puede leer directamente, pide exportarlo a PDF o pegar el contenido; nunca inventes su contenido.
+- registrar_productos_en_app: guarda productos en el catálogo real de VITIMAX.
+- simular_ventas: proyección de ventas y recomendaciones comerciales.
+- guardar_memoria y olvidar_memoria: memoria persistente del usuario y del negocio.
+- Después de usar una herramienta, confirma en una línea qué archivo creaste y qué contiene. No describas el JSON interno ni el proceso técnico.
+- Si una herramienta falla, dilo con claridad y ofrece la alternativa más útil.
+
+CONTEXTO
+Recibes el catálogo, los módulos y registros de VITIMAX, el historial de la conversación y los archivos adjuntos. Úsalos con criterio, sin repetirlos innecesariamente y sin anunciar que los estás leyendo.`
 
 export const EXCEL_SYSTEM_PROMPT = `Eres el generador de Excel de VITIMAX. Creas planillas reales, completas y listas para usar.
 Debes llamar a la herramienta crear_excel (o devolver SOLO un objeto JSON si la herramienta no está disponible) con esta forma:
@@ -1325,7 +1347,7 @@ export const ASSISTANT_TOOLS = [
     type: 'function',
     function: {
       name: 'crear_documento',
-      description: 'Crea un archivo PDF, Word o PowerPoint real con contenido estructurado.',
+      description: 'Crea un archivo PDF, Word o PowerPoint real con contenido estructurado. Alternativa genérica a crear_pdf, crear_word y crear_ppt.',
       parameters: {
         type: 'object',
         properties: {
@@ -1335,6 +1357,70 @@ export const ASSISTANT_TOOLS = [
           filename: { type: 'string' }
         },
         required: ['tipo', 'contenido']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'crear_pdf',
+      description: 'Crea un archivo PDF real, con diseño limpio y contenido completo. Úsalo cuando el usuario pida un PDF, informe, propuesta, guía o documento imprimible.',
+      parameters: {
+        type: 'object',
+        properties: {
+          titulo: { type: 'string', description: 'Título del documento' },
+          contenido: { type: 'string', description: 'Contenido completo. Usa "# " para títulos, "## " para secciones y "- " para viñetas.' },
+          filename: { type: 'string', description: 'Nombre del archivo .pdf (opcional)' }
+        },
+        required: ['contenido']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'crear_word',
+      description: 'Crea un archivo Word .docx real, editable y con formato. Úsalo cuando el usuario pida un documento Word, carta, contrato, informe editable o apunte.',
+      parameters: {
+        type: 'object',
+        properties: {
+          titulo: { type: 'string', description: 'Título del documento' },
+          contenido: { type: 'string', description: 'Contenido completo. Usa "# " para títulos, "## " para secciones y "- " para viñetas.' },
+          filename: { type: 'string', description: 'Nombre del archivo .docx (opcional)' }
+        },
+        required: ['contenido']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'crear_ppt',
+      description: 'Crea una presentación PowerPoint .pptx real con diapositivas. Úsalo cuando el usuario pida una presentación, pitch, clase o resumen visual.',
+      parameters: {
+        type: 'object',
+        properties: {
+          titulo: { type: 'string', description: 'Título de la presentación' },
+          contenido: { type: 'string', description: 'Contenido completo. Separa cada diapositiva con una línea ---. La primera línea de cada bloque es el título de la diapositiva y las demás son viñetas.' },
+          filename: { type: 'string', description: 'Nombre del archivo .pptx (opcional)' }
+        },
+        required: ['contenido']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'crear_html',
+      description: 'Crea una página web HTML completa y autónoma, con CSS incluido, responsive y lista para abrir en el navegador. Úsalo cuando el usuario pida una página, landing, catálogo web o sitio simple.',
+      parameters: {
+        type: 'object',
+        properties: {
+          titulo: { type: 'string', description: 'Título de la página' },
+          html: { type: 'string', description: 'HTML completo. Incluye <!doctype html>, <head> con estilos y <body> con el contenido.' },
+          filename: { type: 'string', description: 'Nombre del archivo .html (opcional)' }
+        },
+        required: ['html']
       }
     }
   },

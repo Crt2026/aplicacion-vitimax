@@ -121,6 +121,13 @@ function normalize(value) {
   return String(value ?? '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
 }
 
+function greetingForNow() {
+  const hour = new Date().getHours()
+  if (hour < 12) return 'Buenos días'
+  if (hour < 20) return 'Buenas tardes'
+  return 'Buenas noches'
+}
+
 function makeId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
   return `vitimax-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
@@ -470,7 +477,7 @@ function aiErrorMessage(error, fallback) {
   return message || fallback
 }
 
-const DIRECT_AI_MODELS = (import.meta.env.VITE_AI_MODELS || 'openai/gpt-4o-mini,google/gemini-2.5-flash,openrouter/free')
+const DIRECT_AI_MODELS = (import.meta.env.VITE_AI_MODELS || 'google/gemini-2.5-flash,anthropic/claude-3.5-sonnet,openai/gpt-4o-mini')
   .split(',')
   .map((item) => item.trim())
   .filter(Boolean)
@@ -513,7 +520,7 @@ function attachmentContentParts(attachment) {
   return parts
 }
 
-async function askOpenRouterChatOnce({ messages, apiKey, tools, toolChoice, maxTokens = 1500, temperature = 0.35, responseFormat }) {
+async function askOpenRouterChatOnce({ messages, apiKey, tools, toolChoice, maxTokens = 1500, temperature = 0.7, responseFormat }) {
   const body = {
     models: DIRECT_AI_MODELS,
     messages,
@@ -577,7 +584,7 @@ async function askOpenRouterChat(options) {
   }
 }
 
-async function askOpenRouterDirect({ message, products, history, attachment, apiKey, systemPrompt, maxTokens = 1500, tools, toolChoice }) {
+async function askOpenRouterDirect({ message, products, history, attachment, apiKey, systemPrompt, maxTokens = 1500, tools, toolChoice, temperature = 0.7 }) {
   const catalog = JSON.stringify((products || []).map(({ id, name, category, price, stock, format, description, usage, recommendations, features }) => ({
     id, name, category, price, stock, format, description, usage, recommendations, features
   })))
@@ -594,12 +601,13 @@ async function askOpenRouterDirect({ message, products, history, attachment, api
     apiKey,
     tools,
     toolChoice,
-    maxTokens
+    maxTokens,
+    temperature
   })
 }
 
-async function askOpenRouterMessages({ messages, apiKey, tools, toolChoice, maxTokens = 1500, responseFormat }) {
-  return askOpenRouterChat({ messages, apiKey, tools, toolChoice, maxTokens, responseFormat })
+async function askOpenRouterMessages({ messages, apiKey, tools, toolChoice, maxTokens = 1500, responseFormat, temperature = 0.7 }) {
+  return askOpenRouterChat({ messages, apiKey, tools, toolChoice, maxTokens, responseFormat, temperature })
 }
 
 const IMPORT_AI_SCHEMA_PROMPT = `Eres el importador universal de VITIMAX. Recibes las primeras filas de un Excel o CSV irregular y debes mapearlas al esquema de la aplicación.
@@ -633,7 +641,8 @@ async function importWorkbookWithAi(rawText, fileName, settings) {
         ],
         apiKey: directKey,
         maxTokens: 3200,
-        responseFormat: { type: 'json_object' }
+        responseFormat: { type: 'json_object' },
+        temperature: 0.2
       })
       const parsed = parseJsonBlock(result.content)
       if (parsed) return parsed
@@ -1279,7 +1288,7 @@ function App({ user, onSignOut, guest = false }) {
   const [overlay, setOverlay] = useState(null)
   const [importReport, setImportReport] = useState(null)
   const [messages, setMessages] = useState(() => {
-    const saved = readLocalJson(localKey(CHAT_KEY), [{ role: 'assistant', text: 'Hola. Soy el BOT IA de VITIMAX. Puedo crear catálogos y datos de ejemplo, generar Excel/PDF/Word/PowerPoint, simular ventas con recomendaciones, analizar archivos y responder cualquier consulta. ¿Qué necesitas?' }])
+    const saved = readLocalJson(localKey(CHAT_KEY), [{ role: 'assistant', text: `${greetingForNow()}, ${profile.name || 'administrador'}. Soy VITIMAX IA: puedo ayudarte con código, estudios, cálculos, redacción, negocios y toda la gestión de VITIMAX. También genero Excel, PDF, Word, PowerPoint y páginas web reales. ¿Qué resolvemos?` }])
     return restoreChatMessages(saved)
   })
   const [memories, setMemories] = useState(() => normalizeMemories(readLocalJson(localKey(MEMORY_STORAGE_KEY), [])))
@@ -1585,6 +1594,19 @@ function App({ user, onSignOut, guest = false }) {
     setNotice(`${type === 'ppt' ? 'PowerPoint' : type === 'word' ? 'Word' : type.toUpperCase()} generado y guardado`)
     return saved || { filename, location: '' }
   }
+  async function saveHtmlDocument({ titulo, html, filename }) {
+    const body = String(html || '').trim()
+    if (!body) throw new Error('La página HTML está vacía.')
+    const slug = normalize(titulo || 'pagina-vitimax').replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'pagina-vitimax'
+    const base = String(filename || '').trim().replace(/\.html?$/i, '') || `pagina-${slug}`
+    const name = `${base}.html`
+    const page = /<html[\s>]/i.test(body)
+      ? body
+      : `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(titulo || 'VITIMAX')}</title><style>body{font-family:Arial,sans-serif;max-width:960px;margin:40px auto;padding:24px;color:#173524;background:#f4f7f2;line-height:1.6}article{background:#fff;padding:32px;border-radius:20px;box-shadow:0 10px 30px #17352418}h1,h2{color:#173524}code,pre{background:#eef3ec;padding:2px 6px;border-radius:6px}</style></head><body><article>${body}</article></body></html>`
+    const saved = await saveBlob(new Blob([page], { type: 'text/html;charset=utf-8' }), name)
+    setNotice('Página HTML creada y guardada en el dispositivo')
+    return saved
+  }
   async function importExcel(event) {
     const file = event.target.files?.[0]
     if (!file) return
@@ -1822,8 +1844,8 @@ function App({ user, onSignOut, guest = false }) {
             : /codigo|programa/.test(promptNormalized) ? 'code'
               : null
     const pageRequested = !fileType && !analysisOnly && /crear pagina|pagina web|sitio web|landing|pagina promocional/.test(promptNormalized)
-    const salesRequested = /simul|proyecc|pronostico|pronóstico/.test(promptNormalized)
-      || (/venta/.test(promptNormalized) && /recomend|estrategia|analiz|plan|mejorar|aumentar/.test(promptNormalized))
+    const salesRequested = !fileType && !pageRequested && (/simul|proyecc|pronostico|pronóstico/.test(promptNormalized)
+      || (/venta/.test(promptNormalized) && /recomend|estrategia|analiz|plan|mejorar|aumentar/.test(promptNormalized)))
     const pageTerms = promptNormalized.split(/\s+/).filter((term) => term.length > 3 && !['crear', 'pagina', 'web', 'promocional', 'promocion', 'sitio'].includes(term))
     const pageProduct = pageRequested && (products.length === 1 ? products[0] : products.find((item) => pageTerms.some((term) => normalize(item.name).includes(term))))
     const cloudAssistantEnabled = import.meta.env.VITE_ENABLE_CLOUD_ASSISTANT === 'true'
@@ -2018,6 +2040,15 @@ function App({ user, onSignOut, guest = false }) {
         const saved = await generateAssistantFile(args.tipo || 'pdf', args.titulo || text, args.contenido || '', args.filename || '')
         return { ok: true, archivo: saved.filename, ubicacion: saved.location, file: toFileExtra(saved) }
       }
+      if (name === 'crear_pdf' || name === 'crear_word' || name === 'crear_ppt') {
+        const tipo = name === 'crear_word' ? 'word' : name === 'crear_ppt' ? 'ppt' : 'pdf'
+        const saved = await generateAssistantFile(tipo, args.titulo || text, args.contenido || '', args.filename || '')
+        return { ok: true, archivo: saved.filename, ubicacion: saved.location, file: toFileExtra(saved) }
+      }
+      if (name === 'crear_html') {
+        const saved = await saveHtmlDocument({ titulo: args.titulo || text, html: args.html || args.contenido || '', filename: args.filename || '' })
+        return { ok: true, archivo: saved.filename, ubicacion: saved.location, file: toFileExtra(saved) }
+      }
       if (name === 'guardar_memoria') {
         const record = saveMemory(args.categoria, args.dato || args.contenido || args.dato_a_recordar)
         if (!record) return { ok: false, error: 'El dato para recordar está vacío.' }
@@ -2030,7 +2061,7 @@ function App({ user, onSignOut, guest = false }) {
       }
       return { ok: false, error: `Herramienta no reconocida: ${name}` }
     }
-    const callDirectAgent = async ({ message, systemPrompt = DIRECT_AI_SYSTEM_PROMPT, maxTokens = 3000, conversation = history, attachment: fileAttachment = attachment, tools = ASSISTANT_TOOLS, toolChoice = 'auto' }) => {
+    const callDirectAgent = async ({ message, systemPrompt = DIRECT_AI_SYSTEM_PROMPT, maxTokens = 3000, conversation = history, attachment: fileAttachment = attachment, tools = ASSISTANT_TOOLS, toolChoice = 'auto', temperature = 0.7 }) => {
       const messagesForAi = [
         { role: 'system', content: withMemory(systemPrompt) },
         ...conversation.map((item) => ({ role: item.role, content: item.content })),
@@ -2052,7 +2083,8 @@ function App({ user, onSignOut, guest = false }) {
           apiKey: directKey,
           tools,
           toolChoice: step === 0 ? toolChoice : 'auto',
-          maxTokens
+          maxTokens,
+          temperature
         })
         lastText = result.content
         if (!result.toolCalls.length) return { text: result.content, created, registered, tools: toolTrace }
@@ -2140,7 +2172,8 @@ function App({ user, onSignOut, guest = false }) {
             conversation: [],
             attachment: fileAttachment,
             tools: [ASSISTANT_TOOLS[0]],
-            toolChoice: { type: 'function', function: { name: 'crear_excel' } }
+            toolChoice: { type: 'function', function: { name: 'crear_excel' } },
+            temperature: 0.35
           })
           if (result.created.length) return { saved: result.created[0], text: result.text, registered: result.registered }
           const data = parseJsonBlock(result.text)
@@ -2199,9 +2232,14 @@ function App({ user, onSignOut, guest = false }) {
         })
         return { text: summarizeSimulation(simulation), created: [], registered: [] }
       }
-      if (kind.includes('documento') || action.documento) {
+      if (kind.includes('html') || action.html) {
+        const saved = await saveHtmlDocument({ titulo: action.titulo || text, html: action.html || action.contenido || '', filename: action.filename || '' })
+        return { text: action.resumen || 'Página web generada.', created: [saved], registered: [] }
+      }
+      if (kind.includes('pdf') || kind.includes('word') || kind.includes('ppt') || kind.includes('documento') || action.documento) {
         const doc = action.documento || {}
-        const saved = await generateAssistantFile(doc.tipo || action.tipoArchivo || 'pdf', doc.titulo || action.titulo || text, doc.contenido || action.contenido || '', doc.filename || action.filename || '')
+        const tipo = kind.includes('word') ? 'word' : kind.includes('ppt') ? 'ppt' : kind.includes('pdf') ? 'pdf' : doc.tipo || action.tipoArchivo || 'pdf'
+        const saved = await generateAssistantFile(tipo, doc.titulo || action.titulo || text, doc.contenido || action.contenido || '', doc.filename || action.filename || '')
         return { text: action.resumen || 'Documento generado.', created: [saved], registered: [] }
       }
       return null
@@ -3008,7 +3046,7 @@ function SettingsModal({ settings, onClose, onSave }) {
       </section>
       <section className="settings-group about-group">
         <div className="settings-group-head"><span className="settings-group-icon slate"><Info size={17} /></span><div><h3>Acerca de VITIMAX</h3><p>Centro de gestión agrícola digital.</p></div></div>
-        <div className="about-grid"><div><span>Versión</span><strong>1.1.6</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
+        <div className="about-grid"><div><span>Versión</span><strong>1.1.7</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
       </section>
     </div>
   </ModalShell>
@@ -3323,7 +3361,7 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
     </div>}
     {attachError && <p className="assistant-attach-error">{attachError}</p>}
     <form className="assistant-input" onSubmit={submit}>
-      <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Pregunta o pide crear algo..." />
+      <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Pregunta, programa, analiza o pide un archivo…" />
       <button type="button" className="assistant-attach" title="Adjuntar archivo" aria-label="Adjuntar archivo" onClick={() => fileInputRef.current?.click()}><Paperclip size={18} /></button>
       <input ref={fileInputRef} type="file" accept="image/*,.pdf,.txt,.md,.json,.csv,.xlsx,.xls,.doc,.docx,.ppt,.pptx" hidden onChange={chooseAttachment} />
       <button type="submit" className="assistant-send" disabled={busy} aria-label="Enviar mensaje"><ArrowUpToLine size={17} /></button>
