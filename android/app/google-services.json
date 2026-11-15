@@ -14,6 +14,14 @@
       },
       "oauth_client": [
         {
+          "client_id": "958513211562-4mdusebhuge4nqqpaql552t0co0desrb.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.vitimax.app",
+            "certificate_hash": "f901bcc44334cecfc6dfd866c136d714e0a10212"
+          }
+        },
+        {
           "client_id": "958513211562-g8kt9gj35ohr5c8eg4ga9gujvkto61c6.apps.googleusercontent.com",
           "client_type": 3
         }
