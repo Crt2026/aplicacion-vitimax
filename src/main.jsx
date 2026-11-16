@@ -66,6 +66,27 @@ function readLocalJson(key, fallback) {
   }
 }
 
+// Guardar en el dispositivo puede fallar (cuota llena por fotos en base64 o
+// historial largo). Si falla, la app debe seguir funcionando: la copia en la
+// nube y el estado en memoria se mantienen.
+function writeLocalJson(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+    return true
+  } catch {
+    return false
+  }
+}
+
+function writeLocalValue(key, value) {
+  try {
+    localStorage.setItem(key, value)
+    return true
+  } catch {
+    return false
+  }
+}
+
 // El historial guardado puede tener una consulta pendiente si la app se cerró
 // antes de que la IA respondiera. Al reabrir se marca para reenviarla.
 function restoreChatMessages(saved) {
@@ -1283,6 +1304,7 @@ function App({ user, onSignOut, guest = false }) {
   const [assistantOpen, setAssistantOpen] = useState(false)
   const [qrOpen, setQrOpen] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const drawerTouchX = useRef(0)
   const [overlay, setOverlay] = useState(null)
   const [importReport, setImportReport] = useState(null)
   const [messages, setMessages] = useState(() => {
@@ -1325,19 +1347,19 @@ function App({ user, onSignOut, guest = false }) {
     }, () => { setCloudReady(true); setNotice('No se pudo sincronizar la nube; se usará una copia local.') })
   }, [user])
   useEffect(() => {
-    localStorage.setItem(localKey(STORAGE_KEY), JSON.stringify(products))
+    writeLocalJson(localKey(STORAGE_KEY), products)
     if (user && firebaseDb && cloudReady) setDoc(doc(firebaseDb, 'users', user.uid), { products }, { merge: true }).catch(() => setNotice('No se pudo guardar el catálogo en la nube.'))
   }, [products, user, cloudReady])
   useEffect(() => {
-    localStorage.setItem(localKey(PROFILE_KEY), JSON.stringify(profile))
+    writeLocalJson(localKey(PROFILE_KEY), profile)
     if (user && firebaseDb && cloudReady) setDoc(doc(firebaseDb, 'users', user.uid), { profile: { name: profile.name, email: profile.email, phone: profile.phone, photo: profile.photo } }, { merge: true }).catch(() => setNotice('No se pudo guardar el perfil en la nube.'))
   }, [profile, user, cloudReady])
   useEffect(() => {
-    localStorage.setItem(localKey(SETTINGS_KEY), JSON.stringify(settings))
+    writeLocalJson(localKey(SETTINGS_KEY), settings)
     if (user && firebaseDb && cloudReady) setDoc(doc(firebaseDb, 'users', user.uid), { settings }, { merge: true }).catch(() => setNotice('No se pudo guardar la configuración en la nube.'))
   }, [settings, user, cloudReady])
   useEffect(() => {
-    localStorage.setItem(localKey(MODULES_KEY), JSON.stringify(records))
+    writeLocalJson(localKey(MODULES_KEY), records)
     if (user && firebaseDb && cloudReady) setDoc(doc(firebaseDb, 'users', user.uid), { modules: records }, { merge: true }).catch(() => setNotice('No se pudieron guardar los módulos en la nube.'))
   }, [records, user, cloudReady])
   useEffect(() => { messagesRef.current = messages }, [messages])
@@ -1346,14 +1368,14 @@ function App({ user, onSignOut, guest = false }) {
     // Los archivos generados contienen Blob y no se pueden guardar en localStorage.
     // Se conserva el texto del chat (incluida la traza de herramientas) y se omiten los archivos.
     const stored = persistableChat(messages)
-    localStorage.setItem(localKey(CHAT_KEY), JSON.stringify(stored))
+    writeLocalJson(localKey(CHAT_KEY), stored)
     if (user && firebaseDb && cloudReady) {
       setDoc(doc(firebaseDb, 'users', user.uid), { assistantChat: cloudChat(messages), assistantChatUpdatedAt: new Date().toISOString() }, { merge: true })
         .catch(() => { /* la copia local sigue disponible */ })
     }
   }, [messages, user, cloudReady])
   useEffect(() => {
-    localStorage.setItem(localKey(MEMORY_STORAGE_KEY), JSON.stringify(memories))
+    writeLocalJson(localKey(MEMORY_STORAGE_KEY), memories)
     if (user && firebaseDb && cloudReady) {
       setDoc(doc(firebaseDb, 'users', user.uid), { aiMemory: memories, aiMemoryUpdatedAt: new Date().toISOString() }, { merge: true })
         .catch(() => setNotice('No se pudo guardar la memoria de la IA en la nube; se conserva en este dispositivo.'))
@@ -1365,13 +1387,26 @@ function App({ user, onSignOut, guest = false }) {
     if (Capacitor.getPlatform() !== 'android') return undefined
     const key = 'vitimax-permissions-asked-v1'
     if (localStorage.getItem(key)) return undefined
-    localStorage.setItem(key, '1')
+    writeLocalValue(key, '1')
     let alive = true
     requestDevicePermissions().then((status) => {
       if (alive && status) setNotice(permissionsMessage(status))
     })
     return () => { alive = false }
   }, [])
+  // Con el menú móvil abierto se bloquea el scroll del fondo: así el dedo no
+  // "mueve" la página de atrás y el panel se siente firme. Se libera al cerrar.
+  useEffect(() => {
+    const root = document.documentElement
+    root.classList.toggle('drawer-open', mobileMenuOpen)
+    if (!mobileMenuOpen) return undefined
+    const onKey = (event) => { if (event.key === 'Escape') setMobileMenuOpen(false) }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      root.classList.remove('drawer-open')
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [mobileMenuOpen])
 
   const categories = useMemo(() => ['Todas', ...new Set(products.map((p) => p.category).filter(Boolean))], [products])
   const filtered = useMemo(() => products.filter((p) => {
@@ -1763,7 +1798,7 @@ function App({ user, onSignOut, guest = false }) {
       if (firebaseAuth && user && !guest) {
         try { await updateProfile(user, { displayName: normalized.name || null, photoURL: normalized.photo || null }) } catch { /* la foto ya quedó guardada en el perfil */ }
       }
-      localStorage.setItem(localKey(PROFILE_KEY), JSON.stringify(normalized))
+      writeLocalJson(localKey(PROFILE_KEY), normalized)
       if (user && firebaseDb && cloudReady) {
         try { await setDoc(doc(firebaseDb, 'users', user.uid), { profile: normalized }, { merge: true }) } catch { photoStoredLocally = true }
       }
@@ -2312,8 +2347,12 @@ function App({ user, onSignOut, guest = false }) {
   const activeTone = SECTION_META[active]?.tone || 'green'
   const canManage = !guest
   return <div className={guest ? 'app-shell guest-mode' : 'app-shell'}>
-    <aside className={mobileMenuOpen ? 'sidebar mobile-open' : 'sidebar'}>
-      <div className="brand"><div className="brand-mark"><BrandMark size={21} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div></div>
+    <aside
+      className={mobileMenuOpen ? 'sidebar mobile-open' : 'sidebar'}
+      onTouchStart={(event) => { drawerTouchX.current = event.touches[0]?.clientX || 0 }}
+      onTouchEnd={(event) => { const endX = event.changedTouches[0]?.clientX || 0; if (drawerTouchX.current - endX > 55) setMobileMenuOpen(false) }}
+    >
+      <div className="brand"><div className="brand-mark"><BrandMark size={21} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div><button type="button" className="sidebar-close" aria-label="Cerrar menú" onClick={() => setMobileMenuOpen(false)}><X size={19} /></button></div>
       <div className="workspace-label">ESPACIO DE TRABAJO <span className="status-dot" /></div>
       <nav>{nav.map(({ label, icon: Icon, tone }) => <button key={label} className={active === label ? 'nav-item active' : 'nav-item'} onClick={() => navigate(label)}><span className={`nav-icon ${tone}`}><Icon size={17} /></span><span>{label}</span>{moduleCounts[label] > 0 && <em>{moduleCounts[label]}</em>}</button>)}</nav>
       <div className="sidebar-bottom">{canManage && <button className="nav-item" onClick={() => { setOverlay('settings'); setMobileMenuOpen(false) }}><span className="nav-icon slate"><Settings2 size={17} /></span><span>Configuración</span></button>}<button className="nav-item signout-item" onClick={() => { setOverlay(null); setMobileMenuOpen(false); onSignOut?.() }}><span className="nav-icon rose"><LogOut size={17} /></span><span>Cerrar sesión</span></button><button className="profile profile-button" onClick={() => setOverlay('profile')}><Avatar name={profile.name} photo={profile.photo} /><div><strong>{profile.name || 'Invitado'}</strong><span>{profile.email || 'Acceso de invitado'}</span></div><MoreHorizontal size={17} /></button></div>
@@ -3277,4 +3316,33 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
   </div>
 }
 
-createRoot(document.getElementById('root')).render(<AuthGate />)
+// Si algo falla en tiempo de ejecución, en vez de dejar la pantalla en blanco
+// (que se siente como "la app se quedó pegada") se muestra una salida clara.
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props)
+    this.state = { failed: false }
+  }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  componentDidCatch() {
+    // Sin consola en producción: el detalle no se expone al usuario.
+  }
+
+  render() {
+    if (!this.state.failed) return this.props.children
+    return <main className="app-crash">
+      <div className="app-crash-card">
+        <strong>VITIMAX</strong>
+        <h1>Algo se interrumpió</h1>
+        <p>La app se detuvo para no dañar tus datos. El catálogo, el perfil y las conversaciones siguen guardados en este dispositivo y en tu cuenta.</p>
+        <button type="button" className="btn primary" onClick={() => window.location.reload()}>Volver a abrir</button>
+      </div>
+    </main>
+  }
+}
+
+createRoot(document.getElementById('root')).render(<AppErrorBoundary><AuthGate /></AppErrorBoundary>)

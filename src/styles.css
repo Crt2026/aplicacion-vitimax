@@ -770,3 +770,24 @@ h1,h2,h3,h4,p,small,strong,span,label,td,th{overflow-wrap:break-word}
   .assistant-memory-form input{font-size:16px}
   .assistant-memory{max-height:min(52dvh,380px)}
 }
+/* ============================================================
+   VITIMAX 1.1.9 · Menú móvil desplazable y siempre cerrable
+   En pantallas bajas el perfil y "Cerrar sesión" quedaban fuera
+   de la vista dentro del menú y no había forma de llegar a ellos.
+   ============================================================ */
+.sidebar-close{display:none;margin-left:auto;width:38px;height:38px;border-radius:10px;place-items:center;background:rgba(255,255,255,.09);color:#dbece2;flex:0 0 auto}
+.sidebar-close:hover,.sidebar-close:focus-visible{background:rgba(255,255,255,.18);color:#fff}
+@media(max-width:650px){
+  .sidebar{overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+  .sidebar nav,.sidebar .sidebar-bottom{flex:0 0 auto}
+  .sidebar-close{display:grid}
+  .drawer-backdrop{touch-action:none}
+}
+html.drawer-open,html.drawer-open body{overflow:hidden}
+.app-crash{min-height:100dvh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 50% 20%,#e6f2e8,#f6f8f6 55%)}
+.app-crash-card{width:min(430px,100%);background:#fff;border:1px solid var(--line);border-radius:18px;padding:26px;box-shadow:0 18px 50px #123d2b18;text-align:left}
+.app-crash-card strong{display:block;font:800 12px Manrope;letter-spacing:2px;color:var(--green)}
+.app-crash-card h1{font:800 22px Manrope;margin:12px 0 8px;color:var(--deep)}
+.app-crash-card p{margin:0 0 18px;font-size:13px;line-height:1.55;color:#5f7969}
+.app-crash-card .btn{width:100%;min-height:46px}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
