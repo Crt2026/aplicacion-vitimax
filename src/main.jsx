@@ -1305,6 +1305,7 @@ function App({ user, onSignOut, guest = false }) {
   const [qrOpen, setQrOpen] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const drawerTouchX = useRef(0)
+  const contentRef = useRef(null)
   const [overlay, setOverlay] = useState(null)
   const [importReport, setImportReport] = useState(null)
   const [messages, setMessages] = useState(() => {
@@ -1416,7 +1417,7 @@ function App({ user, onSignOut, guest = false }) {
   const lowStock = products.filter((p) => !productPending(p, 'stock') && Number(p.stock) > 0 && Number(p.stock) <= 5)
   const missingData = products.filter((p) => !p.name || productPending(p, 'price') || productPending(p, 'stock'))
 
-  function navigate(item) { setActive(item); setQuery(''); setMobileMenuOpen(false); setOverlay(null) }
+  function navigate(item) { setActive(item); setQuery(''); setMobileMenuOpen(false); setOverlay(null); contentRef.current?.scrollTo?.({ top: 0 }) }
   function saveModuleRecord(moduleKey, values, existing) {
     setRecords((current) => {
       const list = current[moduleKey] || []
@@ -2353,13 +2354,13 @@ function App({ user, onSignOut, guest = false }) {
       onTouchEnd={(event) => { const endX = event.changedTouches[0]?.clientX || 0; if (drawerTouchX.current - endX > 55) setMobileMenuOpen(false) }}
     >
       <div className="brand"><div className="brand-mark"><BrandMark size={21} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div><button type="button" className="sidebar-close" aria-label="Cerrar menú" onClick={() => setMobileMenuOpen(false)}><X size={19} /></button></div>
-      <div className="workspace-label">ESPACIO DE TRABAJO <span className="status-dot" /></div>
+      <div className="workspace-label">ESPACIO DE TRABAJO · v1.1.9 <span className="status-dot" /></div>
       <nav>{nav.map(({ label, icon: Icon, tone }) => <button key={label} className={active === label ? 'nav-item active' : 'nav-item'} onClick={() => navigate(label)}><span className={`nav-icon ${tone}`}><Icon size={17} /></span><span>{label}</span>{moduleCounts[label] > 0 && <em>{moduleCounts[label]}</em>}</button>)}</nav>
       <div className="sidebar-bottom">{canManage && <button className="nav-item" onClick={() => { setOverlay('settings'); setMobileMenuOpen(false) }}><span className="nav-icon slate"><Settings2 size={17} /></span><span>Configuración</span></button>}<button className="nav-item signout-item" onClick={() => { setOverlay(null); setMobileMenuOpen(false); onSignOut?.() }}><span className="nav-icon rose"><LogOut size={17} /></span><span>Cerrar sesión</span></button><button className="profile profile-button" onClick={() => setOverlay('profile')}><Avatar name={profile.name} photo={profile.photo} /><div><strong>{profile.name || 'Invitado'}</strong><span>{profile.email || 'Acceso de invitado'}</span></div><MoreHorizontal size={17} /></button></div>
     </aside>
     <main className="main">
       <header className="topbar"><button className="mobile-menu" aria-label="Abrir menú" onClick={() => setMobileMenuOpen(true)}><Menu size={21} /></button><div className="crumb"><span className={`crumb-icon ${activeTone}`}><ActiveIcon size={14} /></span> VITIMAX <ChevronRight size={14} /> <b>{active}</b></div><div className="top-actions"><button className="icon-btn" title="Escanear código QR" aria-label="Escanear código QR" onClick={() => setQrOpen(true)}><QrCode size={18} /></button><button className="icon-btn" title="Notificaciones" aria-label="Notificaciones" onClick={() => setOverlay('notifications')}><Bell size={18} /><i /></button><button className="user-chip" onClick={() => setOverlay('profile')}><Avatar name={profile.name} photo={profile.photo} className="small" /><span>{profile.name || 'Administrador'}</span><ChevronRight size={15} /></button></div></header>
-      <div className="content">
+      <div className="content" ref={contentRef}>
         {active === 'Resumen' && <Dashboard products={products} lowStock={lowStock} missingData={missingData} onImport={canManage ? () => fileRef.current?.click() : undefined} onTemplate={canManage ? downloadTemplate : undefined} onNavigate={navigate} records={records} />}
         {active === 'Informe' && <ApplicationReport products={products} lowStock={lowStock} missingData={missingData} guest={guest} />}
         {active === 'Catálogo' && <Catalog products={filtered} allProducts={products} categories={categories} query={query} setQuery={setQuery} category={category} setCategory={setCategory} onImport={canManage ? () => fileRef.current?.click() : undefined} onExport={canManage ? exportProducts : undefined} onTemplate={canManage ? downloadTemplate : undefined} onCreate={canManage ? () => { setEditing(null); setShowProduct(true) } : undefined} onEdit={canManage ? (p) => { setEditing(p); setShowProduct(true) } : undefined} onDelete={canManage ? (id) => setProducts((all) => all.filter((p) => p.id !== id)) : undefined} readOnly={guest} />}
@@ -2989,7 +2990,7 @@ function SettingsModal({ settings, onClose, onSave }) {
       </section>
       <section className="settings-group about-group">
         <div className="settings-group-head"><span className="settings-group-icon slate"><Info size={17} /></span><div><h3>Acerca de VITIMAX</h3><p>Centro de gestión agrícola digital.</p></div></div>
-        <div className="about-grid"><div><span>Versión</span><strong>1.1.8</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
+        <div className="about-grid"><div><span>Versión</span><strong>1.1.9</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
       </section>
     </div>
   </ModalShell>

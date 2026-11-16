@@ -791,3 +791,17 @@ html.drawer-open,html.drawer-open body{overflow:hidden}
 .app-crash-card p{margin:0 0 18px;font-size:13px;line-height:1.55;color:#5f7969}
 .app-crash-card .btn{width:100%;min-height:46px}
 html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+/* ============================================================
+   VITIMAX 1.1.9 · Desplazamiento real en Android
+   La app ya no depende del scroll del documento/WebView: el área
+   de contenido es su propio contenedor con desplazamiento táctil,
+   así se mueve igual en Chrome, en la PWA y dentro del APK.
+   ============================================================ */
+.app-shell{height:100vh;height:100dvh;min-height:0;overflow:hidden}
+.app-shell .main{display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden}
+.app-shell .topbar{flex:0 0 auto}
+.app-shell .content{flex:1 1 auto;width:100%;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch}
+.app-shell .sidebar{overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+@media(max-width:650px){
+  .app-shell .content{overscroll-behavior-y:contain}
+}
