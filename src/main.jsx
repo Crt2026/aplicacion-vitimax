@@ -15,7 +15,7 @@ import { getDownloadURL, ref, uploadBytes } from 'firebase/storage'
 import { httpsCallable } from 'firebase/functions'
 import {
   Activity, AlertCircle, AlertTriangle, ArrowDownToLine, ArrowUpRight, ArrowUpToLine, BadgeCheck, BarChart3, Bell, BookOpen, Bot, Boxes, Brain, Camera,
-  Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, ClipboardCheck, ClipboardList, Clock, Cloud, Download, Eye, EyeOff,
+  Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, ClipboardCheck, ClipboardList, Clock, Cloud, Copy, Download, Eye, EyeOff,
   FileBarChart2, FileSpreadsheet, FileText, Filter, Flashlight, Globe, HeartHandshake, ImagePlus, Info, Layers, Loader2, Lock,
   LayoutDashboard, Leaf, ListChecks, LogOut, Mail, MapPin, Megaphone, Menu, MessageCircle, MessageSquare, MoreHorizontal,
   PackageCheck, Palette, Paperclip, PenLine, Phone, PieChart, Plus, QrCode, ReceiptText, RotateCcw, Search, Send,
@@ -87,18 +87,114 @@ function writeLocalValue(key, value) {
   }
 }
 
+// Registro local de errores. En el APK no hay consola, así que si algo falla
+// guardamos el detalle técnico para poder diagnosticarlo desde Configuración.
+const ERROR_LOG_KEY = 'vitimax-error-log-v1'
+function readErrorLog() {
+  try {
+    const list = JSON.parse(localStorage.getItem(ERROR_LOG_KEY) || '[]')
+    return Array.isArray(list) ? list : []
+  } catch {
+    return []
+  }
+}
+function logAppError(scope, error, info) {
+  try {
+    const entry = {
+      at: new Date().toISOString(),
+      scope: String(scope || 'app').slice(0, 80),
+      message: String(error?.message || error || 'Error desconocido').slice(0, 600),
+      stack: String(error?.stack || '').slice(0, 2400),
+      component: String(info?.componentStack || '').slice(0, 2400)
+    }
+    localStorage.setItem(ERROR_LOG_KEY, JSON.stringify([entry, ...readErrorLog()].slice(0, 8)))
+  } catch {
+    // Registrar un error nunca debe provocar otro error.
+  }
+}
+function clearErrorLog() {
+  try { localStorage.removeItem(ERROR_LOG_KEY) } catch { /* sin almacenamiento */ }
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('error', (event) => logAppError('window', event.error || event.message))
+  window.addEventListener('unhandledrejection', (event) => logAppError('promesa', event.reason))
+}
+
+function safeStringify(value, fallback = '') {
+  try { return JSON.stringify(value) } catch { return fallback }
+}
+
+// Firestore rechaza Blobs, funciones y valores undefined lanzando el error en
+// el acto. Antes de guardar, dejamos solo datos simples para que un mensaje con
+// un archivo generado no pueda tumbar la app.
+function firestoreClean(value, depth = 0) {
+  if (depth > 12) return null
+  if (value === null) return null
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      const clean = firestoreClean(item, depth + 1)
+      // Firestore no admite arrays dentro de arrays (por ejemplo filas de Excel).
+      return Array.isArray(clean) ? safeStringify(clean, '[]') : clean
+    })
+  }
+  if (typeof Blob !== 'undefined' && value instanceof Blob) return null
+  if (typeof value === 'object') {
+    if (value instanceof Date) return value.toISOString()
+    const out = {}
+    for (const [key, item] of Object.entries(value)) {
+      if (item === undefined || typeof item === 'function') continue
+      out[key] = firestoreClean(item, depth + 1)
+    }
+    return out
+  }
+  if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint') return null
+  if (typeof value === 'number' && !Number.isFinite(value)) return null
+  return value
+}
+
 // El historial guardado puede tener una consulta pendiente si la app se cerró
 // antes de que la IA respondiera. Al reabrir se marca para reenviarla.
+// También se limpian campos con formas inesperadas (por ejemplo "files" como
+// texto en versiones anteriores): así un dato viejo no puede romper el chat.
 function restoreChatMessages(saved) {
   if (!Array.isArray(saved)) return []
   return saved
     .filter((item) => item && typeof item === 'object' && typeof item.text === 'string')
-    .map((item) => item.pending ? { ...item, pending: false, text: 'La consulta anterior no se completó. Vuelve a enviarla, por favor.' } : item)
+    .map((item) => {
+      const clean = { ...item, text: item.text, pending: false }
+      const files = Array.isArray(item.files)
+        ? item.files
+          .filter((file) => file && typeof file === 'object')
+          .map((file) => ({ ...file, name: typeof file.name === 'string' && file.name ? file.name : 'archivo' }))
+        : []
+      const file = item.file && typeof item.file === 'object'
+        ? { ...item.file, name: typeof item.file.name === 'string' && item.file.name ? item.file.name : 'archivo' }
+        : null
+      delete clean.files
+      delete clean.file
+      if (files.length) clean.files = files
+      if (file) clean.file = file
+      if (Array.isArray(item.tools)) clean.tools = item.tools.filter((tool) => tool && typeof tool === 'object')
+      else delete clean.tools
+      if (item.pending) clean.text = 'La consulta anterior no se completó. Vuelve a enviarla, por favor.'
+      return clean
+    })
 }
 
 function persistableChat(messages) {
-  return messages.slice(-150).map(({ file, blob, ...rest }) => {
+  if (!Array.isArray(messages)) return []
+  return messages.slice(-150).map((item) => {
+    const { file, blob, files, ...rest } = item || {}
     const copy = { ...rest, text: String(rest.text || '').slice(0, 10000) }
+    // Los archivos generados contienen Blob y no se pueden guardar como JSON:
+    // se conserva solo su información visible (nombre, tipo, ubicación).
+    // "sheets" trae filas anidadas que Firestore tampoco acepta.
+    const meta = Array.isArray(files)
+      ? files
+        .filter((entry) => entry && typeof entry === 'object')
+        .map(({ blob: entryBlob, sheets, ...entryRest }) => entryRest)
+      : []
+    if (meta.length) copy.files = meta
     if (Array.isArray(copy.tools)) {
       copy.tools = copy.tools.slice(-6).map((tool) => {
         if (typeof tool.result === 'string') {
@@ -109,7 +205,7 @@ function persistableChat(messages) {
           role: 'tool',
           name: tool.name,
           arguments: tool.arguments,
-          result: JSON.stringify(result).slice(0, 1500)
+          result: safeStringify(result).slice(0, 1500)
         }
       })
     }
@@ -128,7 +224,7 @@ function cloudChat(messages) {
     list.unshift(item)
     size += length
   }
-  return list
+  return firestoreClean(list)
 }
 const emptyProduct = {
   name: '', category: '', price: '', previousPrice: '', stock: '',
@@ -1368,11 +1464,16 @@ function App({ user, onSignOut, guest = false }) {
   useEffect(() => {
     // Los archivos generados contienen Blob y no se pueden guardar en localStorage.
     // Se conserva el texto del chat (incluida la traza de herramientas) y se omiten los archivos.
-    const stored = persistableChat(messages)
-    writeLocalJson(localKey(CHAT_KEY), stored)
-    if (user && firebaseDb && cloudReady) {
-      setDoc(doc(firebaseDb, 'users', user.uid), { assistantChat: cloudChat(messages), assistantChatUpdatedAt: new Date().toISOString() }, { merge: true })
-        .catch(() => { /* la copia local sigue disponible */ })
+    // Todo va protegido: un historial antiguo o incompleto nunca debe tumbar la app.
+    try {
+      const stored = persistableChat(messages)
+      writeLocalJson(localKey(CHAT_KEY), stored)
+      if (user && firebaseDb && cloudReady) {
+        setDoc(doc(firebaseDb, 'users', user.uid), { assistantChat: cloudChat(messages), assistantChatUpdatedAt: new Date().toISOString() }, { merge: true })
+          .catch(() => { /* la copia local sigue disponible */ })
+      }
+    } catch (error) {
+      logAppError('chat-persistencia', error)
     }
   }, [messages, user, cloudReady])
   useEffect(() => {
@@ -2319,6 +2420,16 @@ function App({ user, onSignOut, guest = false }) {
       setNotice(error?.message || 'No se pudo abrir el archivo. Búscalo en la carpeta Descargas.')
     }
   }
+  function resetAssistantChat() {
+    try {
+      Object.keys(localStorage)
+        .filter((key) => key.startsWith('vitimax-assistant-chat-v1'))
+        .forEach((key) => localStorage.removeItem(key))
+    } catch { /* sin almacenamiento */ }
+    clearErrorLog()
+    setMessages([{ role: 'assistant', text: `${greetingForNow()}, ${profile.name || 'administrador'}. Reinicié la conversación para dejar el chat limpio. ¿Qué necesitas?` }])
+    setAssistantOpen(true)
+  }
   function handleQrResult(value) {
     setQrOpen(false)
     const match = products.find((product) => normalize(product.id) === normalize(value) || normalize(product.name) === normalize(value) || String(product.qr || '') === value)
@@ -2354,18 +2465,20 @@ function App({ user, onSignOut, guest = false }) {
       onTouchEnd={(event) => { const endX = event.changedTouches[0]?.clientX || 0; if (drawerTouchX.current - endX > 55) setMobileMenuOpen(false) }}
     >
       <div className="brand"><div className="brand-mark"><BrandMark size={21} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div><button type="button" className="sidebar-close" aria-label="Cerrar menú" onClick={() => setMobileMenuOpen(false)}><X size={19} /></button></div>
-      <div className="workspace-label">ESPACIO DE TRABAJO · v1.1.9 <span className="status-dot" /></div>
+      <div className="workspace-label">ESPACIO DE TRABAJO · v1.1.10 <span className="status-dot" /></div>
       <nav>{nav.map(({ label, icon: Icon, tone }) => <button key={label} className={active === label ? 'nav-item active' : 'nav-item'} onClick={() => navigate(label)}><span className={`nav-icon ${tone}`}><Icon size={17} /></span><span>{label}</span>{moduleCounts[label] > 0 && <em>{moduleCounts[label]}</em>}</button>)}</nav>
       <div className="sidebar-bottom">{canManage && <button className="nav-item" onClick={() => { setOverlay('settings'); setMobileMenuOpen(false) }}><span className="nav-icon slate"><Settings2 size={17} /></span><span>Configuración</span></button>}<button className="nav-item signout-item" onClick={() => { setOverlay(null); setMobileMenuOpen(false); onSignOut?.() }}><span className="nav-icon rose"><LogOut size={17} /></span><span>Cerrar sesión</span></button><button className="profile profile-button" onClick={() => setOverlay('profile')}><Avatar name={profile.name} photo={profile.photo} /><div><strong>{profile.name || 'Invitado'}</strong><span>{profile.email || 'Acceso de invitado'}</span></div><MoreHorizontal size={17} /></button></div>
     </aside>
     <main className="main">
       <header className="topbar"><button className="mobile-menu" aria-label="Abrir menú" onClick={() => setMobileMenuOpen(true)}><Menu size={21} /></button><div className="crumb"><span className={`crumb-icon ${activeTone}`}><ActiveIcon size={14} /></span> VITIMAX <ChevronRight size={14} /> <b>{active}</b></div><div className="top-actions"><button className="icon-btn" title="Escanear código QR" aria-label="Escanear código QR" onClick={() => setQrOpen(true)}><QrCode size={18} /></button><button className="icon-btn" title="Notificaciones" aria-label="Notificaciones" onClick={() => setOverlay('notifications')}><Bell size={18} /><i /></button><button className="user-chip" onClick={() => setOverlay('profile')}><Avatar name={profile.name} photo={profile.photo} className="small" /><span>{profile.name || 'Administrador'}</span><ChevronRight size={15} /></button></div></header>
       <div className="content" ref={contentRef}>
+        <SectionBoundary scope="contenido" resetKey={active} title="No pudimos mostrar esta sección" message="Puedes cambiar de sección o reintentar. Tu catálogo, tu perfil y tus datos siguen guardados.">
         {active === 'Resumen' && <Dashboard products={products} lowStock={lowStock} missingData={missingData} onImport={canManage ? () => fileRef.current?.click() : undefined} onTemplate={canManage ? downloadTemplate : undefined} onNavigate={navigate} records={records} />}
         {active === 'Informe' && <ApplicationReport products={products} lowStock={lowStock} missingData={missingData} guest={guest} />}
         {active === 'Catálogo' && <Catalog products={filtered} allProducts={products} categories={categories} query={query} setQuery={setQuery} category={category} setCategory={setCategory} onImport={canManage ? () => fileRef.current?.click() : undefined} onExport={canManage ? exportProducts : undefined} onTemplate={canManage ? downloadTemplate : undefined} onCreate={canManage ? () => { setEditing(null); setShowProduct(true) } : undefined} onEdit={canManage ? (p) => { setEditing(p); setShowProduct(true) } : undefined} onDelete={canManage ? (id) => setProducts((all) => all.filter((p) => p.id !== id)) : undefined} readOnly={guest} />}
         {active === 'Inventario' && <Inventory products={products} lowStock={lowStock} onImport={canManage ? () => fileRef.current?.click() : undefined} readOnly={guest} />}
         {['Pedidos', 'Clientes', 'Asesorías', 'Contenido', 'Ventas', 'Plantas', 'Proveedores'].includes(active) && <ModulePage config={MODULE_CONFIG[active]} rows={records[MODULE_CONFIG[active].key] || []} onCreate={canManage ? () => setModuleModal({ module: active, record: null }) : undefined} onEdit={canManage ? (record) => setModuleModal({ module: active, record }) : undefined} onDelete={canManage ? (id) => deleteModuleRecord(MODULE_CONFIG[active].key, id) : undefined} readOnly={guest} onAssistant={active === 'Asesorías' || active === 'Contenido' ? () => setAssistantOpen(true) : undefined} />}
+        </SectionBoundary>
       </div>
     </main>
     <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv" hidden onChange={importExcel} />
@@ -2376,7 +2489,9 @@ function App({ user, onSignOut, guest = false }) {
     {overlay === 'notifications' && <NotificationsModal lowStock={lowStock} missingData={missingData} onClose={() => setOverlay(null)} />}
     {importReport && <ImportReport report={importReport} onClose={() => setImportReport(null)} />}
     <button className="assistant-fab" onClick={() => setAssistantOpen(true)} aria-label="Abrir BOT IA VITIMAX"><img className="assistant-bot-image" src="/bot-vitimax.png" alt="" /><span>BOT IA VITIMAX</span></button>
-    {assistantOpen && <Assistant messages={messages} onClose={() => setAssistantOpen(false)} onAsk={askAssistant} onDownload={downloadMessageFile} onOpen={openMessageFile} aiReady={Boolean(resolveAiUrl(settings) || resolveDirectKey(settings) || (firebaseFunctions && import.meta.env.VITE_ENABLE_CLOUD_ASSISTANT === 'true' && !guest))} memories={memories} onSaveMemory={saveMemory} onDeleteMemory={(id) => forgetMemory(id)} onClearMemories={clearMemories} />}
+    {assistantOpen && <SectionBoundary scope="asistente" resetKey={assistantOpen} compact title="El chat tuvo un problema" message="Tu catálogo, tu perfil y tus conversaciones están guardados. Reintenta o limpia la conversación; el resto de la app sigue funcionando." onReset={resetAssistantChat} resetLabel="Limpiar conversación">
+      <Assistant messages={messages} onClose={() => setAssistantOpen(false)} onAsk={askAssistant} onDownload={downloadMessageFile} onOpen={openMessageFile} aiReady={Boolean(resolveAiUrl(settings) || resolveDirectKey(settings) || (firebaseFunctions && import.meta.env.VITE_ENABLE_CLOUD_ASSISTANT === 'true' && !guest))} memories={memories} onSaveMemory={saveMemory} onDeleteMemory={(id) => forgetMemory(id)} onClearMemories={clearMemories} />
+    </SectionBoundary>}
     {qrOpen && <QrScanner onClose={() => setQrOpen(false)} onResult={handleQrResult} />}
     {moduleModal && canManage && <ModuleFormModal config={MODULE_CONFIG[moduleModal.module]} record={moduleModal.record} onClose={() => setModuleModal(null)} onSave={(values) => saveModuleRecord(MODULE_CONFIG[moduleModal.module].key, values, moduleModal.record)} />}
     {showProduct && canManage && <ProductModal product={editing || emptyProduct} onClose={() => setShowProduct(false)} onSave={saveProduct} onDelete={deleteProduct} saving={saving} />}
@@ -2880,6 +2995,17 @@ function SettingsModal({ settings, onClose, onSave }) {
   const [saveTest, setSaveTest] = useState({ state: 'idle', message: '' })
   const [diag, setDiag] = useState(null)
   const [perm, setPerm] = useState({ state: 'idle', message: '' })
+  const [errorLog, setErrorLog] = useState(() => readErrorLog())
+  const [errorCopy, setErrorCopy] = useState('')
+  async function copyErrorLog() {
+    const detail = errorLog.map((item) => `[${item.at}] ${item.scope}: ${item.message}${item.stack ? `\n${item.stack}` : ''}`).join('\n\n')
+    try {
+      await navigator.clipboard.writeText(detail || 'Sin errores registrados.')
+      setErrorCopy('Detalle copiado al portapapeles.')
+    } catch {
+      setErrorCopy('No se pudo copiar. Mantén pulsado el detalle para seleccionarlo.')
+    }
+  }
   useEffect(() => {
     let alive = true
     async function run() {
@@ -2988,9 +3114,24 @@ function SettingsModal({ settings, onClose, onSave }) {
         <small className="field-help">En Android 10 o superior no se necesita permiso. En Android 9 o anterior se pedirá permiso de almacenamiento una sola vez.</small>
         {diag && <small className="field-help">Diagnóstico: plataforma {diag.platform} · plugin {diag.available ? 'disponible' : 'no disponible'}{diag.native && !diag.native.error ? ` · Android ${diag.native.android || '?'} (SDK ${diag.native.sdk ?? '?'}) · MediaStore ${diag.native.mediaStore ? 'sí' : 'no'} · permiso ${diag.native.permission || '?'}` : diag.native?.error ? ` · error: ${diag.native.error}` : ''}</small>}
       </section>
+      <section className="settings-group">
+        <div className="settings-group-head"><span className="settings-group-icon rose"><AlertTriangle size={17} /></span><div><h3>Diagnóstico de errores</h3><p>Si la app muestra un problema, aquí queda el detalle técnico.</p></div></div>
+        {errorLog.length ? <>
+          <div className="settings-actions">
+            <button type="button" className="btn secondary" onClick={copyErrorLog}><Copy size={15} /> Copiar detalle</button>
+            <button type="button" className="btn secondary" onClick={() => { clearErrorLog(); setErrorLog([]); setErrorCopy('') }}><Trash2 size={15} /> Borrar registro</button>
+          </div>
+          <small className="field-help">Último error: {errorLog[0].at} · {errorLog[0].message}</small>
+          {errorCopy && <small className="field-help">{errorCopy}</small>}
+          <details className="error-log-detail">
+            <summary>Ver detalle técnico ({errorLog.length})</summary>
+            <pre>{errorLog.map((item) => `[${item.at}] ${item.scope}: ${item.message}${item.stack ? `\n${item.stack}` : ''}`).join('\n\n')}</pre>
+          </details>
+        </> : <small className="field-help">Sin errores registrados. Si aparece la pantalla “Algo se interrumpió”, vuelve aquí para copiar el detalle.</small>}
+      </section>
       <section className="settings-group about-group">
         <div className="settings-group-head"><span className="settings-group-icon slate"><Info size={17} /></span><div><h3>Acerca de VITIMAX</h3><p>Centro de gestión agrícola digital.</p></div></div>
-        <div className="about-grid"><div><span>Versión</span><strong>1.1.9</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
+        <div className="about-grid"><div><span>Versión</span><strong>1.1.10</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
       </section>
     </div>
   </ModalShell>
@@ -3235,7 +3376,22 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
     setAttachError('')
   }
 
-  const busy = messages.some((m) => m.pending)
+  function messageText(message) {
+    const value = message?.text
+    if (typeof value === 'string') return value
+    if (value === null || value === undefined) return ''
+    return String(value)
+  }
+
+  function messageFiles(message) {
+    const list = Array.isArray(message?.files) ? message.files : message?.file ? [message.file] : []
+    return list
+      .filter((file) => file && typeof file === 'object')
+      .map((file) => ({ ...file, name: typeof file.name === 'string' && file.name ? file.name : 'archivo' }))
+  }
+
+  const messageList = Array.isArray(messages) ? messages : []
+  const busy = messageList.some((m) => m.pending)
   const sizeKb = attachment ? Math.max(1, Math.ceil(attachment.size / 1024)) : 0
 
   return <div className="assistant-panel">
@@ -3277,12 +3433,12 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
       <small className="assistant-memory-note">La IA usa estos datos para personalizar sus respuestas y los conserva al cerrar la app.</small>
     </div> : <>
     <div className="assistant-body" ref={bodyRef}>
-      {messages.map((m, i) => <div className={`chat ${m.role}${m.pending ? ' pending' : ''}`} key={i}>
+      {messageList.map((m, i) => <div className={`chat ${m.role}${m.pending ? ' pending' : ''}`} key={i}>
         <div>
-          {m.text}
-          {onDownload && (m.files?.length ? m.files : m.file ? [m.file] : []).map((file, fileIndex) => (
-            <div className="chat-file-actions" key={`${file.name}-${fileIndex}`}>
-              <button type="button" className="chat-download" onClick={() => onDownload(file, i)}><ArrowDownToLine size={14} /><span>Descargar {file.name}</span></button>
+          {messageText(m)}
+          {onDownload && messageFiles(m).map((file, fileIndex) => (
+            <div className="chat-file-actions" key={`${file.name || 'archivo'}-${fileIndex}`}>
+              <button type="button" className="chat-download" onClick={() => onDownload(file, i)}><ArrowDownToLine size={14} /><span>Descargar {file.name || 'archivo'}</span></button>
               {file.native && file.uri && onOpen && <button type="button" className="chat-open" onClick={() => onOpen(file)}><ExternalLink size={14} /><span>Abrir archivo</span></button>}
             </div>
           ))}
@@ -3317,30 +3473,102 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
   </div>
 }
 
-// Si algo falla en tiempo de ejecución, en vez de dejar la pantalla en blanco
-// (que se siente como "la app se quedó pegada") se muestra una salida clara.
-class AppErrorBoundary extends React.Component {
+// Aísla un fallo de una sección concreta: si el chat o una pantalla falla,
+// el menú, el catálogo y el resto de la app siguen funcionando.
+class SectionBoundary extends React.Component {
   constructor(props) {
     super(props)
-    this.state = { failed: false }
+    this.state = { failed: false, error: null }
   }
 
-  static getDerivedStateFromError() {
-    return { failed: true }
+  static getDerivedStateFromError(error) {
+    return { failed: true, error }
   }
 
-  componentDidCatch() {
-    // Sin consola en producción: el detalle no se expone al usuario.
+  componentDidCatch(error, info) {
+    logAppError(this.props.scope || 'seccion', error, info)
+  }
+
+  componentDidUpdate(prevProps) {
+    if (this.state.failed && prevProps.resetKey !== this.props.resetKey) {
+      this.setState({ failed: false, error: null })
+    }
   }
 
   render() {
     if (!this.state.failed) return this.props.children
+    return <div className={`inline-crash${this.props.compact ? ' compact' : ''}`}>
+      <strong>{this.props.title || 'Esta sección tuvo un problema'}</strong>
+      <p>{this.props.message || 'El resto de la app sigue funcionando y tus datos están guardados.'}</p>
+      <div className="inline-crash-actions">
+        <button type="button" className="btn secondary" onClick={() => this.setState({ failed: false, error: null })}>Reintentar</button>
+        {this.props.onReset && <button type="button" className="btn secondary" onClick={this.props.onReset}>{this.props.resetLabel || 'Restablecer'}</button>}
+      </div>
+    </div>
+  }
+}
+
+// Si algo falla en tiempo de ejecución, en vez de dejar la pantalla en blanco
+// se muestra una salida clara, el detalle técnico y opciones de recuperación.
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props)
+    this.state = { failed: false, error: null, copied: '' }
+    this.clearChat = this.clearChat.bind(this)
+    this.copyDetail = this.copyDetail.bind(this)
+  }
+
+  static getDerivedStateFromError(error) {
+    return { failed: true, error }
+  }
+
+  componentDidCatch(error, info) {
+    logAppError('app', error, info)
+  }
+
+  clearChat() {
+    try {
+      Object.keys(localStorage)
+        .filter((key) => key.startsWith('vitimax-assistant-chat-v1'))
+        .forEach((key) => localStorage.removeItem(key))
+    } catch { /* sin almacenamiento */ }
+    this.setState({ failed: false, error: null, copied: '' })
+  }
+
+  async copyDetail() {
+    const error = this.state.error
+    const detail = [
+      `VITIMAX · ${new Date().toISOString()}`,
+      `Error: ${error?.message || error || 'desconocido'}`,
+      error?.stack || ''
+    ].join('\n')
+    try {
+      await navigator.clipboard.writeText(detail)
+      this.setState({ copied: 'Detalle copiado.' })
+    } catch {
+      this.setState({ copied: 'No se pudo copiar; revisa Configuración → Diagnóstico.' })
+    }
+  }
+
+  render() {
+    if (!this.state.failed) return this.props.children
+    const error = this.state.error
     return <main className="app-crash">
       <div className="app-crash-card">
         <strong>VITIMAX</strong>
         <h1>Algo se interrumpió</h1>
         <p>La app se detuvo para no dañar tus datos. El catálogo, el perfil y las conversaciones siguen guardados en este dispositivo y en tu cuenta.</p>
-        <button type="button" className="btn primary" onClick={() => window.location.reload()}>Volver a abrir</button>
+        <div className="app-crash-actions">
+          <button type="button" className="btn primary" onClick={() => window.location.reload()}>Volver a abrir</button>
+          <button type="button" className="btn secondary" onClick={() => this.setState({ failed: false, error: null, copied: '' })}>Reintentar sin recargar</button>
+          <button type="button" className="btn secondary" onClick={this.clearChat}>Borrar conversación y reintentar</button>
+        </div>
+        {error && <details className="app-crash-detail">
+          <summary>Detalle técnico</summary>
+          <pre>{String(error.message || error).slice(0, 800)}</pre>
+          <button type="button" className="btn secondary" onClick={this.copyDetail}>Copiar detalle</button>
+          {this.state.copied && <small>{this.state.copied}</small>}
+        </details>}
       </div>
     </main>
   }
