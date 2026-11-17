@@ -132,7 +132,7 @@ export function normalizeProducts(list, options = {}) {
   if (!Array.isArray(list)) return []
   return list
     .map((item) => normalizeProduct(item, options))
-    .filter((item) => item.name || item.description || item.price)
+    .filter((item) => (item.name || item.description || item.price) && !isJunkProductName(item.name))
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +382,9 @@ function productFromRaw(raw, origin = 'Importado desde Excel') {
   let name = cleanCell(raw.name)
   if (!name && id) name = `Producto ${id}`
   if (!name) return null
+  // Filas de totales importadas por error desde Excel ("Total Valorado
+  // Inventario", "Total", "Subtotal"...): nunca son productos reales.
+  if (isJunkProductName(name)) return null
   if (!id) id = makeId('producto')
   const source = cleanCell(raw.source) || origin
   const product = {
@@ -793,7 +796,7 @@ export function defaultSheetRows(name, products = [], records = {}, options = {}
   const safeProducts = products.length ? products : demo ? buildDemoProducts() : []
   const safeRecords = demo ? { ...demoRecords(), ...records } : records
   if (name === 'Productos') {
-    return { columns: PRODUCT_COLUMNS, rows: safeProducts.map(productToRow) }
+    return { columns: PRODUCT_COLUMNS, rows: safeProducts.filter((product) => !isJunkProductName(product?.name)).map(productToRow) }
   }
   if (name === 'Clientes') {
     return {
@@ -847,7 +850,7 @@ export function defaultSheetRows(name, products = [], records = {}, options = {}
     }
   }
   if (name === 'Asesorias') {
-    const advisories = Array.isArray(records.asesorias) && records.asesorias.length
+    const rawAdvisories = Array.isArray(records.asesorias) && records.asesorias.length
       ? records.asesorias
       : demo
         ? safeProducts.slice(0, 3).map((product, index) => ({
@@ -860,6 +863,7 @@ export function defaultSheetRows(name, products = [], records = {}, options = {}
           recomendacion: product.recommendations || 'Validar dosis con un especialista antes de aplicar.'
         }))
         : []
+    const advisories = fixAsesoriaRecords(rawAdvisories, safeProducts)
     return {
       columns: SHEET_COLUMNS.Asesorias,
       rows: recordRows(advisories, SHEET_COLUMNS.Asesorias, (item) => [
@@ -900,28 +904,99 @@ export function cropForProduct(product = {}, extraText = '') {
   return rule ? rule.crop : 'Cultivo general'
 }
 
-function fixAsesoriaRows(columns, rows, products = []) {
-  const cropIndex = columns.findIndex((column) => /cultivo|planta|especie/i.test(normalizeHeader(column)))
-  if (cropIndex < 0 || !rows.length) return rows
-  const byName = new Map((products || []).map((product) => [normalizeHeader(product.name), product]))
-  const byCategory = new Map()
-  ;(products || []).forEach((product) => {
-    const key = normalizeHeader(product.category)
-    if (key && !byCategory.has(key)) byCategory.set(key, product)
-  })
-  return rows.map((row) => {
-    const value = cleanCell(row[cropIndex])
-    const context = row.map((cell) => cleanCell(cell)).join(' ')
-    if (!value) {
-      const next = [...row]
-      next[cropIndex] = cropForProduct({}, context) || 'Cultivo general'
-      return next
+const PRODUCT_LIKE = /vitimax|bioestimul|fertiliz|enmienda|nutrici[oó]n|foliar|radicular|correct|abono|algas|amino/i
+
+function productResolver(products = []) {
+  const list = (products || []).filter((product) => product && product.name && !isJunkProductName(product.name))
+  const byName = new Map()
+  list.forEach((product) => byName.set(normalizeHeader(product.name), product))
+  return {
+    list,
+    byName,
+    find(value, context = '') {
+      const key = normalizeHeader(value)
+      if (key && byName.has(key)) return byName.get(key)
+      const haystack = normalizeHeader(`${value} ${context}`)
+      const byProduct = list.find((product) => {
+        const nameKey = normalizeHeader(product.name)
+        return nameKey && haystack.includes(nameKey)
+      })
+      if (byProduct) return byProduct
+      const byCategory = list.find((product) => {
+        const categoryKey = normalizeHeader(product.category)
+        return categoryKey && haystack.includes(categoryKey)
+      })
+      return byCategory || null
     }
-    const product = byName.get(normalizeHeader(value)) || byCategory.get(normalizeHeader(value))
-    const looksLikeProduct = product || /vitimax|bioestimul|fertiliz|enmienda|producto/i.test(value)
-    if (!looksLikeProduct) return row
-    const next = [...row]
-    next[cropIndex] = product ? cropForProduct(product, context) : cropForProduct({}, context)
+  }
+}
+
+function recommendationText(product, fallback = '') {
+  if (!product) {
+    return cleanCell(fallback) || 'Recomendación pendiente: validar dosis con un especialista VITIMAX.'
+  }
+  const detail = cleanCell(product.recommendations) || cleanCell(product.usage) || cleanCell(product.description)
+  return detail
+    ? `Se sugiere ${product.name}: ${detail}`
+    : `Se sugiere ${product.name} según la dosis indicada en su ficha técnica.`
+}
+
+function suggestedProduct(resolver, matched, crop, context) {
+  return matched
+    || resolver.list.find((product) => cropForProduct(product, context) === crop)
+    || resolver.list[0]
+    || null
+}
+
+// Corrige una fila de Asesorías: "Cultivo" muestra el cultivo afectado (nunca
+// el producto) y "Recomendación" siempre indica el producto VITIMAX sugerido.
+function fixAsesoriaRows(columns, rows, products = []) {
+  const cols = Array.isArray(columns) ? columns : []
+  if (!rows.length) return rows
+  let cropIndex = cols.findIndex((column) => /cultivo|planta|especie/i.test(normalizeHeader(column)))
+  let recIndex = cols.findIndex((column) => /recomendacion|respuesta|solucion|sugerencia/i.test(normalizeHeader(column)))
+  if (cropIndex < 0) { cropIndex = cols.length; cols.push('Cultivo') }
+  if (recIndex < 0) { recIndex = cols.length; cols.push('Recomendación') }
+  const resolver = productResolver(products)
+  return rows.map((row) => {
+    const next = Array.isArray(row) ? [...row] : []
+    const context = next.map((cell) => cleanCell(cell)).join(' ')
+    const currentCrop = cleanCell(next[cropIndex])
+    const currentRec = cleanCell(next[recIndex])
+    const matched = resolver.find(currentCrop, context)
+    const cropIsProduct = Boolean(matched)
+      || resolver.byName.has(normalizeHeader(currentCrop))
+      || (PRODUCT_LIKE.test(currentCrop) && !CROP_RULES.some((rule) => rule.pattern.test(currentCrop)))
+    let crop = currentCrop
+    if (!crop || cropIsProduct) crop = matched ? cropForProduct(matched, context) : cropForProduct({}, context)
+    next[cropIndex] = crop || 'Cultivo general'
+    if (!currentRec) next[recIndex] = recommendationText(suggestedProduct(resolver, matched, next[cropIndex], context), context)
+    return next
+  })
+}
+
+/**
+ * Versión para registros de Asesorías en memoria/nube: garantiza cultivo real
+ * y recomendación con el producto VITIMAX sugerido.
+ */
+export function fixAsesoriaRecords(records = [], products = []) {
+  if (!Array.isArray(records) || !records.length) return records
+  const resolver = productResolver(products)
+  return records.map((record) => {
+    if (!record) return record
+    const next = { ...record }
+    const context = Object.values(next).map((value) => cleanCell(value)).join(' ')
+    const currentCrop = cleanCell(next.cultivo)
+    const matched = resolver.find(currentCrop, context)
+    const cropIsProduct = Boolean(matched)
+      || resolver.byName.has(normalizeHeader(currentCrop))
+      || (PRODUCT_LIKE.test(currentCrop) && !CROP_RULES.some((rule) => rule.pattern.test(currentCrop)))
+    let crop = currentCrop
+    if (!crop || cropIsProduct) crop = matched ? cropForProduct(matched, context) : cropForProduct({}, context)
+    next.cultivo = crop || 'Cultivo general'
+    if (!cleanCell(next.recomendacion)) {
+      next.recomendacion = recommendationText(suggestedProduct(resolver, matched, next.cultivo, context), context)
+    }
     return next
   })
 }
@@ -930,10 +1005,39 @@ function fixAsesoriaRows(columns, rows, products = []) {
 // Limpieza de hojas: sin filas fantasma, sin duplicados y con totales reales
 // ---------------------------------------------------------------------------
 
-const TOTALS_ROW = /^(gran\s+)?(total|totales|subtotal|suma|resumen|total\s+general|total\s+valorado|valor\s+total|valorizado)\b/i
+const TOTALS_ROW = /^(gran\s+)?(total|totales|subtotal|suma|resumen|total\s+general|total\s+valorado|total\s+inventario|valor\s+total|valorizado|valor\s+inventario)\b/i
+
+// Nombre de fila/registro que corresponde a un total y no a un producto real.
+const JUNK_PRODUCT_NAME = /^(?:gran\s+)?(?:total(?:es)?|subtotal(?:es)?|suma|resumen|valor(?:izado)?)(?:\s+(?:general|valorado|inventario|productos|stock|clp|ejecutivo|de|del|la|el))*\s*$/i
+
+/**
+ * Detecta filas de totales que llegan desde Excel (por ejemplo
+ * "Total Valorado Inventario" o "Total") para no contarlas como productos.
+ */
+export function isJunkProductName(value) {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim()
+  if (!text) return false
+  return JUNK_PRODUCT_NAME.test(text)
+}
+
+/** Filtra productos basura (totales) del catálogo en memoria o en la nube. */
+export function filterJunkProducts(list = []) {
+  return (Array.isArray(list) ? list : []).filter((product) => {
+    if (!product) return false
+    const name = product.name ?? product.nombre ?? product.producto ?? product.title ?? ''
+    return !isJunkProductName(name)
+  })
+}
 
 function isTotalsRow(row) {
-  return Array.isArray(row) && TOTALS_ROW.test(String(row[0] ?? '').trim())
+  if (!Array.isArray(row)) return false
+  // La fila de totales puede traer la etiqueta en cualquier columna, no solo
+  // en la primera. Solo se descartan etiquetas cortas y autónomas.
+  return row.some((cell) => {
+    const text = String(cell ?? '').replace(/\s+/g, ' ').trim()
+    if (!text || text.length > 48) return false
+    return JUNK_PRODUCT_NAME.test(text)
+  })
 }
 
 function sanitizeSheetRows(rows, { keepTotals = false } = {}) {
@@ -955,6 +1059,21 @@ function sheetHeaderIndex(columns, pattern) {
   return (columns || []).findIndex((column) => pattern.test(normalizeHeader(column)))
 }
 
+function formulaSheetName(name = '') {
+  const clean = String(name || '')
+    .replace(/[\\/?*[\]:]/g, ' ')
+    .replace(/'/g, "''")
+    .trim()
+    .slice(0, 31) || 'Hoja'
+  return `'${clean}'`
+}
+
+function rangeRef(sheet, columnIndex, rowCount) {
+  if (!sheet || columnIndex < 0 || !rowCount) return ''
+  const letter = excelColumnLetter(columnIndex + 1)
+  return `${formulaSheetName(sheet.name)}!${letter}2:${letter}${rowCount + 1}`
+}
+
 function workbookMetrics(sheets) {
   const find = (pattern) => sheets.find((sheet) => pattern.test(String(sheet?.name || '').trim()))
   const productsSheet = find(/^productos$/i) || find(/producto/i)
@@ -963,6 +1082,7 @@ function workbookMetrics(sheets) {
 
   const productRows = sanitizeSheetRows(productsSheet?.rows || [])
   const inventoryRows = sanitizeSheetRows(inventorySheet?.rows || [])
+  const productName = sheetHeaderIndex(productsSheet?.columns, /nombre|producto|articulo|item|descripcion/)
   const productPrice = sheetHeaderIndex(productsSheet?.columns, /precio(?!.*anterior)/)
   const productStock = sheetHeaderIndex(productsSheet?.columns, /stock|cantidad|unidades|existencia/)
   const inventoryStock = sheetHeaderIndex(inventorySheet?.columns, /stock|cantidad|unidades|existencia/)
@@ -992,12 +1112,37 @@ function workbookMetrics(sheets) {
 
   const count = productRows.length || inventoryRows.length
   if (!count && !units && !inventoryTotal) return null
+
+  // Fórmulas reales sobre el rango exacto de datos (sin filas de totales).
+  const formulas = {}
+  if (inventorySheet && inventoryStock >= 0) {
+    formulas.units = `=SUM(${rangeRef(inventorySheet, inventoryStock, inventoryRows.length)})`
+  } else if (productsSheet && productStock >= 0) {
+    formulas.units = `=SUM(${rangeRef(productsSheet, productStock, productRows.length)})`
+  }
+  if (inventorySheet && inventoryValue >= 0) {
+    formulas.inventoryTotal = `=SUM(${rangeRef(inventorySheet, inventoryValue, inventoryRows.length)})`
+  } else if (inventorySheet && inventoryPrice >= 0 && inventoryStock >= 0) {
+    formulas.inventoryTotal = `=SUMPRODUCT(${rangeRef(inventorySheet, inventoryPrice, inventoryRows.length)},${rangeRef(inventorySheet, inventoryStock, inventoryRows.length)})`
+  } else if (productsSheet && productPrice >= 0 && productStock >= 0) {
+    formulas.inventoryTotal = `=SUMPRODUCT(${rangeRef(productsSheet, productPrice, productRows.length)},${rangeRef(productsSheet, productStock, productRows.length)})`
+  }
+  if (productsSheet && productPrice >= 0 && productRows.length) {
+    formulas.avgPrice = `=IFERROR(AVERAGE(${rangeRef(productsSheet, productPrice, productRows.length)}),0)`
+  }
+  if (productsSheet && productName >= 0 && productRows.length) {
+    formulas.count = `=COUNTA(${rangeRef(productsSheet, productName, productRows.length)})`
+  } else if (productsSheet && productRows.length) {
+    formulas.count = `=ROWS(${formulaSheetName(productsSheet.name)}!A2:A${productRows.length + 1})`
+  }
+
   return {
     count,
     units,
     inventoryTotal,
     priceSum,
-    avgPrice: prices.length ? priceSum / prices.length : 0
+    avgPrice: prices.length ? priceSum / prices.length : 0,
+    formulas
   }
 }
 
@@ -1007,10 +1152,10 @@ function reconcileSummarySheets(sheets) {
   const metrics = workbookMetrics(sheets)
   if (!metrics) return sheets
   const definitions = [
-    { pattern: /unidad|stock/, label: 'Unidades en stock', value: metrics.units, money: false },
-    { pattern: /inventario|valorizado|valor/, label: 'Valor inventario CLP', value: metrics.inventoryTotal, money: true },
-    { pattern: /precio|promedio/, label: 'Precio promedio CLP', value: metrics.avgPrice, money: true },
-    { pattern: /producto|cantidad/, label: 'Productos registrados', value: metrics.count, money: false }
+    { pattern: /unidad|stock/, label: 'Unidades en stock', value: metrics.units, formula: metrics.formulas.units },
+    { pattern: /inventario|valorizado|valor/, label: 'Valor inventario CLP', value: metrics.inventoryTotal, formula: metrics.formulas.inventoryTotal },
+    { pattern: /precio|promedio/, label: 'Precio promedio CLP', value: metrics.avgPrice, formula: metrics.formulas.avgPrice },
+    { pattern: /producto|cantidad/, label: 'Productos registrados', value: metrics.count, formula: metrics.formulas.count }
   ]
   return sheets.map((sheet) => {
     if (!summary.includes(sheet)) return sheet
@@ -1019,17 +1164,18 @@ function reconcileSummarySheets(sheets) {
     const rows = (sheet.rows || []).map((row) => [...row])
     const used = new Set()
     definitions.forEach((definition) => {
+      const value = definition.formula || definition.value
       const index = rows.findIndex((row, rowIndex) => (
         !used.has(rowIndex) && definition.pattern.test(normalizeHeader(row[0]))
       ))
       if (index >= 0) {
         used.add(index)
-        rows[index][1] = definition.value
+        rows[index][1] = value
         return
       }
       const next = new Array(columns.length).fill('')
       next[0] = definition.label
-      next[1] = definition.value
+      next[1] = value
       rows.push(next)
     })
     return { ...sheet, rows }
@@ -1141,7 +1287,9 @@ function excelCellValue(value, header) {
   const text = String(value).replace(/\u00a0/g, ' ').trim()
   if (!text) return null
   // Una cadena que empieza con "=" es una fórmula real, no texto.
-  if (text.startsWith('=')) return { formula: text.slice(1) }
+  // ExcelJS necesita un "result" para serializar la fórmula; Excel la
+  // recalcula al abrir el libro (fullCalcOnLoad).
+  if (text.startsWith('=')) return { formula: text.slice(1), result: 0 }
   if (PERCENT_HEADER.test(header) && /%\s*$/.test(text)) {
     const percent = toNumber(text)
     if (Number.isFinite(percent)) return percent / 100
@@ -1159,8 +1307,9 @@ function excelCellValue(value, header) {
 
 function excelColumnMeta(columns, rows) {
   const isDateString = (value) => typeof value === 'string' && /^\d{1,4}[-/]\d{1,2}[-/]\d{1,4}$/.test(value.trim())
-  // La fila de totales no define el tipo de la columna (su primera celda dice "Total").
-  const dataRows = rows.filter((row) => !/^(gran\s+)?(total|totales|subtotal|suma|resumen)\b/i.test(String(row[0] || '').trim()))
+  // La fila de totales no define el tipo de la columna (su etiqueta puede estar
+  // en cualquier celda, no solo en la primera).
+  const dataRows = rows.filter((row) => !isTotalsRow(row))
   const sampleRows = dataRows.length ? dataRows : rows
   return columns.map((header, index) => {
     const values = sampleRows.map((row) => row[index]).filter((value) => value !== '' && value !== null && value !== undefined)
@@ -1248,6 +1397,8 @@ export async function createExcelBlob(sheets, options = {}) {
   workbook.creator = 'VITIMAX IA'
   workbook.created = new Date()
   workbook.modified = new Date()
+  // Fuerza a Excel a recalcular todas las fórmulas al abrir el archivo.
+  workbook.calcProperties.fullCalcOnLoad = true
   const used = new Set()
   const rawList = Array.isArray(sheets) && sheets.length ? sheets : [{ name: 'Hoja 1', columns: [], rows: [] }]
   // El resumen ejecutivo se recalcula desde Productos/Inventario reales.
@@ -1291,7 +1442,7 @@ export async function createExcelBlob(sheets, options = {}) {
         if (format && !cell.formula) cell.numFmt = format
         if (cell.formula) cell.numFmt = format || '#,##0'
         // En el resumen, cada métrica usa su formato: CLP para dinero, entero para unidades.
-        if (isSummarySheet && columnIndex > 1 && typeof cell.value === 'number') {
+        if (isSummarySheet && columnIndex > 1 && (typeof cell.value === 'number' || cell.formula)) {
           cell.numFmt = /valor|precio|monto|ingreso|costo|total/i.test(String(row[0] || ''))
             ? '"$"#,##0'
             : '#,##0'
@@ -1731,9 +1882,9 @@ DATOS DE VITIMAX
 - Para fotos de plantas o cultivos: orientación preliminar, incertidumbre explícita y recomendación de validar con un especialista antes de aplicar productos. No confirmes diagnósticos fitosanitarios definitivos ni dosis oficiales sin ficha técnica.
 
 HERRAMIENTAS
-- crear_excel: libro .xlsx real con hojas, columnas, filas y fórmulas activas. Para un catálogo general usa las 7 hojas: Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores. No agregues filas de totales ("Total", "Total Valorado", "Subtotal") dentro de las hojas de datos: los totales van solo en la hoja Resumen, calculados desde Productos e Inventario. En Asesorias, la columna Cultivo debe decir el cultivo real (Vid, Tomate, Palto, Cítricos, Hortalizas…), nunca el nombre del producto.
+- crear_excel: libro .xlsx real con hojas, columnas, filas y fórmulas activas. Para un catálogo general usa las 7 hojas: Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores. No agregues filas de totales ("Total", "Total Valorado Inventario", "Subtotal", "Resumen") dentro de las hojas de datos: los totales van solo en la hoja Resumen, calculados desde Productos e Inventario. En Asesorias, la columna Cultivo debe decir el cultivo real (Vid, Tomate, Palto, Cítricos, Hortalizas…), nunca el nombre del producto, y la columna Recomendación debe indicar el producto VITIMAX sugerido (nunca vacía).
 - crear_pdf, crear_word, crear_ppt: documentos reales en PDF, Word y PowerPoint. Usa "# " para títulos, "## " para secciones, "- " para viñetas, tablas Markdown con "|" y --- para separar diapositivas. Máximo 5 viñetas por diapositiva. Escribe texto plano: nunca uses LaTeX, "$...$", "~", "**", "__" ni "#" dentro de las celdas. Precios como "$15.000" y dosis como "2 a 3 L/ha". No inventes totales: la app los calcula desde el catálogo real.
-- crear_pagina_web: página web HTML5 moderna con Tailwind CSS por CDN e iconos Lucide. Para catálogos usa hero verde #1E4D2B con acentos lima #D8F55F y dorado, barra de búsqueda en vivo, botones de filtro por categoría, tarjetas en grilla con precio CLP, stock, dosis y botón "Cotizar por WhatsApp". Nada de tablas HTML antiguas. La app permite verla en vivo antes de descargar.
+- crear_pagina_web: página web HTML5 completa con una sola carga de Tailwind CSS (https://cdn.tailwindcss.com) e iconos Lucide. PROHIBIDO truncar el código o dejar comentarios/placeholders como "<!-- Agregar más productos aquí -->": incluye TODOS los registros reales del catálogo, sin omitir ninguno. Para catálogos usa hero verde #1E4D2B con acentos lima #D8F55F y dorado, barra de búsqueda en vivo por nombre/descripción, botones de filtro por categoría, badge de stock disponible y botón "Cotizar por WhatsApp" funcional en cada tarjeta, con el año 2026 en el pie de página. Nada de tablas HTML antiguas. La app permite verla en vivo antes de descargar.
 - crear_codigo: entrega código completo y ejecutable en cualquier lenguaje (Python, JavaScript, SQL, HTML, PHP, etc.). Indica el lenguaje y el nombre de archivo con la extensión correcta; el código se muestra en el chat para copiar y también se descarga como archivo real.
 - crear_html: alias de crear_pagina_web para páginas web completas.
 - crear_documento: alternativa genérica para PDF, Word o PowerPoint cuando no aplique una herramienta específica.
@@ -1943,9 +2094,21 @@ export const ASSISTANT_TOOLS = [
           titulo: { type: 'string', description: 'Título de la presentación' },
           subtitulo: { type: 'string', description: 'Subtítulo de portada (opcional)' },
           contenido: { type: 'string', description: 'Contenido completo en texto plano. Separa cada diapositiva con una línea ---. La primera línea de cada bloque es el título de la diapositiva y las demás son viñetas (máximo 5 por diapositiva). Sin LaTeX, sin "$...$", sin "~", "**" ni "#" dentro de celdas.' },
+          diapositivas: {
+            type: 'array',
+            description: 'Alternativa a contenido: una entrada por diapositiva con su título y sus viñetas (máximo 5).',
+            items: {
+              type: 'object',
+              properties: {
+                titulo: { type: 'string' },
+                puntos: { type: 'array', items: { type: 'string' } }
+              },
+              required: ['titulo', 'puntos']
+            }
+          },
           filename: { type: 'string', description: 'Nombre del archivo .pptx (opcional)' }
         },
-        required: ['contenido']
+        required: ['titulo']
       }
     }
   },
@@ -1953,14 +2116,14 @@ export const ASSISTANT_TOOLS = [
     type: 'function',
     function: {
       name: 'crear_pagina_web',
-      description: 'Crea una página web HTML5 moderna y responsive con Tailwind CSS por CDN e iconos Lucide. Para catálogos: hero #1E4D2B, acentos lima/dorado, búsqueda en vivo, filtros por categoría, tarjetas con precio CLP, stock, dosis y botón "Cotizar por WhatsApp". La app permite verla en vivo antes de descargarla.',
+      description: 'Crea una página web HTML5 moderna y responsive con una sola carga de Tailwind CSS por CDN e iconos Lucide. Para catálogos: hero #1E4D2B, acentos lima/dorado, búsqueda en vivo por nombre/descripción, filtros por categoría, tarjetas con precio CLP, badge de stock y botón "Cotizar por WhatsApp" funcional en cada tarjeta, con todos los registros reales y año 2026 en el pie. La app permite verla en vivo antes de descargarla.',
       parameters: {
         type: 'object',
         properties: {
           titulo: { type: 'string', description: 'Título de la página' },
           subtitulo: { type: 'string', description: 'Bajada o descripción breve (opcional)' },
           resumen: { type: 'string', description: 'Resumen breve de lo que hace la página' },
-          html: { type: 'string', description: 'HTML completo. Incluye <!doctype html>, <head> con Tailwind CSS por CDN y Lucide para iconos, y <body> con hero #1E4D2B, búsqueda en vivo, filtros por categoría y tarjetas con precio CLP, stock, dosis y botón de WhatsApp. Nada de tablas HTML antiguas.' },
+          html: { type: 'string', description: 'HTML COMPLETO, sin truncar y sin placeholders como "<!-- Agregar más productos aquí -->". Incluye <!doctype html>, <head> con una sola carga de Tailwind CSS (https://cdn.tailwindcss.com) y Lucide para iconos, y <body> con hero #1E4D2B, búsqueda en vivo por nombre/descripción, filtros por categoría y una tarjeta por cada producto real con precio CLP, badge de stock y botón "Cotizar por WhatsApp". Pie de página con año 2026. Nada de tablas HTML antiguas.' },
           filename: { type: 'string', description: 'Nombre del archivo .html (opcional)' }
         },
         required: ['html']

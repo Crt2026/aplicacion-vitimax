@@ -1089,6 +1089,44 @@ function deckFromBlocks(blocks, deckTitle) {
   return slides
 }
 
+const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+
+function bytesFromBase64(base64) {
+  const clean = String(base64 || '').replace(/^data:[^;]+;base64,/i, '').replace(/\s+/g, '')
+  const binary = atob(clean)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  return bytes
+}
+
+// pptxgenjs puede devolver Blob, ArrayBuffer, Uint8Array o base64 según el
+// entorno (navegador, Android WebView, Node). Siempre se entrega un Blob con
+// el MIME correcto de PowerPoint, sin rutas exclusivas de Node.
+async function pptxWriteBlob(pptx) {
+  let lastError = null
+  for (const outputType of ['blob', 'arraybuffer', 'base64']) {
+    try {
+      const result = await pptx.write({ outputType })
+      if (!result) continue
+      if (typeof Blob !== 'undefined' && result instanceof Blob) {
+        return new Blob([result], { type: PPTX_MIME })
+      }
+      if (result instanceof ArrayBuffer) {
+        return new Blob([new Uint8Array(result)], { type: PPTX_MIME })
+      }
+      if (ArrayBuffer.isView(result)) {
+        return new Blob([result], { type: PPTX_MIME })
+      }
+      if (typeof result === 'string') {
+        return new Blob([bytesFromBase64(result)], { type: PPTX_MIME })
+      }
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError || new Error('No se pudo generar el archivo PowerPoint.')
+}
+
 export async function buildPptxDocument({ title = 'Presentación VITIMAX', subtitle = '', content = '', dateLabel = '', catalog = [], isDemo = false } = {}) {
   const deckTitle = plainText(title) || 'Presentación VITIMAX'
   const cleanSubtitle = plainText(subtitle)
@@ -1484,7 +1522,7 @@ export async function buildPptxDocument({ title = 'Presentación VITIMAX', subti
     fontSize: 10, color: '8AA79A'
   })
 
-  return pptx.write({ outputType: 'blob' })
+  return pptxWriteBlob(pptx)
 }
 
 // ---------------------------------------------------------------------------
@@ -1494,6 +1532,45 @@ export async function buildPptxDocument({ title = 'Presentación VITIMAX', subti
 const CATALOG_PAGE_HINT = /cat[aá]logo|tienda|productos|inventario|lista de precios|precios|vivero|agr[ií]cola|fertiliz|bioestimul/i
 const TAILWIND_CDN = '<script src="https://cdn.tailwindcss.com"></script>'
 const LUCIDE_CDN = '<script src="https://unpkg.com/lucide@latest"></script>'
+
+function currentYear() {
+  return new Date().getFullYear() || 2026
+}
+
+// Marcas típicas de una respuesta cortada por límite de tokens o de un
+// placeholder que la IA dejó en el HTML. Nunca deben llegar al usuario.
+function isTruncatedHtml(html = '') {
+  const source = String(html || '')
+  if (!source.trim()) return false
+  if (/<!--\s*(?:agregar|añadir|continuar|resto|m[aá]s productos|todo|pendiente|aqu[ií]|m[aá]s secciones)/i.test(source)) return true
+  if (/(?:agregar|añadir|incluir)\s+m[aá]s\s+(?:productos|contenido|secciones|tarjetas|items)/i.test(source)) return true
+  if (/\[(?:continuar[aá]|truncad[oa]|omitid[oa]|resto del c[oó]digo|corte)\]/i.test(source)) return true
+  if (/(?:c[oó]digo|contenido|html)\s+(?:truncad[oa]|omitid[oa]|cortad[oa])/i.test(source)) return true
+  if (/<html[\s>]/i.test(source) && !/<\/html>/i.test(source)) return true
+  if (/<body[\s>]/i.test(source) && !/<\/body>/i.test(source)) return true
+  return false
+}
+
+function catalogCoverage(html = '', catalog = []) {
+  const names = (Array.isArray(catalog) ? catalog : [])
+    .map((product) => String(product?.name || '').trim().toLowerCase())
+    .filter(Boolean)
+  if (!names.length) return 1
+  const haystack = String(html || '').toLowerCase()
+  const found = names.filter((name) => haystack.includes(name)).length
+  return found / names.length
+}
+
+function catalogPageIsComplete(html = '', catalog = []) {
+  const source = String(html || '')
+  if (!source || isTruncatedHtml(source)) return false
+  if (!hasModernCatalogUi(source)) return false
+  if (!/(?:wa\.me|whatsapp)/i.test(source)) return false
+  if (!/(?:stock|disponible|agotado|sin stock)/i.test(source)) return false
+  if (!/(?:data-category|filtrar|categor[ií]a)/i.test(source)) return false
+  // Todos los productos reales deben aparecer (mínimo 80% del catálogo).
+  return catalogCoverage(source, catalog) >= 0.8
+}
 
 export function isCatalogPageRequest({ title = '', subtitle = '', source = '', catalog = [] } = {}) {
   if (!Array.isArray(catalog) || !catalog.length) return false
@@ -1514,7 +1591,15 @@ export function hasModernCatalogUi(html = '') {
 
 export function ensureModernAssets(html = '') {
   let page = ensureCharset(ensureViewport(String(html || '')))
-  if (!/cdn\.tailwindcss\.com/i.test(page)) {
+  // Una sola carga limpia de Tailwind: se eliminan duplicados y se deja la
+  // primera aparición, reemplazada por la URL oficial.
+  let tailwindSeen = false
+  page = page.replace(/<script\b[^>]*\bsrc=["'][^"']*cdn\.tailwindcss\.com[^"']*["'][^>]*>\s*<\/script>\s*/gi, () => {
+    if (tailwindSeen) return ''
+    tailwindSeen = true
+    return `${TAILWIND_CDN}\n`
+  })
+  if (!tailwindSeen) {
     page = /<\/head>/i.test(page) ? page.replace(/<\/head>/i, `${TAILWIND_CDN}\n</head>`) : `${TAILWIND_CDN}\n${page}`
   }
   if (!/lucide/i.test(page)) {
@@ -1524,6 +1609,12 @@ export function ensureModernAssets(html = '') {
     const init = '<script>window.addEventListener("DOMContentLoaded",function(){if(window.lucide)window.lucide.createIcons();});</script>'
     page = /<\/body>/i.test(page) ? page.replace(/<\/body>/i, `${init}\n</body>`) : `${page}\n${init}`
   }
+  // Pie de página con el año actual (2026), incluso si la IA lo omitió.
+  page = page.replace(/<footer\b[\s\S]*?<\/footer>/i, (footer) => {
+    if (/©\s*\d{4}/.test(footer)) return footer.replace(/©\s*\d{4}/g, `© ${currentYear()}`)
+    if (/\b(?:19|20)\d{2}\b/.test(footer)) return footer.replace(/\b(?:19|20)\d{2}\b/g, String(currentYear()))
+    return footer.replace(/<\/footer>/i, `<p>© ${currentYear()} VITIMAX · Centro de Gestión</p></footer>`)
+  })
   return page
 }
 
@@ -1534,7 +1625,12 @@ function whatsappUrl(phone, message) {
 }
 
 function prepareCatalogProducts(catalog = [], phone = '') {
-  return (Array.isArray(catalog) ? catalog : []).filter(Boolean).map((item) => {
+  const totalsLabel = /^(?:gran\s+)?(?:total(?:es)?|subtotal(?:es)?|suma|resumen|valor(?:izado)?)(?:\s+(?:general|valorado|inventario|productos|stock|clp|ejecutivo|de|del|la|el))*\s*$/i
+  return (Array.isArray(catalog) ? catalog : []).filter((item) => {
+    if (!item) return false
+    const name = String(item.name ?? item.nombre ?? item.producto ?? '').trim()
+    return !name || !totalsLabel.test(name)
+  }).map((item) => {
     const name = sanitizeText(item.name) || 'Producto VITIMAX'
     const category = sanitizeText(item.category) || 'General'
     const format = sanitizeText(item.format)
@@ -1742,7 +1838,7 @@ ${isDemo ? '<div class="border-b border-amber-200 bg-amber-50 px-4 py-3 text-cen
 <footer class="border-t border-[#DDE7DA] bg-white">
   <div class="mx-auto flex max-w-7xl flex-col items-center justify-between gap-3 px-4 py-8 text-sm text-[#5F7969] sm:flex-row sm:px-6 lg:px-8">
     <p class="font-semibold text-[#1E4D2B]">VITIMAX · Centro de Gestión</p>
-    <p>Catálogo generado el ${escapeHtml(todayLabel())}</p>
+    <p>© ${currentYear()} VITIMAX · Catálogo generado el ${escapeHtml(todayLabel())}</p>
   </div>
 </footer>
 
@@ -1842,12 +1938,13 @@ export function buildHtmlPage({ title = 'Página VITIMAX', subtitle = '', html =
   const catalogRequest = isCatalogPageRequest({ title: cleanTitle, subtitle: cleanSubtitle, source, catalog })
 
   // Catálogo real: se construye una página moderna con búsqueda, filtros y
-  // tarjetas aunque la IA haya devuelto una tabla antigua o Markdown.
+  // tarjetas aunque la IA haya devuelto una tabla antigua, Markdown, un HTML
+  // truncado o un catálogo incompleto.
   if (catalogRequest) {
-    if (/<html[\s>]/i.test(source) && hasModernCatalogUi(source)) {
+    if (/<html[\s>]/i.test(source) && catalogPageIsComplete(source, catalog)) {
       return ensureModernAssets(source)
     }
-    if (source && !/<html[\s>]/i.test(source) && hasModernCatalogUi(source)) {
+    if (source && !/<html[\s>]/i.test(source) && catalogPageIsComplete(source, catalog)) {
       const fragment = /<body[\s>]/i.test(source)
         ? source.replace(/^[\s\S]*?<body[^>]*>/i, '').replace(/<\/body>[\s\S]*$/i, '')
         : source
@@ -1891,7 +1988,7 @@ export function buildHtmlPage({ title = 'Página VITIMAX', subtitle = '', html =
   <main class="vitimax-content">
 ${body}
   </main>
-  <footer class="vitimax-foot">Generado por VITIMAX · ${escapeHtml(todayLabel())}</footer>
+  <footer class="vitimax-foot">© ${currentYear()} VITIMAX · Generado el ${escapeHtml(todayLabel())}</footer>
 </div>
 </body>
 </html>`

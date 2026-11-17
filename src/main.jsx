@@ -46,6 +46,8 @@ import {
   buildMemorySection,
   createExcelBlob,
   extractPdfText,
+  filterJunkProducts,
+  fixAsesoriaRecords,
   mergeImportedProducts,
   mergeImportedRecords,
   mergeWorkbookSheets,
@@ -278,6 +280,27 @@ function withExtension(filename, fallback, extension) {
   return new RegExp(`\\.${extension}$`, 'i').test(base)
     ? base
     : `${base.replace(/\.[a-z0-9]{1,6}$/i, '')}.${extension}`
+}
+
+// Convierte la respuesta de la IA (contenido Markdown o un arreglo de
+// diapositivas) al formato que entiende buildPptxDocument: "## Título" por
+// diapositiva, "- " por viñeta y "---" como separador.
+function normalizePresentationContent(value, slides = []) {
+  const text = String(value || '').trim()
+  if (text) return text
+  const list = Array.isArray(slides) ? slides : []
+  if (!list.length) return ''
+  return list.map((slide, index) => {
+    if (typeof slide === 'string') return `## ${slide.trim()}`
+    const title = String(slide?.titulo || slide?.title || slide?.nombre || `Diapositiva ${index + 1}`).trim()
+    const raw = slide?.puntos || slide?.bullets || slide?.vinetas || slide?.viñetas || slide?.contenido || slide?.items || []
+    const items = Array.isArray(raw) ? raw : String(raw || '').split(/\r?\n/)
+    const bullets = items
+      .map((item) => String(item ?? '').replace(/^[-*•]\s*/, '').trim())
+      .filter(Boolean)
+      .map((item) => `- ${item}`)
+    return [`## ${title}`, ...bullets].join('\n')
+  }).join('\n---\n')
 }
 
 // Respaldo local: catálogo en Markdown limpio para que el motor de documentos
@@ -1396,7 +1419,7 @@ function App({ user, onSignOut, guest = false }) {
   // y entrar con otra cuenta no se mezclan el perfil ni los datos.
   const uid = user?.uid || ''
   const localKey = (base) => scopedKey(base, uid)
-  const [products, setProducts] = useState(() => readLocalJson(localKey(STORAGE_KEY), []))
+  const [products, setProducts] = useState(() => filterJunkProducts(readLocalJson(localKey(STORAGE_KEY), [])))
   const [profile, setProfile] = useState(() => {
     const saved = readLocalJson(localKey(PROFILE_KEY), {})
     return {
@@ -1441,10 +1464,17 @@ function App({ user, onSignOut, guest = false }) {
     cloudSeededRef.current = false
     return onSnapshot(workspace, (snapshot) => {
       const data = snapshot.data() || {}
-      if (Array.isArray(data.products)) setProducts(data.products)
+      const cloudProducts = Array.isArray(data.products) ? filterJunkProducts(data.products) : null
+      if (cloudProducts) setProducts(cloudProducts)
       if (data.profile) setProfile((current) => ({ ...current, ...data.profile }))
       if (data.settings) setSettings((current) => ({ ...current, ...data.settings }))
-      if (data.modules) setRecords((current) => ({ ...current, ...data.modules }))
+      if (data.modules) setRecords((current) => {
+        const merged = { ...current, ...data.modules }
+        if (Array.isArray(merged.asesorias)) {
+          merged.asesorias = fixAsesoriaRecords(merged.asesorias, cloudProducts || products)
+        }
+        return merged
+      })
       // Al abrir la app se recupera el historial y la memoria guardados en la nube
       // solo si este dispositivo todavía no tiene una copia local más completa.
       if (!cloudSeededRef.current) {
@@ -1649,7 +1679,7 @@ function App({ user, onSignOut, guest = false }) {
     return demoProducts.length
   }
   function registerProductsInApp(list, replace = false) {
-    const incoming = normalizeProducts(list, { generated: true })
+    const incoming = filterJunkProducts(normalizeProducts(list, { generated: true }))
     if (!incoming.length) return { added: 0, updated: 0, total: products.length }
     if (replace) {
       const marked = incoming.map((product) => ({ ...product, source: 'Generado por IA (ejemplo)' }))
@@ -1660,7 +1690,7 @@ function App({ user, onSignOut, guest = false }) {
     }
     let added = 0
     let updated = 0
-    const map = new Map(products.map((product) => [normalize(product.name), product]))
+    const map = new Map(filterJunkProducts(products).map((product) => [normalize(product.name), product]))
     incoming.forEach((product) => {
       const key = normalize(product.name)
       if (!key) return
@@ -1682,8 +1712,9 @@ function App({ user, onSignOut, guest = false }) {
   }
   async function generateAssistantFile(type, requestText, aiText = '', filenameOverride = '', subtitle = '') {
     const title = String(requestText || '').trim().slice(0, 120) || 'Documento VITIMAX'
-    const catalogSource = products.length ? products : buildDemoProducts()
-    const isDemo = !products.length
+    const realProducts = filterJunkProducts(products)
+    const catalogSource = realProducts.length ? realProducts : buildDemoProducts()
+    const isDemo = !realProducts.length
     const body = String(aiText || '').trim() || catalogMarkdown(title, catalogSource, isDemo)
     const baseName = String(filenameOverride || '').trim()
     let filename = baseName || 'documento-vitimax'
@@ -1725,7 +1756,7 @@ function App({ user, onSignOut, guest = false }) {
     const source = String(html || '').trim()
     if (!source) throw new Error('La página HTML está vacía.')
     const title = plainText(titulo || 'Página VITIMAX') || 'Página VITIMAX'
-    const page = buildHtmlPage({ title, subtitle, html: source, catalog: products, phone: profile.phone })
+    const page = buildHtmlPage({ title, subtitle, html: source, catalog: filterJunkProducts(products), phone: profile.phone })
     const slug = normalize(title).replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'pagina-vitimax'
     const base = String(filename || '').trim().replace(/\.html?$/i, '') || `pagina-${slug}`
     const name = `${base}.html`
@@ -1776,7 +1807,8 @@ function App({ user, onSignOut, guest = false }) {
         }
       }
 
-      const productMerge = mergeImportedProducts(products, parsed.products)
+      const productMerge = mergeImportedProducts(filterJunkProducts(products), parsed.products)
+      const mergedProducts = filterJunkProducts(productMerge.products)
       const nextRecords = { ...records }
       const recordTotals = { added: 0, updated: 0 }
       Object.entries(parsed.records).forEach(([kind, list]) => {
@@ -1786,6 +1818,9 @@ function App({ user, onSignOut, guest = false }) {
         recordTotals.added += merged.added
         recordTotals.updated += merged.updated
       })
+      if (Array.isArray(nextRecords.asesorias) && nextRecords.asesorias.length) {
+        nextRecords.asesorias = fixAsesoriaRecords(nextRecords.asesorias, mergedProducts)
+      }
 
       if (!parsed.sheets.length && !parsed.products.length && !Object.values(parsed.records).some((list) => list?.length)) {
         throw new Error(parsed.needsAi
@@ -1793,7 +1828,7 @@ function App({ user, onSignOut, guest = false }) {
           : 'No se reconoció ninguna tabla. Revisa que el archivo tenga encabezados como Nombre, Producto, Precio o Stock.')
       }
 
-      setProducts(productMerge.products)
+      setProducts(mergedProducts)
       setRecords(nextRecords)
       setImportReport({
         fileName: file.name,
@@ -2024,8 +2059,8 @@ function App({ user, onSignOut, guest = false }) {
       contenido: (records.contenido || []).slice(0, 10)
     })
     const mergeProducts = (current, incoming) => {
-      const map = new Map(current.map((product) => [normalize(product.name), product]))
-      incoming.forEach((product) => {
+      const map = new Map(filterJunkProducts(current).map((product) => [normalize(product.name), product]))
+      filterJunkProducts(incoming).forEach((product) => {
         const key = normalize(product.name)
         if (!key) return
         const existing = map.get(key)
@@ -2159,7 +2194,10 @@ function App({ user, onSignOut, guest = false }) {
       }
       if (name === 'crear_pdf' || name === 'crear_word' || name === 'crear_ppt') {
         const tipo = name === 'crear_word' ? 'word' : name === 'crear_ppt' ? 'ppt' : 'pdf'
-        const saved = await generateAssistantFile(tipo, args.titulo || text, args.contenido || '', args.filename || '', args.subtitulo || '')
+        const contenido = tipo === 'ppt'
+          ? normalizePresentationContent(args.contenido, args.diapositivas || args.slides)
+          : (args.contenido || '')
+        const saved = await generateAssistantFile(tipo, args.titulo || text, contenido, args.filename || '', args.subtitulo || '')
         return { ok: true, archivo: saved.filename, ubicacion: saved.location, file: toFileExtra(saved) }
       }
       if (name === 'crear_html' || name === 'crear_pagina_web') {
@@ -2355,7 +2393,10 @@ function App({ user, onSignOut, guest = false }) {
       if (kind.includes('pdf') || kind.includes('word') || kind.includes('ppt') || kind.includes('documento') || action.documento) {
         const doc = action.documento || {}
         const tipo = kind.includes('word') ? 'word' : kind.includes('ppt') ? 'ppt' : kind.includes('pdf') ? 'pdf' : doc.tipo || action.tipoArchivo || 'pdf'
-        const saved = await generateAssistantFile(tipo, doc.titulo || action.titulo || text, doc.contenido || action.contenido || '', doc.filename || action.filename || '', doc.subtitulo || action.subtitulo || '')
+        const contenido = tipo === 'ppt'
+          ? normalizePresentationContent(doc.contenido || action.contenido, doc.diapositivas || action.diapositivas || doc.slides || action.slides)
+          : (doc.contenido || action.contenido || '')
+        const saved = await generateAssistantFile(tipo, doc.titulo || action.titulo || text, contenido, doc.filename || action.filename || '', doc.subtitulo || action.subtitulo || '')
         return { text: action.resumen || 'Documento generado.', created: [saved], registered: [] }
       }
       return null

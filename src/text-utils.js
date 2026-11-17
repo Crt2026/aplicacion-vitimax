@@ -3,6 +3,12 @@
 // Limpian LaTeX, escapes, Markdown y formato de números CLP.
 // ---------------------------------------------------------------------------
 
+// Detecta medidas del tipo "50kg/ha", "2 L/ha" o "100 g/L" que la IA a veces
+// envuelve en $...$ como si fuera LaTeX. Se convierten a texto plano.
+function looksLikeMeasurement(value) {
+  return /^\s*\d+(?:[.,]\d+)?\s*(?:kg|kgs|g|mg|ml|l|lt|lts|cc|cm|mm|m|ha|ppm|%)\b/i.test(String(value || ''))
+}
+
 // Convierte una expresión LaTeX sencilla a texto legible.
 function latexToText(value) {
   return String(value ?? '')
@@ -45,10 +51,11 @@ export function sanitizeText(value) {
   // Matemática en bloque: $$...$$
   text = text.replace(/\$\$([\s\S]*?)\$\$/g, (_, inner) => latexToText(inner))
 
-  // Matemática en línea: $...$ solo si contiene marcas LaTeX reales.
-  // Así no se destruyen precios como "$15.000 y $25.000".
+  // Matemática en línea: $...$ si contiene marcas LaTeX reales o si es una
+  // medida escrita por la IA ("$50kg/ha$", "$2~a~3~L/ha$"). Así no se
+  // destruyen precios como "$15.000 y $25.000".
   text = text.replace(/\$([^$\n]+)\$/g, (full, inner) => (
-    /[~^_\\{}]/.test(inner) ? latexToText(inner) : full
+    /[~^_\\{}]/.test(inner) || looksLikeMeasurement(inner) ? latexToText(inner) : full
   ))
 
   text = text.replace(/\u0000VITIMAX_DOLLAR\u0000/g, '$')
@@ -80,6 +87,9 @@ export function sanitizeText(value) {
   text = text
     .replace(/(^|\s)#{1,6}\s+/g, '$1')
     .replace(/#/g, '')
+
+  // Espacio entre número y unidad: "50kg/ha" -> "50 kg/ha".
+  text = text.replace(/(\d)\s*(kg|kgs|g|mg|ml|l|lt|lts|cc|cm|mm|m|ha|ppm|%)\b/gi, '$1 $2')
 
   return text.replace(/[ \t]{2,}/g, ' ').replace(/\s+$/gm, '').trim()
 }
@@ -129,7 +139,13 @@ export function formatClp(value, { decimals = 0 } = {}) {
 
 /** Suma real de productos y valor de inventario (Precio × Stock). */
 export function computeCatalogTotals(catalog = []) {
-  const list = Array.isArray(catalog) ? catalog.filter(Boolean) : []
+  const totalsLabel = /^(?:gran\s+)?(?:total(?:es)?|subtotal(?:es)?|suma|resumen|valor(?:izado)?)(?:\s+(?:general|valorado|inventario|productos|stock|clp|ejecutivo|de|del|la|el))*\s*$/i
+  // Nunca contar filas de totales importadas por error desde Excel.
+  const list = (Array.isArray(catalog) ? catalog : []).filter((item) => {
+    if (!item) return false
+    const name = String(item.name ?? item.nombre ?? item.producto ?? '').trim()
+    return !name || !totalsLabel.test(name)
+  })
   let units = 0
   let inventoryValue = 0
   let priceSum = 0
