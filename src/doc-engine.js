@@ -1132,6 +1132,36 @@ function ensureCharset(html) {
   return html.replace(/<head([^>]*)>/i, `<head$1><meta charset="utf-8">`)
 }
 
+function inlineHtml(value) {
+  return inlineSegments(value)
+    .map((segment) => (segment.bold ? `<strong>${escapeHtml(segment.text)}</strong>` : escapeHtml(segment.text)))
+    .join('')
+}
+
+// Si el modelo devuelve Markdown en lugar de HTML, se convierte a HTML real
+// para que la página nunca muestre "#", "**", "|" ni viñetas sin formato.
+function blocksToHtml(markdown) {
+  return parseDocument(markdown).map((block) => {
+    if (block.type === 'heading') {
+      const level = Math.min(Math.max(block.level + 1, 2), 6)
+      return `<h${level}>${inlineHtml(block.text)}</h${level}>`
+    }
+    if (block.type === 'paragraph') return `<p>${inlineHtml(block.text)}</p>`
+    if (block.type === 'bullets') return `<ul>${block.items.map((item) => `<li>${inlineHtml(item)}</li>`).join('')}</ul>`
+    if (block.type === 'numbers') return `<ol>${block.items.map((item) => `<li>${inlineHtml(item)}</li>`).join('')}</ol>`
+    if (block.type === 'table') {
+      const head = block.header.map((cell) => `<th>${inlineHtml(cell)}</th>`).join('')
+      const body = block.rows.map((row) => `<tr>${block.header.map((_, index) => `<td>${inlineHtml(row[index] || '')}</td>`).join('')}</tr>`).join('')
+      return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`
+    }
+    if (block.type === 'quote') return `<blockquote>${inlineHtml(block.text)}</blockquote>`
+    if (block.type === 'code') return `<pre><code>${escapeHtml(block.code)}</code></pre>`
+    return ''
+  }).filter(Boolean).join('\n')
+}
+
+const HTML_TAG = /<(?:!doctype|html|head|body|div|section|article|h[1-6]|p|ul|ol|li|table|thead|tbody|tr|td|th|header|main|footer|style|script|span|a|img|br|strong|em|button|form|input|label|nav)\b/i
+
 export function buildHtmlPage({ title = 'Página VITIMAX', subtitle = '', html = '' } = {}) {
   const cleanTitle = plainText(title) || 'Página VITIMAX'
   const cleanSubtitle = plainText(subtitle)
@@ -1146,9 +1176,11 @@ export function buildHtmlPage({ title = 'Página VITIMAX', subtitle = '', html =
     return page
   }
 
-  const body = /<body[\s>]/i.test(source)
-    ? source.replace(/^[\s\S]*?<body[^>]*>/i, '').replace(/<\/body>[\s\S]*$/i, '')
-    : source
+  const body = !HTML_TAG.test(source)
+    ? blocksToHtml(source)
+    : /<body[\s>]/i.test(source)
+      ? source.replace(/^[\s\S]*?<body[^>]*>/i, '').replace(/<\/body>[\s\S]*$/i, '')
+      : source
 
   return `<!doctype html>
 <html lang="es">
