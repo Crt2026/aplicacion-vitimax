@@ -824,3 +824,52 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 .error-log-detail{margin-top:10px;font-size:12px;color:#5f7969}
 .error-log-detail summary{cursor:pointer;font-weight:700;color:var(--deep)}
 .error-log-detail pre{margin:10px 0 0;padding:10px;border-radius:10px;background:#f4f7f4;font-size:11px;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto}
+/* ============================================================
+   VITIMAX 1.1.11 · El botón del BOT IA abre y cierra el chat
+   El mismo botón flotante funciona como interruptor: al abrirse
+   cambia a una X y al pulsarlo de nuevo cierra el panel.
+   ============================================================ */
+.assistant-fab.is-open{background:linear-gradient(135deg,#173c2c 0%,#2f8058 100%)!important;color:#fff!important;border-color:#ffffff40!important;box-shadow:0 12px 30px #123d2b45,0 0 0 4px #2f805825!important}
+.assistant-fab.is-open svg{width:24px;height:24px}
+.assistant-fab.is-open:hover{filter:saturate(1.05)}
+/* ============================================================
+   VITIMAX 1.1.12 · Chat limpio y vista previa en vivo
+   El texto se renderiza con negritas reales, listas y tablas.
+   Los bloques de código se pueden copiar y las páginas HTML se
+   previsualizan dentro de la app antes de descargarlas.
+   ============================================================ */
+.chat-rich{white-space:normal;display:block}
+.chat-rich p{margin:0 0 7px}
+.chat-rich p:last-child{margin-bottom:0}
+.chat-rich .chat-h{margin:9px 0 5px;font-weight:800;line-height:1.25;color:#173c2c}
+.chat-rich .chat-h1{font-size:14px}
+.chat-rich .chat-h2{font-size:12.5px}
+.chat-rich .chat-h3{font-size:11.5px}
+.chat-rich ul,.chat-rich ol{margin:5px 0 8px;padding-left:18px}
+.chat-rich li{margin:3px 0}
+.chat-rich strong{font-weight:800;color:#173c2c}
+.chat-rich blockquote{margin:7px 0;padding:7px 10px;border-left:3px solid #2f8058;background:#eef7f0;border-radius:0 7px 7px 0}
+.chat-rich hr{border:0;border-top:1px solid #dbe7de;margin:9px 0}
+.chat-table-wrap{overflow-x:auto;margin:8px 0;border:1px solid #dbe7de;border-radius:8px}
+.chat-rich table{width:100%;border-collapse:collapse;font-size:10.5px}
+.chat-rich th{background:#1e4d2b;color:#fff;padding:6px 8px;text-align:left;font-weight:700;white-space:nowrap}
+.chat-rich td{padding:5px 8px;border-top:1px solid #e2ebe4;color:#4c6a59}
+.chat-rich tr:nth-child(even) td{background:#f4f7f4}
+.chat-code{margin:8px 0;border:1px solid #d9e5dc;border-radius:9px;overflow:hidden;background:#f7faf8}
+.chat-code-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 8px;background:#e9f2ea;border-bottom:1px solid #d9e5dc;font-size:9.5px;font-weight:700;color:#3f6b52;text-transform:uppercase;letter-spacing:.08em}
+.chat-code-head button{display:flex;align-items:center;gap:4px;padding:3px 7px;border-radius:5px;background:#fff;border:1px solid #cfe0d4;color:#1e4d2b;font-size:9.5px;font-weight:700;text-transform:none;letter-spacing:0}
+.chat-code pre{margin:0;padding:9px;overflow:auto;max-height:260px}
+.chat-code code{font-family:'Consolas','Courier New',monospace;font-size:10.5px;line-height:1.5;white-space:pre;color:#173c2c}
+.chat-preview{display:flex;align-items:center;justify-content:center;gap:7px;width:100%;padding:9px 13px;border-radius:9px;border:1px solid #d8f55f;background:#f7fbe8;color:#1c5236;font-size:12px;font-weight:700;line-height:1.2}
+.chat-preview:hover{background:#eef8cf}
+.chat-preview-overlay{position:fixed;inset:0;z-index:60;display:grid;place-items:center;padding:18px;background:#12321fcc;backdrop-filter:blur(3px)}
+.chat-preview-modal{display:flex;flex-direction:column;width:min(980px,100%);height:min(84vh,760px);background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 30px 80px #07160d66}
+.chat-preview-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 15px;border-bottom:1px solid #e4ebe6;background:#f7faf7}
+.chat-preview-head>div:first-child{min-width:0}
+.chat-preview-head strong{display:block;font-size:12.5px;color:#173c2c}
+.chat-preview-head span{display:block;font-size:10.5px;color:#779087;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-preview-head-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+.chat-preview-head-actions button{display:flex;align-items:center;gap:6px;padding:8px 11px;border-radius:8px;background:#1e4d2b;color:#fff;font-size:11px;font-weight:700}
+.chat-preview-head-actions .icon-btn{width:34px;height:34px;justify-content:center;background:#fff;border:1px solid #dbe7de;color:#173c2c}
+.chat-preview-modal iframe{flex:1;width:100%;border:0;background:#fff}
+@media(max-width:650px){.chat-preview-overlay{padding:0}.chat-preview-modal{width:100%;height:100%;border-radius:0}}

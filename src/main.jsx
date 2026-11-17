@@ -2,8 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import * as XLSX from 'xlsx'
 import { jsPDF } from 'jspdf'
-import { Document, HeadingLevel, Packer, Paragraph } from 'docx'
-import pptxgen from 'pptxgenjs'
 import { Html5Qrcode } from 'html5-qrcode'
 import { GoogleAuthProvider, OAuthProvider, createUserWithEmailAndPassword, getRedirectResult, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, signInWithCredential, signInWithEmailAndPassword, signInWithPopup, signOut, updateProfile } from 'firebase/auth'
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication'
@@ -24,6 +22,20 @@ import {
 } from 'lucide-react'
 import './styles.css'
 import { firebaseAuth, firebaseConfigured, firebaseDb, firebaseFunctions, firebaseStorage } from './firebase'
+import {
+  CODE_EXTENSIONS,
+  CODE_MIME,
+  buildDocxDocument,
+  buildHtmlPage,
+  buildPdfDocument,
+  buildPptxDocument,
+  detectLanguage,
+  extractFencedCode,
+  inlineSegments,
+  parseDocument,
+  plainText,
+  stripSandboxLinks
+} from './doc-engine.js'
 import {
   ASSISTANT_TOOLS,
   DIRECT_AI_SYSTEM_PROMPT,
@@ -192,7 +204,7 @@ function persistableChat(messages) {
     const meta = Array.isArray(files)
       ? files
         .filter((entry) => entry && typeof entry === 'object')
-        .map(({ blob: entryBlob, sheets, ...entryRest }) => entryRest)
+        .map(({ blob: entryBlob, sheets, html, code, ...entryRest }) => entryRest)
       : []
     if (meta.length) copy.files = meta
     if (Array.isArray(copy.tools)) {
@@ -249,7 +261,7 @@ function makeId() {
 
 function money(value) {
   if (value === '' || value === null || value === undefined || Number.isNaN(Number(value))) return 'Pendiente'
-  return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', maximumFractionDigits: 0 }).format(Number(value))
+  return new Intl.NumberFormat('es-CL', { style: 'currency', currency: 'CLP', maximumFractionDigits: 0 }).format(Number(value))
 }
 
 // Un producto importado puede tener 0 en precio/stock porque el Excel venía incompleto.
@@ -259,6 +271,37 @@ function productPending(product, field) {
   if (Array.isArray(product.pendingFields)) return product.pendingFields.includes(field)
   const value = product[field]
   return value === '' || value === null || value === undefined
+}
+
+function withExtension(filename, fallback, extension) {
+  const base = String(filename || '').trim() || fallback
+  return new RegExp(`\\.${extension}$`, 'i').test(base)
+    ? base
+    : `${base.replace(/\.[a-z0-9]{1,6}$/i, '')}.${extension}`
+}
+
+// Respaldo local: catálogo en Markdown limpio para que el motor de documentos
+// lo convierta en tablas reales sin dejar marcas visibles.
+function catalogMarkdown(title, catalog, isDemo) {
+  const esc = (value) => String(value ?? '').replace(/\|/g, '/').replace(/\s+/g, ' ').trim()
+  const rows = catalog.map((item) => [
+    esc(item.name || 'Producto pendiente'),
+    esc(item.category || 'Pendiente'),
+    esc(item.format || 'Pendiente'),
+    esc(money(item.price)),
+    esc(productPending(item, 'stock') ? 'Pendiente' : item.stock)
+  ].join(' | ')).map((row) => `| ${row} |`).join('\n')
+  const detail = catalog.map((item) => `### ${esc(item.name || 'Producto pendiente')}\n\n${esc(item.description || 'Descripción pendiente.')}`).join('\n\n')
+  return [
+    `# ${title}`,
+    isDemo ? '> Datos de ejemplo generados por IA. No son información oficial de VITIMAX.' : '',
+    '## Catálogo VITIMAX',
+    '| Producto | Categoría | Formato | Precio | Stock |',
+    '| --- | --- | --- | --- | --- |',
+    rows,
+    '## Descripciones',
+    detail
+  ].filter(Boolean).join('\n\n')
 }
 
 function imageFileToDataUrl(file) {
@@ -808,31 +851,6 @@ const DOCUMENT_SYSTEM_PROMPT = `${GENERATION_SYSTEM_PROMPT}
 - Para presentaciones separa cada diapositiva con una línea que contenga exactamente ---
 - La primera línea de cada diapositiva será su título.
 - El documento debe empezar directamente con el título y contener solo información útil para el lector final.`
-
-function extractHtml(text) {
-  const source = String(text || '')
-  const fenced = source.match(/```(?:html)?\s*([\s\S]*?)```/i)
-  const candidate = (fenced ? fenced[1] : source).trim()
-  const start = candidate.search(/<!doctype html|<html[\s>]/i)
-  if (start === -1) return ''
-  const end = candidate.toLowerCase().lastIndexOf('</html>')
-  const html = end === -1 ? candidate.slice(start) : candidate.slice(start, end + 7)
-  return /<body[\s>]/i.test(html) || /<h1[\s>]/i.test(html) ? html : ''
-}
-
-function extractCodeBlock(text, fallbackLanguage = 'txt') {
-  const source = String(text || '').trim()
-  const fenced = source.match(/```([a-z0-9+#.-]*)\s*\n?([\s\S]*?)```/i)
-  if (fenced) return { language: (fenced[1] || fallbackLanguage).toLowerCase(), code: fenced[2].trim() }
-  return { language: fallbackLanguage, code: source }
-}
-
-const CODE_EXTENSIONS = {
-  html: 'html', htm: 'html', css: 'css', js: 'js', javascript: 'js', jsx: 'jsx', ts: 'ts', typescript: 'ts', tsx: 'tsx',
-  json: 'json', python: 'py', py: 'py', php: 'php', java: 'java', kotlin: 'kt', swift: 'swift', c: 'c', cpp: 'cpp',
-  'c++': 'cpp', cs: 'cs', csharp: 'cs', go: 'go', rust: 'rs', ruby: 'rb', sql: 'sql', bash: 'sh', shell: 'sh', sh: 'sh',
-  powershell: 'ps1', ps1: 'ps1', xml: 'xml', yaml: 'yml', yml: 'yml', markdown: 'md', md: 'md', txt: 'txt'
-}
 
 async function signInWithNativeProvider(providerId) {
   const result = providerId === 'google.com'
@@ -1509,6 +1527,13 @@ function App({ user, onSignOut, guest = false }) {
       window.removeEventListener('keydown', onKey)
     }
   }, [mobileMenuOpen])
+  // Escape también cierra el chat de la IA, igual que el botón flotante.
+  useEffect(() => {
+    if (!assistantOpen) return undefined
+    const onKey = (event) => { if (event.key === 'Escape') setAssistantOpen(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [assistantOpen])
 
   const categories = useMemo(() => ['Todas', ...new Set(products.map((p) => p.category).filter(Boolean))], [products])
   const filtered = useMemo(() => products.filter((p) => {
@@ -1655,91 +1680,51 @@ function App({ user, onSignOut, guest = false }) {
     setNotice(`${added} productos agregados · ${updated} actualizados en el catálogo`)
     return { added, updated, total: next.length }
   }
-  async function generateAssistantFile(type, requestText, aiText = '', filenameOverride = '') {
+  async function generateAssistantFile(type, requestText, aiText = '', filenameOverride = '', subtitle = '') {
     const title = String(requestText || '').trim().slice(0, 120) || 'Documento VITIMAX'
     const catalogSource = products.length ? products : buildDemoProducts()
-    const catalogText = catalogSource.map((item) => [
-      item.name || 'Producto pendiente',
-      `Categoría: ${item.category || 'Pendiente'}`,
-      `Formato: ${item.format || 'Pendiente'}`,
-      `Precio: ${money(item.price)}`,
-      `Stock: ${productPending(item, 'stock') ? 'Pendiente' : item.stock}`,
-      `Descripción: ${item.description || 'Pendiente'}`
-    ].join(' | ')).join('\n')
-    const body = String(aiText || '').trim() || `Catálogo VITIMAX\n\n${catalogText}\n\n${products.length ? '' : 'Datos de ejemplo generados por IA. No son información oficial de VITIMAX.'}`
-    let filename = filenameOverride || 'documento-vitimax'
+    const isDemo = !products.length
+    const body = String(aiText || '').trim() || catalogMarkdown(title, catalogSource, isDemo)
+    const baseName = String(filenameOverride || '').trim()
+    let filename = baseName || 'documento-vitimax'
     let saved = null
     if (type === 'pdf') {
-      const pdf = new jsPDF()
-      pdf.setFontSize(16)
-      pdf.text(title, 18, 20)
-      pdf.setFontSize(11)
-      const lines = pdf.splitTextToSize(body, 175)
-      let y = 32
-      lines.forEach((line) => {
-        if (y > 282) {
-          pdf.addPage()
-          y = 22
-        }
-        pdf.text(line, 18, y)
-        y += 6.5
-      })
-      filename = filenameOverride || 'documento-vitimax.pdf'
-      saved = await saveBlob(pdf.output('blob'), filename)
+      filename = withExtension(baseName, 'documento-vitimax', 'pdf')
+      saved = await saveBlob(buildPdfDocument({ title, subtitle, content: body }), filename)
     } else if (type === 'word') {
-      const children = [new Paragraph({ text: title, heading: HeadingLevel.TITLE })]
-      body.split('\n').forEach((raw) => {
-        const line = raw.trimEnd()
-        if (!line.trim()) return
-        if (line.startsWith('### ')) children.push(new Paragraph({ text: line.slice(4), heading: HeadingLevel.HEADING_2 }))
-        else if (line.startsWith('## ')) children.push(new Paragraph({ text: line.slice(3), heading: HeadingLevel.HEADING_1 }))
-        else if (line.startsWith('# ')) children.push(new Paragraph({ text: line.slice(2), heading: HeadingLevel.HEADING_1 }))
-        else if (/^[-*•]\s+/.test(line)) children.push(new Paragraph({ text: line.replace(/^[-*•]\s+/, ''), bullet: { level: 0 } }))
-        else children.push(new Paragraph(line))
-      })
-      const document = new Document({ sections: [{ children }] })
-      filename = filenameOverride || 'documento-vitimax.docx'
-      saved = await saveBlob(await Packer.toBlob(document), filename)
+      filename = withExtension(baseName, 'documento-vitimax', 'docx')
+      saved = await saveBlob(await buildDocxDocument({ title, subtitle, content: body }), filename)
     } else if (type === 'ppt') {
-      const presentation = new pptxgen()
-      presentation.layout = 'LAYOUT_WIDE'
-      const chunks = body.split(/\n\s*---\s*\n/).map((chunk) => chunk.trim()).filter(Boolean)
-      const slides = chunks.length ? chunks : [body]
-      slides.forEach((chunk, index) => {
-        const slide = presentation.addSlide()
-        slide.background = { color: index === 0 ? '173524' : 'F4F7F2' }
-        const rows = chunk.split('\n').map((line) => line.trim()).filter(Boolean)
-        const heading = (rows.shift() || `VITIMAX · ${index + 1}`).replace(/^#+\s*/, '')
-        slide.addText(heading, { x: 0.7, y: 0.6, w: 12, h: 0.9, fontSize: 26, bold: true, color: index === 0 ? 'FFFFFF' : '173524' })
-        const bullets = rows.map((line) => ({ text: line.replace(/^[-*•]\s+/, ''), options: { bullet: true, breakLine: true } }))
-        if (bullets.length) {
-          slide.addText(bullets, { x: 0.8, y: 1.7, w: 11.6, h: 4.7, fontSize: 16, color: index === 0 ? 'E8F2E9' : '173524', fit: 'shrink' })
-        }
-      })
-      filename = filenameOverride || 'presentacion-vitimax.pptx'
-      saved = await saveBlob(await presentation.write({ outputType: 'blob' }), filename)
+      filename = withExtension(baseName, 'presentacion-vitimax', 'pptx')
+      saved = await saveBlob(await buildPptxDocument({ title, subtitle, content: body }), filename)
     } else if (type === 'code') {
-      const extracted = aiText ? extractCodeBlock(aiText) : { language: 'html', code: '' }
-      const code = extracted.code || `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>body{font-family:Arial,sans-serif;max-width:900px;margin:40px auto;padding:24px;color:#173524;background:#f4f7f2}section{background:#fff;padding:28px;border-radius:20px;box-shadow:0 10px 30px #17352418}li{margin:10px 0}</style></head><body><section><h1>${escapeHtml(title)}</h1><h2>Catálogo VITIMAX</h2><ul>${catalogSource.map((item) => `<li><strong>${escapeHtml(item.name || 'Producto pendiente')}</strong> — ${escapeHtml(item.description || 'Descripción pendiente.')}</li>`).join('')}</ul></section></body></html>`
-      const extension = CODE_EXTENSIONS[extracted.language] || 'txt'
-      filename = filenameOverride || `codigo-vitimax.${extension}`
-      saved = await saveBlob(new Blob([code], { type: 'text/plain;charset=utf-8' }), filename)
+      const extracted = aiText ? extractFencedCode(aiText) : { language: 'html', code: '' }
+      const language = extracted.language || 'html'
+      const isHtml = language === 'html' || /<!doctype html|<html[\s>]/i.test(extracted.code || '')
+      const code = isHtml
+        ? buildHtmlPage({ title, subtitle: '', html: extracted.code || catalogMarkdown(title, catalogSource, isDemo) })
+        : String(extracted.code || '').trim()
+      if (!code) throw new Error('No se recibió código para guardar.')
+      const extension = CODE_EXTENSIONS[language] || (isHtml ? 'html' : 'txt')
+      filename = withExtension(baseName, `codigo-vitimax.${extension}`, extension)
+      saved = await saveBlob(new Blob([code], { type: CODE_MIME[extension] || 'text/plain;charset=utf-8' }), filename)
+      saved = { ...saved, code, language, extension, mimeType: CODE_MIME[extension] || 'text/plain;charset=utf-8' }
     }
-    setNotice(`${type === 'ppt' ? 'PowerPoint' : type === 'word' ? 'Word' : type.toUpperCase()} generado y guardado`)
+    const label = type === 'ppt' ? 'PowerPoint' : type === 'word' ? 'Word' : type === 'code' ? 'Código' : type.toUpperCase()
+    setNotice(`${label} generado y guardado`)
     return saved || { filename, location: '' }
   }
-  async function saveHtmlDocument({ titulo, html, filename }) {
-    const body = String(html || '').trim()
-    if (!body) throw new Error('La página HTML está vacía.')
-    const slug = normalize(titulo || 'pagina-vitimax').replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'pagina-vitimax'
+  async function saveHtmlDocument({ titulo, html, filename, subtitle = '' }) {
+    const source = String(html || '').trim()
+    if (!source) throw new Error('La página HTML está vacía.')
+    const title = plainText(titulo || 'Página VITIMAX') || 'Página VITIMAX'
+    const page = buildHtmlPage({ title, subtitle, html: source })
+    const slug = normalize(title).replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'pagina-vitimax'
     const base = String(filename || '').trim().replace(/\.html?$/i, '') || `pagina-${slug}`
     const name = `${base}.html`
-    const page = /<html[\s>]/i.test(body)
-      ? body
-      : `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(titulo || 'VITIMAX')}</title><style>body{font-family:Arial,sans-serif;max-width:960px;margin:40px auto;padding:24px;color:#173524;background:#f4f7f2;line-height:1.6}article{background:#fff;padding:32px;border-radius:20px;box-shadow:0 10px 30px #17352418}h1,h2{color:#173524}code,pre{background:#eef3ec;padding:2px 6px;border-radius:6px}</style></head><body><article>${body}</article></body></html>`
     const saved = await saveBlob(new Blob([page], { type: 'text/html;charset=utf-8' }), name)
     setNotice('Página HTML creada y guardada en el dispositivo')
-    return saved
+    return { ...saved, html: page, mimeType: 'text/html;charset=utf-8' }
   }
   async function importExcel(event) {
     const file = event.target.files?.[0]
@@ -2052,7 +2037,10 @@ function App({ user, onSignOut, guest = false }) {
         uri: saved.uri,
         mimeType: saved.mimeType || saved.blob.type,
         native: saved.native,
-        sheets: saved.sheets
+        sheets: saved.sheets,
+        html: saved.html,
+        code: saved.code,
+        language: saved.language
       }
     }
     const productsFromSheets = (sheets) => {
@@ -2158,17 +2146,29 @@ function App({ user, onSignOut, guest = false }) {
         return { ok: true, ...simulation, resumen: summarizeSimulation(simulation) }
       }
       if (name === 'crear_documento') {
-        const saved = await generateAssistantFile(args.tipo || 'pdf', args.titulo || text, args.contenido || '', args.filename || '')
+        const tipo = args.tipo || 'pdf'
+        const saved = await generateAssistantFile(tipo, args.titulo || text, args.contenido || '', args.filename || '', args.subtitulo || '')
         return { ok: true, archivo: saved.filename, ubicacion: saved.location, file: toFileExtra(saved) }
       }
       if (name === 'crear_pdf' || name === 'crear_word' || name === 'crear_ppt') {
         const tipo = name === 'crear_word' ? 'word' : name === 'crear_ppt' ? 'ppt' : 'pdf'
-        const saved = await generateAssistantFile(tipo, args.titulo || text, args.contenido || '', args.filename || '')
+        const saved = await generateAssistantFile(tipo, args.titulo || text, args.contenido || '', args.filename || '', args.subtitulo || '')
         return { ok: true, archivo: saved.filename, ubicacion: saved.location, file: toFileExtra(saved) }
       }
-      if (name === 'crear_html') {
-        const saved = await saveHtmlDocument({ titulo: args.titulo || text, html: args.html || args.contenido || '', filename: args.filename || '' })
+      if (name === 'crear_html' || name === 'crear_pagina_web') {
+        const saved = await saveHtmlDocument({
+          titulo: args.titulo || text,
+          subtitle: args.subtitulo || args.resumen || '',
+          html: args.html || args.contenido || '',
+          filename: args.filename || ''
+        })
         return { ok: true, archivo: saved.filename, ubicacion: saved.location, file: toFileExtra(saved) }
+      }
+      if (name === 'crear_codigo') {
+        const language = String(args.lenguaje || args.language || '').trim() || detectLanguage(args.descripcion || text)
+        const code = args.codigo || args.code || args.contenido || ''
+        const saved = await generateAssistantFile('code', args.titulo || text, code ? `\`\`\`${language}\n${code}\n\`\`\`` : '', args.filename || '')
+        return { ok: true, archivo: saved.filename, ubicacion: saved.location, lenguaje: saved.language, file: toFileExtra(saved) }
       }
       if (name === 'guardar_memoria') {
         const record = saveMemory(args.categoria, args.dato || args.contenido || args.dato_a_recordar)
@@ -2329,14 +2329,26 @@ function App({ user, onSignOut, guest = false }) {
         })
         return { text: summarizeSimulation(simulation), created: [], registered: [] }
       }
-      if (kind.includes('html') || action.html) {
-        const saved = await saveHtmlDocument({ titulo: action.titulo || text, html: action.html || action.contenido || '', filename: action.filename || '' })
+      if (kind.includes('html') || kind.includes('pagina') || action.html) {
+        const saved = await saveHtmlDocument({
+          titulo: action.titulo || text,
+          subtitle: action.subtitulo || action.resumen || '',
+          html: action.html || action.contenido || '',
+          filename: action.filename || ''
+        })
         return { text: action.resumen || 'Página web generada.', created: [saved], registered: [] }
+      }
+      if (kind.includes('codigo') || kind.includes('code') || action.codigo || action.code) {
+        const language = String(action.lenguaje || action.language || '').trim() || detectLanguage(action.descripcion || action.titulo || text)
+        const code = action.codigo || action.code || action.contenido || ''
+        if (!code) return null
+        const saved = await generateAssistantFile('code', action.titulo || text, `\`\`\`${language}\n${code}\n\`\`\``, action.filename || '')
+        return { text: action.resumen || 'Código generado.', created: [saved], registered: [] }
       }
       if (kind.includes('pdf') || kind.includes('word') || kind.includes('ppt') || kind.includes('documento') || action.documento) {
         const doc = action.documento || {}
         const tipo = kind.includes('word') ? 'word' : kind.includes('ppt') ? 'ppt' : kind.includes('pdf') ? 'pdf' : doc.tipo || action.tipoArchivo || 'pdf'
-        const saved = await generateAssistantFile(tipo, doc.titulo || action.titulo || text, doc.contenido || action.contenido || '', doc.filename || action.filename || '')
+        const saved = await generateAssistantFile(tipo, doc.titulo || action.titulo || text, doc.contenido || action.contenido || '', doc.filename || action.filename || '', doc.subtitulo || action.subtitulo || '')
         return { text: action.resumen || 'Documento generado.', created: [saved], registered: [] }
       }
       return null
@@ -2465,7 +2477,7 @@ function App({ user, onSignOut, guest = false }) {
       onTouchEnd={(event) => { const endX = event.changedTouches[0]?.clientX || 0; if (drawerTouchX.current - endX > 55) setMobileMenuOpen(false) }}
     >
       <div className="brand"><div className="brand-mark"><BrandMark size={21} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div><button type="button" className="sidebar-close" aria-label="Cerrar menú" onClick={() => setMobileMenuOpen(false)}><X size={19} /></button></div>
-      <div className="workspace-label">ESPACIO DE TRABAJO · v1.1.10 <span className="status-dot" /></div>
+      <div className="workspace-label">ESPACIO DE TRABAJO · v1.1.12 <span className="status-dot" /></div>
       <nav>{nav.map(({ label, icon: Icon, tone }) => <button key={label} className={active === label ? 'nav-item active' : 'nav-item'} onClick={() => navigate(label)}><span className={`nav-icon ${tone}`}><Icon size={17} /></span><span>{label}</span>{moduleCounts[label] > 0 && <em>{moduleCounts[label]}</em>}</button>)}</nav>
       <div className="sidebar-bottom">{canManage && <button className="nav-item" onClick={() => { setOverlay('settings'); setMobileMenuOpen(false) }}><span className="nav-icon slate"><Settings2 size={17} /></span><span>Configuración</span></button>}<button className="nav-item signout-item" onClick={() => { setOverlay(null); setMobileMenuOpen(false); onSignOut?.() }}><span className="nav-icon rose"><LogOut size={17} /></span><span>Cerrar sesión</span></button><button className="profile profile-button" onClick={() => setOverlay('profile')}><Avatar name={profile.name} photo={profile.photo} /><div><strong>{profile.name || 'Invitado'}</strong><span>{profile.email || 'Acceso de invitado'}</span></div><MoreHorizontal size={17} /></button></div>
     </aside>
@@ -2488,7 +2500,15 @@ function App({ user, onSignOut, guest = false }) {
     {overlay === 'settings' && <SettingsModal settings={settings} onClose={() => setOverlay(null)} onSave={saveSettings} />}
     {overlay === 'notifications' && <NotificationsModal lowStock={lowStock} missingData={missingData} onClose={() => setOverlay(null)} />}
     {importReport && <ImportReport report={importReport} onClose={() => setImportReport(null)} />}
-    <button className="assistant-fab" onClick={() => setAssistantOpen(true)} aria-label="Abrir BOT IA VITIMAX"><img className="assistant-bot-image" src="/bot-vitimax.png" alt="" /><span>BOT IA VITIMAX</span></button>
+    <button
+      className={`assistant-fab${assistantOpen ? ' is-open' : ''}`}
+      onClick={() => setAssistantOpen((open) => !open)}
+      aria-label={assistantOpen ? 'Cerrar BOT IA VITIMAX' : 'Abrir BOT IA VITIMAX'}
+      aria-expanded={assistantOpen}
+      title={assistantOpen ? 'Cerrar el chat' : 'Abrir el chat'}
+    >
+      {assistantOpen ? <X size={22} /> : <><img className="assistant-bot-image" src="/bot-vitimax.png" alt="" /><span>BOT IA VITIMAX</span></>}
+    </button>
     {assistantOpen && <SectionBoundary scope="asistente" resetKey={assistantOpen} compact title="El chat tuvo un problema" message="Tu catálogo, tu perfil y tus conversaciones están guardados. Reintenta o limpia la conversación; el resto de la app sigue funcionando." onReset={resetAssistantChat} resetLabel="Limpiar conversación">
       <Assistant messages={messages} onClose={() => setAssistantOpen(false)} onAsk={askAssistant} onDownload={downloadMessageFile} onOpen={openMessageFile} aiReady={Boolean(resolveAiUrl(settings) || resolveDirectKey(settings) || (firebaseFunctions && import.meta.env.VITE_ENABLE_CLOUD_ASSISTANT === 'true' && !guest))} memories={memories} onSaveMemory={saveMemory} onDeleteMemory={(id) => forgetMemory(id)} onClearMemories={clearMemories} />
     </SectionBoundary>}
@@ -3131,7 +3151,7 @@ function SettingsModal({ settings, onClose, onSave }) {
       </section>
       <section className="settings-group about-group">
         <div className="settings-group-head"><span className="settings-group-icon slate"><Info size={17} /></span><div><h3>Acerca de VITIMAX</h3><p>Centro de gestión agrícola digital.</p></div></div>
-        <div className="about-grid"><div><span>Versión</span><strong>1.1.10</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
+        <div className="about-grid"><div><span>Versión</span><strong>1.1.12</strong></div><div><span>Plataforma</span><strong>{Capacitor.getPlatform() === 'web' ? 'Web / PWA' : Capacitor.getPlatform() === 'android' ? 'Android' : 'iOS'}</strong></div><div><span>Guardado</span><strong>Local + nube</strong></div></div>
       </section>
     </div>
   </ModalShell>
@@ -3323,6 +3343,72 @@ function QrScanner({ onClose, onResult }) {
   </div>
 }
 
+function richText(value) {
+  const segments = inlineSegments(value)
+  if (!segments.length) return null
+  return segments.map((segment, index) => (segment.bold
+    ? <strong key={index}>{segment.text}</strong>
+    : <span key={index}>{segment.text}</span>))
+}
+
+function isHtmlFile(file) {
+  if (!file) return false
+  if (file.html) return true
+  const name = String(file.name || file.filename || '')
+  const language = String(file.language || '').toLowerCase()
+  return /\.html?$/i.test(name) || (language === 'html' && Boolean(file.code))
+}
+
+function fileHtmlPreview(file) {
+  if (!file) return ''
+  if (file.html) return String(file.html)
+  if (file.code && (/\.html?$/i.test(file.name || '') || String(file.language || '').toLowerCase() === 'html')) return String(file.code)
+  return ''
+}
+
+function ChatCodeBlock({ code, language, onCopy, copied }) {
+  return <div className="chat-code">
+    <div className="chat-code-head">
+      <span>{language || 'código'}</span>
+      <button type="button" onClick={() => onCopy(code)} title="Copiar código">
+        {copied ? <Check size={13} /> : <Copy size={13} />}<span>{copied ? 'Copiado' : 'Copiar'}</span>
+      </button>
+    </div>
+    <pre><code>{code}</code></pre>
+  </div>
+}
+
+function ChatMessageBody({ text, onCopy, copiedCode }) {
+  const blocks = useMemo(() => parseDocument(text), [text])
+  if (!blocks.length) return null
+  return <div className="chat-rich">{blocks.map((block, index) => {
+    if (block.type === 'heading') {
+      const Tag = block.level === 1 ? 'h3' : block.level === 2 ? 'h4' : 'h5'
+      return <Tag className={`chat-h chat-h${Math.min(block.level, 3)}`} key={index}>{richText(block.text)}</Tag>
+    }
+    if (block.type === 'bullets') {
+      return <ul key={index}>{block.items.map((item, itemIndex) => <li key={itemIndex}>{richText(item)}</li>)}</ul>
+    }
+    if (block.type === 'numbers') {
+      return <ol key={index}>{block.items.map((item, itemIndex) => <li key={itemIndex}>{richText(item)}</li>)}</ol>
+    }
+    if (block.type === 'table') {
+      return <div className="chat-table-wrap" key={index}>
+        <table>
+          <thead><tr>{block.header.map((cell, cellIndex) => <th key={cellIndex}>{richText(cell)}</th>)}</tr></thead>
+          <tbody>{block.rows.map((row, rowIndex) => <tr key={rowIndex}>{block.header.map((_, cellIndex) => <td key={cellIndex}>{richText(row[cellIndex] || '')}</td>)}</tr>)}</tbody>
+        </table>
+      </div>
+    }
+    if (block.type === 'code') {
+      return <ChatCodeBlock key={index} code={block.code} language={block.language} onCopy={onCopy} copied={copiedCode === block.code} />
+    }
+    if (block.type === 'quote') return <blockquote key={index}>{richText(block.text)}</blockquote>
+    if (block.type === 'divider') return <hr key={index} />
+    return <p key={index}>{richText(block.text)}</p>
+  })}</div>
+}
+
 function AssistantIcon() {
   return <span className="assistant-logo" aria-hidden="true"><svg viewBox="0 0 32 32" role="img"><path className="assistant-antenna" d="M16 5V2m0 0-2 2m2-2 2 2" /><rect x="5" y="7" width="22" height="18" rx="6" /><path d="M10 15h.01M22 15h.01M11 20c3 2 7 2 10 0" /><path className="assistant-ear" d="M5 14H2m25 0h3" /></svg><b>IA</b></span>
 }
@@ -3336,11 +3422,32 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
   const [memoryText, setMemoryText] = useState('')
   const fileInputRef = useRef(null)
   const bodyRef = useRef(null)
+  const [previewFile, setPreviewFile] = useState(null)
+  const [copiedCode, setCopiedCode] = useState('')
 
   useEffect(() => {
     const body = bodyRef.current
     if (body) body.scrollTop = body.scrollHeight
   }, [messages, memoryOpen])
+
+  useEffect(() => {
+    if (!previewFile) return undefined
+    const onKey = (event) => {
+      if (event.key !== 'Escape') return
+      event.stopImmediatePropagation()
+      setPreviewFile(null)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [previewFile])
+
+  async function copyCode(code) {
+    try {
+      await navigator.clipboard.writeText(code)
+      setCopiedCode(code)
+      setTimeout(() => setCopiedCode((current) => (current === code ? '' : current)), 1800)
+    } catch { /* el portapapeles puede estar bloqueado */ }
+  }
 
   function addMemory(event) {
     event.preventDefault()
@@ -3435,10 +3542,11 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
     <div className="assistant-body" ref={bodyRef}>
       {messageList.map((m, i) => <div className={`chat ${m.role}${m.pending ? ' pending' : ''}`} key={i}>
         <div>
-          {messageText(m)}
+          <ChatMessageBody text={messageText(m)} onCopy={copyCode} copiedCode={copiedCode} />
           {onDownload && messageFiles(m).map((file, fileIndex) => (
             <div className="chat-file-actions" key={`${file.name || 'archivo'}-${fileIndex}`}>
               <button type="button" className="chat-download" onClick={() => onDownload(file, i)}><ArrowDownToLine size={14} /><span>Descargar {file.name || 'archivo'}</span></button>
+              {isHtmlFile(file) && <button type="button" className="chat-preview" onClick={() => setPreviewFile(file)}><Eye size={14} /><span>Vista previa en vivo</span></button>}
               {file.native && file.uri && onOpen && <button type="button" className="chat-open" onClick={() => onOpen(file)}><ExternalLink size={14} /><span>Abrir archivo</span></button>}
             </div>
           ))}
@@ -3470,6 +3578,18 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
     </form>
     <small>Adjunta imágenes, PDF, Excel/CSV o texto (máximo 8 MB). Excel/CSV se analizan como texto y los PDF se leen directamente. Verifica diagnósticos y aplicaciones con un especialista.</small>
     </>}
+    {previewFile && <div className="chat-preview-overlay" role="dialog" aria-modal="true" aria-label={`Vista previa de ${previewFile.name || 'página web'}`}>
+      <div className="chat-preview-modal">
+        <div className="chat-preview-head">
+          <div><strong>Vista previa en vivo</strong><span>{previewFile.name || 'página web'}</span></div>
+          <div className="chat-preview-head-actions">
+            {onDownload && <button type="button" onClick={() => onDownload(previewFile)}><ArrowDownToLine size={14} /><span>Descargar</span></button>}
+            <button type="button" className="icon-btn" aria-label="Cerrar vista previa" onClick={() => setPreviewFile(null)}><X size={17} /></button>
+          </div>
+        </div>
+        <iframe title={`Vista previa de ${previewFile.name || 'página web'}`} srcDoc={fileHtmlPreview(previewFile)} sandbox="allow-scripts allow-forms allow-popups allow-modals" />
+      </div>
+    </div>}
   </div>
 }
 

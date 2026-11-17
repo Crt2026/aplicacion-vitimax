@@ -94,10 +94,11 @@ DATOS DE VITIMAX
 ACCIONES EN LA APP (bloques JSON):
 Cuando el usuario pida un archivo o una acción, responde con un bloque \`\`\`json y el resto del texto que quieras mostrar:
 - Excel / catálogo / planilla: {"accion":"crear_excel","filename":"reporte-vitimax.xlsx","resumen":"...","productos":[{...}],"kpis":[{"nombre":"Ventas totales","formula":"=SUM(Ventas!E2:E50)","unidad":"CLP","interpretacion":"..."}],"sheets":[{"name":"Productos","columns":[...],"rows":[[...]]}]}. Para catálogo general incluye las 7 hojas; para auditoría usa las hojas necesarias con "Resumen Ejecutivo" primero y fórmulas reales que empiecen con "=".
-- PDF: {"accion":"crear_pdf","titulo":"...","contenido":"# Título\\n## Sección\\n- Punto","filename":"documento.pdf"}
-- Word: {"accion":"crear_word","titulo":"...","contenido":"# Título\\n## Sección\\n- Punto","filename":"documento.docx"}
-- PowerPoint: {"accion":"crear_ppt","titulo":"...","contenido":"Diapositiva 1\\n- Punto\\n---\\nDiapositiva 2\\n- Punto","filename":"presentacion.pptx"}
-- Página web: {"accion":"crear_html","titulo":"...","html":"<!doctype html>...","filename":"pagina.html"}
+- PDF: {"accion":"crear_pdf","titulo":"...","subtitulo":"...","contenido":"# Título\\n## Sección\\n- Punto\\n\\n| Columna | Valor |\\n| --- | --- |\\n| Dato | 10 |","filename":"documento.pdf"}
+- Word: {"accion":"crear_word","titulo":"...","subtitulo":"...","contenido":"# Título\\n## Sección\\n- Punto","filename":"documento.docx"}
+- PowerPoint: {"accion":"crear_ppt","titulo":"...","subtitulo":"...","contenido":"Diapositiva 1\\n- Punto\\n---\\nDiapositiva 2\\n- Punto","filename":"presentacion.pptx"}
+- Página web: {"accion":"crear_pagina_web","titulo":"...","subtitulo":"...","resumen":"...","html":"<!doctype html>...","filename":"pagina.html"}
+- Código en cualquier lenguaje: {"accion":"crear_codigo","titulo":"...","lenguaje":"python","codigo":"...","filename":"programa.py"}
 - Documento genérico: {"accion":"crear_documento","documento":{"tipo":"pdf|word|ppt","titulo":"...","contenido":"# Título\\n## Sección\\n- Punto"}}
 - Guardar productos en el catálogo: {"accion":"registrar_productos_en_app","productos":[{...}],"reemplazar":false}
 - Simular ventas: {"accion":"simular_ventas","periodoDias":30,"crecimientoMensual":0}
@@ -113,6 +114,8 @@ MEMORIA PERSISTENTE:
 
 REGLAS DE TRABAJO:
 - No uses "-" como dato. Si falta un dato, deja el campo vacío o escribe "Pendiente".
+- Nunca escribas enlaces internos como [texto](sandbox:/archivo) ni fórmulas LaTeX con "$": la app muestra el texto limpio y una tarjeta de descarga.
+- En documentos usa tablas Markdown con "|" cuando haya datos comparables; el motor las convierte en tablas reales con bordes.
 - Usa listas y pasos cuando ayuden. Ten en cuenta el historial de la conversación.`
 
 const rateBuckets = new Map()

@@ -84,6 +84,17 @@ export function cleanCell(value) {
   if (/^(n\/?a|sin dato|no aplica)$/i.test(text)) return ''
   // Las fórmulas se conservan tal cual: el escritor avanzado las convierte en
   // fórmulas reales de Excel. Si se escaparan, el archivo perdería el cálculo.
+  if (text.startsWith('=')) return text
+  // Sin marcas Markdown en las celdas: el formato real lo aplica ExcelJS.
+  text = text
+    .replace(/\[([^\]]*)\]\(\s*(?:sandbox|file):[^)]*\)/gi, '$1')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\*\*|__|~~|`/g, '')
+    .replace(/(^|\s)[*_](\S[^*_]*)[*_](?=\s|$)/g, '$1$2')
+    .replace(/\$([^$\n]+)\$/g, '$1')
+    .replace(/^\s*#{1,6}\s+/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
   return text
 }
 
@@ -950,10 +961,11 @@ function safeSheetName(name, index) {
 }
 
 const EXCEL_COLORS = {
-  headerFill: 'FF276B3B',
+  headerFill: 'FF1E4D2B',
   headerText: 'FFFFFFFF',
-  zebraFill: 'FFF7FAF5',
+  zebraFill: 'FFF4F7F4',
   border: 'FFDDE7DA',
+  totalsFill: 'FFE6EFE8',
   kpiFill: 'FFEDF5EE',
   alertFill: 'FFF8D7D7',
   alertText: 'FF9B1C1C',
@@ -994,6 +1006,10 @@ function excelCellValue(value, header) {
     const percent = toNumber(text)
     if (Number.isFinite(percent)) return percent / 100
   }
+  if (DATE_HEADER.test(header) && /^\d{1,4}[-/]\d{1,2}[-/]\d{1,4}$/.test(text)) {
+    const parsed = new Date(text)
+    if (!Number.isNaN(parsed.getTime())) return parsed
+  }
   if (NUMERIC_HEADER.test(header) && /^-?[$€]?\s?\d[\d.,]*$/.test(text)) {
     const numeric = toNumber(text)
     if (Number.isFinite(numeric)) return numeric
@@ -1002,11 +1018,18 @@ function excelCellValue(value, header) {
 }
 
 function excelColumnMeta(columns, rows) {
+  const isDateString = (value) => typeof value === 'string' && /^\d{1,4}[-/]\d{1,2}[-/]\d{1,4}$/.test(value.trim())
+  // La fila de totales no define el tipo de la columna (su primera celda dice "Total").
+  const dataRows = rows.filter((row) => !/^(gran\s+)?(total|totales|subtotal|suma|resumen)\b/i.test(String(row[0] || '').trim()))
+  const sampleRows = dataRows.length ? dataRows : rows
   return columns.map((header, index) => {
-    const values = rows.map((row) => row[index]).filter((value) => value !== '' && value !== null && value !== undefined)
+    const values = sampleRows.map((row) => row[index]).filter((value) => value !== '' && value !== null && value !== undefined)
     const numeric = values.length > 0 && values.every((value) => {
       if (typeof value === 'number') return true
+      if (value instanceof Date) return true
       if (typeof value === 'string' && value.trim().startsWith('=')) return true
+      // Una columna "Fecha" con texto ISO también se trata como fecha numérica.
+      if (DATE_HEADER.test(header) && isDateString(value)) return true
       return typeof value === 'string' && /^-?[$€]?\s?\d[\d.,]*$/.test(value.trim())
     })
     const decimals = numeric && values.some((value) => {
@@ -1015,8 +1038,8 @@ function excelColumnMeta(columns, rows) {
     })
     let numFmt = null
     if (numeric && PERCENT_HEADER.test(header)) numFmt = '0.0%'
-    else if (numeric && MONEY_HEADER.test(header)) numFmt = decimals ? '#,##0.00' : '#,##0'
-    else if (numeric && DATE_HEADER.test(header)) numFmt = 'yyyy-mm-dd'
+    else if (numeric && MONEY_HEADER.test(header)) numFmt = decimals ? '"$"#,##0.00' : '"$"#,##0'
+    else if (numeric && DATE_HEADER.test(header)) numFmt = 'dd/mm/yyyy'
     else if (numeric) numFmt = decimals ? '#,##0.00' : '#,##0'
     return { numeric, numFmt }
   })
@@ -1029,7 +1052,7 @@ function excelWidths(columns, rows) {
       const text = typeof value === 'object' && value?.formula ? `=${value.formula}` : String(value ?? '')
       return Math.max(max, text.length)
     }, 0)
-    const width = Math.max(12, Math.min(52, Math.max(String(header || '').length + 2, longest + 2)))
+    const width = Math.max(14, Math.min(56, Math.max(String(header || '').length + 2, longest + 2) + 5))
     return { width }
   })
 }
@@ -1103,7 +1126,7 @@ export async function createExcelBlob(sheets, options = {}) {
     const meta = excelColumnMeta(columns, rows)
     worksheet.columns = excelWidths(columns, rows)
     const headerRow = worksheet.addRow(columns)
-    headerRow.height = 26
+    headerRow.height = 28
     headerRow.eachCell((cell) => {
       cell.font = { bold: true, color: { argb: EXCEL_COLORS.headerText }, size: 11 }
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: EXCEL_COLORS.headerFill } }
@@ -1113,6 +1136,7 @@ export async function createExcelBlob(sheets, options = {}) {
     rows.forEach((row, rowIndex) => {
       const excelRow = worksheet.addRow(row.map((value, columnIndex) => excelCellValue(value, columns[columnIndex] || '')))
       excelRow.height = 20
+      const isTotals = /^(gran\s+)?(total|totales|subtotal|suma|resumen)\b/i.test(String(row[0] || '').trim())
       excelRow.eachCell((cell, columnIndex) => {
         cell.alignment = { vertical: 'top', wrapText: true }
         cell.border = { bottom: { style: 'hair', color: { argb: EXCEL_COLORS.border } } }
@@ -1120,6 +1144,14 @@ export async function createExcelBlob(sheets, options = {}) {
         const format = meta[columnIndex - 1]?.numFmt
         if (format && !cell.formula) cell.numFmt = format
         if (cell.formula) cell.numFmt = format || '#,##0'
+        if (isTotals) {
+          cell.font = { bold: true, color: { argb: EXCEL_COLORS.headerFill } }
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: EXCEL_COLORS.totalsFill } }
+          cell.border = {
+            ...cell.border,
+            top: { style: 'double', color: { argb: EXCEL_COLORS.headerFill } }
+          }
+        }
       })
     })
     if (columns.length && rows.length) {
@@ -1504,7 +1536,8 @@ FORMATO SEGÚN LA TAREA
 - Planificación, comparaciones o decisiones: tablas Markdown y listas ordenadas; cierra con una recomendación clara.
 - Análisis de datos: presenta hallazgos, supuestos y límites; usa tablas cuando aporten claridad.
 - Redacción creativa: entrega el texto listo para usar; si hay variantes, sepáralas con títulos breves.
-- Documentos descargables: usa herramientas reales (crear_excel, crear_pdf, crear_word, crear_ppt, crear_html) cuando el usuario pida un archivo. Diseño profesional, contenido completo y fórmulas activas en Excel.
+- Documentos descargables: usa herramientas reales (crear_excel, crear_pdf, crear_word, crear_ppt, crear_pagina_web, crear_codigo) cuando el usuario pida un archivo. Diseño profesional, contenido completo y fórmulas activas en Excel.
+- Nunca escribas enlaces internos como [texto](sandbox:/archivo) ni fórmulas LaTeX con "$": no se ven bien en el chat. Si mencionas un archivo, hazlo con su nombre y la app mostrará la tarjeta de descarga.
 - No uses tablas para respuestas de una línea ni Markdown decorativo excesivo. No muestres JSON de acciones al usuario salvo que sea imprescindible.
 
 INTENCIÓN REAL Y HERRAMIENTAS
@@ -1548,8 +1581,10 @@ DATOS DE VITIMAX
 
 HERRAMIENTAS
 - crear_excel: libro .xlsx real con hojas, columnas, filas y fórmulas activas. Para un catálogo general usa las 7 hojas: Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores.
-- crear_pdf, crear_word, crear_ppt: documentos reales en PDF, Word y PowerPoint. Usa "# " para títulos, "## " para secciones, "- " para viñetas y --- para separar diapositivas.
-- crear_html: página web HTML completa y autónoma (con CSS incluido), responsive y lista para abrir.
+- crear_pdf, crear_word, crear_ppt: documentos reales en PDF, Word y PowerPoint. Usa "# " para títulos, "## " para secciones, "- " para viñetas, tablas Markdown con "|" y --- para separar diapositivas. Máximo 5 viñetas por diapositiva.
+- crear_pagina_web: página web HTML5 completa y autónoma (CSS y JavaScript embebidos), responsive, con diseño moderno y una llamada a la acción. La app permite verla en vivo antes de descargar.
+- crear_codigo: entrega código completo y ejecutable en cualquier lenguaje (Python, JavaScript, SQL, HTML, PHP, etc.). Indica el lenguaje y el nombre de archivo con la extensión correcta; el código se muestra en el chat para copiar y también se descarga como archivo real.
+- crear_html: alias de crear_pagina_web para páginas web completas.
 - crear_documento: alternativa genérica para PDF, Word o PowerPoint cuando no aplique una herramienta específica.
 - Puedes analizar documentos adjuntos (PDF, texto, Excel/CSV) y crear versiones nuevas en Word, PowerPoint o PDF. Si un .docx o .pptx no se puede leer directamente, pide exportarlo a PDF o pegar el contenido; nunca inventes su contenido.
 - registrar_productos_en_app: guarda productos en el catálogo real de VITIMAX.
@@ -1704,6 +1739,7 @@ export const ASSISTANT_TOOLS = [
         properties: {
           tipo: { type: 'string', enum: ['pdf', 'word', 'ppt'] },
           titulo: { type: 'string' },
+          subtitulo: { type: 'string', description: 'Subtítulo o bajada ejecutiva (opcional)' },
           contenido: { type: 'string', description: 'Contenido completo. Usa "# " para títulos, "## " para secciones, "- " para viñetas y --- para separar diapositivas.' },
           filename: { type: 'string' }
         },
@@ -1720,7 +1756,8 @@ export const ASSISTANT_TOOLS = [
         type: 'object',
         properties: {
           titulo: { type: 'string', description: 'Título del documento' },
-          contenido: { type: 'string', description: 'Contenido completo. Usa "# " para títulos, "## " para secciones y "- " para viñetas.' },
+          subtitulo: { type: 'string', description: 'Subtítulo o bajada ejecutiva (opcional)' },
+          contenido: { type: 'string', description: 'Contenido completo. Usa "# " para títulos, "## " para secciones, "- " para viñetas y tablas Markdown con "|".' },
           filename: { type: 'string', description: 'Nombre del archivo .pdf (opcional)' }
         },
         required: ['contenido']
@@ -1736,7 +1773,8 @@ export const ASSISTANT_TOOLS = [
         type: 'object',
         properties: {
           titulo: { type: 'string', description: 'Título del documento' },
-          contenido: { type: 'string', description: 'Contenido completo. Usa "# " para títulos, "## " para secciones y "- " para viñetas.' },
+          subtitulo: { type: 'string', description: 'Subtítulo o bajada ejecutiva (opcional)' },
+          contenido: { type: 'string', description: 'Contenido completo. Usa "# " para títulos, "## " para secciones, "- " para viñetas y tablas Markdown con "|".' },
           filename: { type: 'string', description: 'Nombre del archivo .docx (opcional)' }
         },
         required: ['contenido']
@@ -1752,7 +1790,8 @@ export const ASSISTANT_TOOLS = [
         type: 'object',
         properties: {
           titulo: { type: 'string', description: 'Título de la presentación' },
-          contenido: { type: 'string', description: 'Contenido completo. Separa cada diapositiva con una línea ---. La primera línea de cada bloque es el título de la diapositiva y las demás son viñetas.' },
+          subtitulo: { type: 'string', description: 'Subtítulo de portada (opcional)' },
+          contenido: { type: 'string', description: 'Contenido completo. Separa cada diapositiva con una línea ---. La primera línea de cada bloque es el título de la diapositiva y las demás son viñetas (máximo 5 por diapositiva).' },
           filename: { type: 'string', description: 'Nombre del archivo .pptx (opcional)' }
         },
         required: ['contenido']
@@ -1762,12 +1801,49 @@ export const ASSISTANT_TOOLS = [
   {
     type: 'function',
     function: {
-      name: 'crear_html',
-      description: 'Crea una página web HTML completa y autónoma, con CSS incluido, responsive y lista para abrir en el navegador. Úsalo cuando el usuario pida una página, landing, catálogo web o sitio simple.',
+      name: 'crear_pagina_web',
+      description: 'Crea una página web HTML5 completa, autónoma y responsive (CSS y JavaScript embebidos), con diseño moderno y llamada a la acción. La app permite verla en vivo antes de descargarla.',
       parameters: {
         type: 'object',
         properties: {
           titulo: { type: 'string', description: 'Título de la página' },
+          subtitulo: { type: 'string', description: 'Bajada o descripción breve (opcional)' },
+          resumen: { type: 'string', description: 'Resumen breve de lo que hace la página' },
+          html: { type: 'string', description: 'HTML completo. Incluye <!doctype html>, <head> con estilos y <body> con el contenido. Todo autocontenido, sin CDN.' },
+          filename: { type: 'string', description: 'Nombre del archivo .html (opcional)' }
+        },
+        required: ['html']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'crear_codigo',
+      description: 'Entrega código completo y ejecutable en cualquier lenguaje (Python, JavaScript, TypeScript, SQL, PHP, Java, HTML, etc.). El código se muestra en el chat para copiar y se descarga como archivo real con la extensión correcta.',
+      parameters: {
+        type: 'object',
+        properties: {
+          titulo: { type: 'string', description: 'Título o descripción del programa' },
+          lenguaje: { type: 'string', description: 'Lenguaje del código: python, javascript, typescript, sql, php, java, html, css, bash, etc.' },
+          descripcion: { type: 'string', description: 'Qué debe hacer el código (opcional)' },
+          codigo: { type: 'string', description: 'Código completo y ejecutable, sin bloques Markdown dentro del texto.' },
+          filename: { type: 'string', description: 'Nombre del archivo con extensión (por ejemplo analisis.py)' }
+        },
+        required: ['codigo']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'crear_html',
+      description: 'Alias de crear_pagina_web: crea una página web HTML completa y autónoma, con CSS incluido, responsive y lista para abrir en el navegador.',
+      parameters: {
+        type: 'object',
+        properties: {
+          titulo: { type: 'string', description: 'Título de la página' },
+          subtitulo: { type: 'string', description: 'Bajada o descripción breve (opcional)' },
           html: { type: 'string', description: 'HTML completo. Incluye <!doctype html>, <head> con estilos y <body> con el contenido.' },
           filename: { type: 'string', description: 'Nombre del archivo .html (opcional)' }
         },
