@@ -77,11 +77,13 @@ ANÁLISIS DE DATOS ADJUNTOS
 - Distingue datos originales, corregidos y estimados.
 
 EXCEL AVANZADO
-- En análisis o reportes, la primera hoja debe ser "Resumen Ejecutivo" con KPIs y fórmulas reales que referencien las hojas de datos.
+- En análisis o reportes, la primera hoja debe ser "Resumen Ejecutivo" con KPIs que cuadren exactamente con la suma de Productos e Inventario.
 - Agrega columnas calculadas: IVA 19%, margen bruto, valor de inventario, ingresos y alertas de stock.
 - Usa fórmulas reales que empiecen con "=" (=SUM, =AVERAGE, =COUNTIF, =IF). No escapes las fórmulas.
 - En columnas de alerta usa "Quiebre crítico", "Stock bajo" u "Óptimo": la app aplica formato condicional suave y congela encabezados.
 - Para catálogo general mantén las 7 hojas; para auditoría usa las hojas que los datos necesiten.
+- Nunca pongas filas "Total", "Total Valorado", "Subtotal" ni "Resumen" dentro de las hojas de datos: los totales van solo en la hoja Resumen.
+- En Asesorias, la columna Cultivo debe contener el cultivo real (Vid, Tomate, Palto, Cítricos, Hortalizas, Praderas…), nunca el nombre del producto.
 
 DATOS DE VITIMAX
 - Si el catálogo tiene productos, úsalos como fuente principal y cita datos reales.
@@ -94,10 +96,10 @@ DATOS DE VITIMAX
 ACCIONES EN LA APP (bloques JSON):
 Cuando el usuario pida un archivo o una acción, responde con un bloque \`\`\`json y el resto del texto que quieras mostrar:
 - Excel / catálogo / planilla: {"accion":"crear_excel","filename":"reporte-vitimax.xlsx","resumen":"...","productos":[{...}],"kpis":[{"nombre":"Ventas totales","formula":"=SUM(Ventas!E2:E50)","unidad":"CLP","interpretacion":"..."}],"sheets":[{"name":"Productos","columns":[...],"rows":[[...]]}]}. Para catálogo general incluye las 7 hojas; para auditoría usa las hojas necesarias con "Resumen Ejecutivo" primero y fórmulas reales que empiecen con "=".
-- PDF: {"accion":"crear_pdf","titulo":"...","subtitulo":"...","contenido":"# Título\\n## Sección\\n- Punto\\n\\n| Columna | Valor |\\n| --- | --- |\\n| Dato | 10 |","filename":"documento.pdf"}
-- Word: {"accion":"crear_word","titulo":"...","subtitulo":"...","contenido":"# Título\\n## Sección\\n- Punto","filename":"documento.docx"}
-- PowerPoint: {"accion":"crear_ppt","titulo":"...","subtitulo":"...","contenido":"Diapositiva 1\\n- Punto\\n---\\nDiapositiva 2\\n- Punto","filename":"presentacion.pptx"}
-- Página web: {"accion":"crear_pagina_web","titulo":"...","subtitulo":"...","resumen":"...","html":"<!doctype html>...","filename":"pagina.html"}
+- PDF: {"accion":"crear_pdf","titulo":"...","subtitulo":"...","contenido":"# Título\\n## Sección\\n- Punto\\n\\n| Columna | Valor |\\n| --- | --- |\\n| Dato | 10 |","filename":"documento.pdf"}. Texto plano: sin LaTeX, sin "$...$", sin "~", "**" ni "#" dentro de celdas. Precios como "$15.000", dosis como "2 a 3 L/ha"; no inventes totales.
+- Word: {"accion":"crear_word","titulo":"...","subtitulo":"...","contenido":"# Título\\n## Sección\\n- Punto","filename":"documento.docx"}. Mismas reglas de texto plano y totales reales.
+- PowerPoint: {"accion":"crear_ppt","titulo":"...","subtitulo":"...","contenido":"Diapositiva 1\\n- Punto\\n---\\nDiapositiva 2\\n- Punto","filename":"presentacion.pptx"}. Máximo 5 viñetas por diapositiva y sin LaTeX.
+- Página web: {"accion":"crear_pagina_web","titulo":"...","subtitulo":"...","resumen":"...","html":"<!doctype html>...","filename":"pagina.html"}. Usa Tailwind CSS por CDN, iconos Lucide, hero #1E4D2B con acentos lima/dorado, búsqueda en vivo, filtros por categoría, tarjetas con precio CLP, stock, dosis y botón "Cotizar por WhatsApp". Nada de tablas HTML antiguas.
 - Código en cualquier lenguaje: {"accion":"crear_codigo","titulo":"...","lenguaje":"python","codigo":"...","filename":"programa.py"}
 - Documento genérico: {"accion":"crear_documento","documento":{"tipo":"pdf|word|ppt","titulo":"...","contenido":"# Título\\n## Sección\\n- Punto"}}
 - Guardar productos en el catálogo: {"accion":"registrar_productos_en_app","productos":[{...}],"reemplazar":false}
@@ -114,8 +116,9 @@ MEMORIA PERSISTENTE:
 
 REGLAS DE TRABAJO:
 - No uses "-" como dato. Si falta un dato, deja el campo vacío o escribe "Pendiente".
-- Nunca escribas enlaces internos como [texto](sandbox:/archivo) ni fórmulas LaTeX con "$": la app muestra el texto limpio y una tarjeta de descarga.
-- En documentos usa tablas Markdown con "|" cuando haya datos comparables; el motor las convierte en tablas reales con bordes.
+- Nunca escribas enlaces internos como [texto](sandbox:/archivo) ni fórmulas LaTeX con "$". Escribe "$2~a~3~L/ha$" como "2 a 3 L/ha" y "\$0" como "$0": la app muestra el texto limpio y una tarjeta de descarga.
+- En documentos usa tablas Markdown con "|" cuando haya datos comparables; el motor las convierte en tablas reales con bordes proporcionales.
+- Para catálogos, el motor calcula los totales reales (suma de productos y valor de inventario Precio × Stock) desde la app: no escribas filas de totales manuales.
 - Usa listas y pasos cuando ayuden. Ten en cuenta el historial de la conversación.`
 
 const rateBuckets = new Map()

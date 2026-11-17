@@ -18,6 +18,12 @@ import {
   WidthType
 } from 'docx'
 import pptxgen from 'pptxgenjs'
+import {
+  computeCatalogTotals,
+  formatClp,
+  parseNumberLoose,
+  sanitizeText
+} from './text-utils.js'
 
 // ---------------------------------------------------------------------------
 // Paleta corporativa VITIMAX
@@ -64,17 +70,9 @@ export function stripSandboxLinks(value) {
     .replace(/[ \t]{2,}/g, ' ')
 }
 
-// Limpia marcas Markdown dentro de una línea, conservando el contenido.
+// Limpia marcas Markdown y LaTeX dentro de una línea, conservando el contenido.
 function cleanInline(value) {
-  return String(value ?? '')
-    .replace(/\$\$([^$]*)\$\$/g, '$1')
-    .replace(/\$([^$\n]+)\$/g, '$1')
-    .replace(/`([^`]*)`/g, '$1')
-    .replace(/\*\*/g, '')
-    .replace(/__+/g, '')
-    .replace(/\*/g, '')
-    .replace(/\u00a0/g, ' ')
-    .replace(/[ \t]{2,}/g, ' ')
+  return sanitizeText(value).replace(/\s+/g, ' ')
 }
 
 // Devuelve segmentos con negrita real: [{ text, bold }]
@@ -247,6 +245,93 @@ function normalizeTitle(value) {
 }
 
 // ---------------------------------------------------------------------------
+// Detección de documentos de catálogo y limpieza de filas de totales
+// ---------------------------------------------------------------------------
+
+const TOTALS_ROW_PATTERN = /^(gran\s+)?(total|totales|subtotal|suma|resumen|total\s+general|total\s+valorado|valor\s+total|valorizado)\b/i
+const TOTALS_HEADING_PATTERN = /^(totales|total\s+general|resumen\s+de\s+totales|valor\s+total|total\s+valorado|valorizado)\b/i
+
+function isTotalsRow(row) {
+  return Array.isArray(row) && TOTALS_ROW_PATTERN.test(String(row[0] ?? '').trim())
+}
+
+export function isCatalogDocument(title, subtitle, blocks = []) {
+  const haystack = `${title} ${subtitle}`.toLowerCase()
+  if (/cat[aá]logo|inventario|productos|tienda|precios|lista de precios|vivero|agro|fertiliz|bioestimul/.test(haystack)) return true
+  return blocks.some((block) => {
+    if (block.type !== 'table') return false
+    const header = (block.header || []).map((cell) => plainText(cell).toLowerCase())
+    const hasProduct = header.some((cell) => /producto|nombre|descripci[oó]n/.test(cell))
+    const hasMoney = header.some((cell) => /precio|valor|stock|inventario|cantidad/.test(cell))
+    return hasProduct && hasMoney
+  })
+}
+
+// Elimina filas fantasma de totales y tablas que quedan vacías.
+function prepareDocumentBlocks(blocks, catalogMode) {
+  if (!catalogMode) return blocks
+  const output = []
+  blocks.forEach((block) => {
+    if (block.type === 'table') {
+      const rows = (block.rows || []).filter((row) => !isTotalsRow(row))
+      if (!rows.length) return
+      output.push({ ...block, rows })
+      return
+    }
+    if (block.type === 'heading' && TOTALS_HEADING_PATTERN.test(plainText(block.text))) return
+    output.push(block)
+  })
+  return output
+}
+
+function drawTableWidths(doc, header, rows, contentW) {
+  const pad = 4
+  const weights = header.map((label, index) => {
+    const key = plainText(label).toLowerCase()
+    const longest = rows.reduce((max, row) => Math.max(max, String(row[index] ?? '').length), 0)
+    let semantic = 16
+    if (/^(id|c[oó]digo|sku|n[°º]|#)$/.test(key)) semantic = 6
+    else if (/precio|valor|monto|total|stock|cantidad|unidades|iva|clp/.test(key)) semantic = 13
+    else if (/nombre|producto/.test(key)) semantic = 26
+    else if (/descripci[oó]n|dosis|uso|modo|recomendaci|caracter|detalle|notas/.test(key)) semantic = 34
+    else if (/categor|formato|presentaci|estado|fecha|cultivo/.test(key)) semantic = 15
+    const content = Math.min(40, Math.max(6, longest * 0.72 + 6))
+    return Math.max(semantic, content)
+  })
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0) || 1
+  let widths = weights.map((weight) => (weight / totalWeight) * contentW)
+
+  // Ancho mínimo para que encabezados como "Precio (CLP)" no se partan.
+  const mins = header.map((label, index) => {
+    doc.setFont('helvetica', 'bold')
+    doc.setFontSize(8.8)
+    const headerWidth = doc.getTextWidth(String(label || '')) + pad
+    const longestWord = rows.reduce((max, row) => {
+      doc.setFont('helvetica', 'normal')
+      doc.setFontSize(8.6)
+      const words = String(row[index] ?? '').split(/\s+/)
+      return Math.max(max, ...words.map((word) => doc.getTextWidth(word) + pad))
+    }, 0)
+    return Math.min(contentW * 0.45, Math.max(12, headerWidth, Math.min(longestWord, contentW * 0.3)))
+  })
+
+  for (let pass = 0; pass < 4; pass += 1) {
+    const deficit = widths.reduce((sum, width, index) => sum + Math.max(0, mins[index] - width), 0)
+    if (deficit <= 0.01) break
+    const surplus = widths.reduce((sum, width, index) => sum + Math.max(0, width - mins[index]), 0)
+    if (surplus <= 0.01) break
+    widths = widths.map((width, index) => {
+      if (width < mins[index]) return mins[index]
+      return Math.max(mins[index], width - deficit * ((width - mins[index]) / surplus))
+    })
+  }
+
+  const sum = widths.reduce((total, width) => total + width, 0)
+  if (sum > contentW) widths = widths.map((width) => (width * contentW) / sum)
+  return widths
+}
+
+// ---------------------------------------------------------------------------
 // 3. PDF editorial profesional
 // ---------------------------------------------------------------------------
 
@@ -283,16 +368,20 @@ function layoutRich(doc, segments, maxWidth, size, baseBold = false) {
   return lines.length ? lines : [[{ text: '', bold: baseBold }]]
 }
 
-export function buildPdfDocument({ title = 'Documento VITIMAX', subtitle = '', content = '', dateLabel = '' } = {}) {
+export function buildPdfDocument({ title = 'Documento VITIMAX', subtitle = '', content = '', dateLabel = '', catalog = [], isDemo = false } = {}) {
   const doc = new jsPDF({ unit: 'mm', format: 'a4', compress: true })
   const pageW = doc.internal.pageSize.getWidth()
   const pageH = doc.internal.pageSize.getHeight()
   const margin = 18
   const contentW = pageW - margin * 2
   const bottom = pageH - 22
-  const blocks = parseDocument(content)
   const cleanTitle = plainText(title) || 'Documento VITIMAX'
   const cleanSubtitle = plainText(subtitle)
+  const rawBlocks = parseDocument(content)
+  const catalogMode = Array.isArray(catalog) && catalog.length > 0
+    && isCatalogDocument(cleanTitle, cleanSubtitle, rawBlocks)
+  const blocks = prepareDocumentBlocks(rawBlocks, catalogMode)
+  const totals = catalogMode ? computeCatalogTotals(catalog) : null
   const date = dateLabel || todayLabel()
   let y = 0
 
@@ -407,12 +496,7 @@ export function buildPdfDocument({ title = 'Documento VITIMAX', subtitle = '', c
     const header = (block.header || []).map((cell) => plainText(cell))
     const rows = (block.rows || []).map((row) => header.map((_, index) => plainText(row[index] || '')))
     if (!header.length) return
-    const weights = header.map((label, index) => {
-      const longest = rows.reduce((max, row) => Math.max(max, String(row[index] || '').length), 0)
-      return Math.min(46, Math.max(10, Math.max(label.length, longest)))
-    })
-    const total = weights.reduce((sum, weight) => sum + weight, 0) || 1
-    const widths = weights.map((weight) => (weight / total) * contentW)
+    const widths = drawTableWidths(doc, header, rows, contentW)
     const cellPad = 2
     const lineHeight = 4.1
     const rowHeight = (cells, size) => {
@@ -485,6 +569,55 @@ export function buildPdfDocument({ title = 'Documento VITIMAX', subtitle = '', c
     y += height + 3
   }
 
+  function drawSectionLabel(label) {
+    ensureSpace(10)
+    doc.setFont('helvetica', 'bold')
+    doc.setFontSize(8)
+    doc.setTextColor(...rgb(BRAND.mid))
+    doc.text(String(label || '').toUpperCase(), margin, y)
+    y += 4.6
+  }
+
+  function drawKpiCards(items) {
+    if (!items.length) return
+    const gap = 3.5
+    const cardW = (contentW - gap * (items.length - 1)) / items.length
+    const cardH = 17
+    ensureSpace(cardH + 5)
+    items.forEach((item, index) => {
+      const x = margin + index * (cardW + gap)
+      doc.setFillColor(...rgb(BRAND.zebra))
+      doc.rect(x, y, cardW, cardH, 'F')
+      doc.setFillColor(...rgb(BRAND.forest))
+      doc.rect(x, y, 1.1, cardH, 'F')
+      doc.setFont('helvetica', 'bold')
+      doc.setFontSize(6.8)
+      doc.setTextColor(...rgb(BRAND.muted))
+      doc.text(String(item.label || '').toUpperCase(), x + 3.6, y + 4.8)
+      doc.setFont('helvetica', 'bold')
+      doc.setFontSize(12)
+      doc.setTextColor(...rgb(BRAND.deep))
+      doc.text(String(item.value || ''), x + 3.6, y + 12.4, { maxWidth: cardW - 5 })
+    })
+    y += cardH + 5
+  }
+
+  function drawTotalsSection(catalogTotals) {
+    if (!catalogTotals) return
+    ensureSpace(46)
+    drawSectionLabel('Totales del catálogo')
+    drawTable({
+      header: ['Concepto', 'Valor'],
+      rows: [
+        ['Productos registrados', String(catalogTotals.count)],
+        ['Unidades en stock', String(catalogTotals.units)],
+        ['Valor de inventario (Precio × Stock)', formatClp(catalogTotals.inventoryValue)],
+        ['Suma de precios de lista', formatClp(catalogTotals.priceSum)],
+        ['Precio promedio', formatClp(catalogTotals.avgPrice)]
+      ]
+    })
+  }
+
   // Portada / banner corporativo en la primera página
   doc.setFont('helvetica', 'bold')
   doc.setFontSize(22)
@@ -522,9 +655,24 @@ export function buildPdfDocument({ title = 'Documento VITIMAX', subtitle = '', c
 
   y = bannerH + 12
 
+  // La página 1 nunca queda vacía: banner + KPIs reales + primera tabla.
+  if (catalogMode && totals) {
+    drawSectionLabel('Resumen ejecutivo')
+    drawKpiCards([
+      { label: 'Productos', value: String(totals.count) },
+      { label: 'Unidades en stock', value: String(totals.units) },
+      { label: 'Valor inventario', value: formatClp(totals.inventoryValue) },
+      { label: 'Precio promedio', value: formatClp(totals.avgPrice) }
+    ])
+  }
+
   const skipTitle = blocks.length && blocks[0].type === 'heading' && blocks[0].level === 1
     && normalizeTitle(blocks[0].text) === normalizeTitle(cleanTitle)
   let startIndex = skipTitle ? 1 : 0
+  // Evita duplicar el "Resumen Ejecutivo" que ya se dibujó como tarjetas.
+  if (catalogMode && blocks[startIndex]?.type === 'heading' && /resumen ejecutivo/i.test(plainText(blocks[startIndex].text))) {
+    startIndex += 1
+  }
 
   for (let index = startIndex; index < blocks.length; index += 1) {
     const block = blocks[index]
@@ -543,6 +691,9 @@ export function buildPdfDocument({ title = 'Documento VITIMAX', subtitle = '', c
       y += 5
     }
   }
+
+  // Totales calculados desde los datos reales de la app, nunca desde la IA.
+  if (catalogMode && totals) drawTotalsSection(totals)
 
   // Pie de página en todas las hojas
   const total = doc.getNumberOfPages()
@@ -596,10 +747,72 @@ function docxTableCell(value, { header = false, zebra = false, width = 0 } = {})
   })
 }
 
-export function buildDocxDocument({ title = 'Documento VITIMAX', subtitle = '', content = '', dateLabel = '' } = {}) {
-  const blocks = parseDocument(content)
+function docxKpiCell(label, value) {
+  return new TableCell({
+    shading: { type: ShadingType.CLEAR, color: 'auto', fill: BRAND.totals },
+    width: { size: 25, type: WidthType.PERCENTAGE },
+    margins: { top: 150, bottom: 150, left: 160, right: 160 },
+    children: [
+      new Paragraph({
+        spacing: { after: 50 },
+        children: [new TextRun({ text: String(label || '').toUpperCase(), bold: true, size: 14, color: BRAND.mid, characterSpacing: 20 })]
+      }),
+      new Paragraph({
+        spacing: { after: 0 },
+        children: [new TextRun({ text: String(value || ''), bold: true, size: 30, color: BRAND.deep })]
+      })
+    ]
+  })
+}
+
+function docxKpiTable(totals) {
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    borders: {
+      top: { style: BorderStyle.SINGLE, size: 2, color: BRAND.line },
+      bottom: { style: BorderStyle.SINGLE, size: 2, color: BRAND.line },
+      left: { style: BorderStyle.SINGLE, size: 2, color: BRAND.line },
+      right: { style: BorderStyle.SINGLE, size: 2, color: BRAND.line },
+      insideHorizontal: { style: BorderStyle.SINGLE, size: 2, color: BRAND.line },
+      insideVertical: { style: BorderStyle.SINGLE, size: 2, color: BRAND.line }
+    },
+    rows: [new TableRow({
+      children: [
+        docxKpiCell('Productos', totals.count),
+        docxKpiCell('Unidades en stock', totals.units),
+        docxKpiCell('Valor inventario', formatClp(totals.inventoryValue)),
+        docxKpiCell('Precio promedio', formatClp(totals.avgPrice))
+      ]
+    })]
+  })
+}
+
+function docxTableWidths(header, rows) {
+  const weights = header.map((label, index) => {
+    const key = plainText(label).toLowerCase()
+    let base = 16
+    if (/^(id|c[oó]digo|sku|n[°º])$/.test(key)) base = 8
+    else if (/precio|valor|monto|total|stock|cantidad|unidades|iva|clp/.test(key)) base = 14
+    else if (/nombre|producto/.test(key)) base = 24
+    else if (/descripci[oó]n|dosis|uso|modo|recomendaci|caracter|detalle/.test(key)) base = 30
+    const longest = rows.reduce((max, row) => Math.max(max, String(row[index] ?? '').length), 0)
+    return Math.max(base, Math.min(38, longest * 0.7 + 6))
+  })
+  const total = weights.reduce((sum, weight) => sum + weight, 0) || 1
+  const widths = weights.map((weight) => Math.max(7, Math.round((weight / total) * 100)))
+  const sum = widths.reduce((acc, width) => acc + width, 0)
+  widths[widths.length - 1] += 100 - sum
+  return widths
+}
+
+export function buildDocxDocument({ title = 'Documento VITIMAX', subtitle = '', content = '', dateLabel = '', catalog = [], isDemo = false } = {}) {
   const cleanTitle = plainText(title) || 'Documento VITIMAX'
   const cleanSubtitle = plainText(subtitle)
+  const rawBlocks = parseDocument(content)
+  const catalogMode = Array.isArray(catalog) && catalog.length > 0
+    && isCatalogDocument(cleanTitle, cleanSubtitle, rawBlocks)
+  const blocks = prepareDocumentBlocks(rawBlocks, catalogMode)
+  const totals = catalogMode ? computeCatalogTotals(catalog) : null
   const date = dateLabel || todayLabel()
   const children = []
 
@@ -626,9 +839,22 @@ export function buildDocxDocument({ title = 'Documento VITIMAX', subtitle = '', 
   }))
   children.push(new Paragraph({ children: [new PageBreak()] }))
 
+  // Tarjetas de resumen ejecutivo con datos reales del catálogo.
+  if (catalogMode && totals) {
+    children.push(new Paragraph({
+      spacing: { after: 140 },
+      children: [new TextRun({ text: 'Resumen ejecutivo', bold: true, size: 30, color: BRAND.forest })]
+    }))
+    children.push(docxKpiTable(totals))
+    children.push(new Paragraph({ spacing: { after: 200 }, children: [] }))
+  }
+
   const skipTitle = blocks.length && blocks[0].type === 'heading' && blocks[0].level === 1
     && normalizeTitle(blocks[0].text) === normalizeTitle(cleanTitle)
-  const startIndex = skipTitle ? 1 : 0
+  let startIndex = skipTitle ? 1 : 0
+  if (catalogMode && blocks[startIndex]?.type === 'heading' && /resumen ejecutivo/i.test(plainText(blocks[startIndex].text))) {
+    startIndex += 1
+  }
 
   for (let index = startIndex; index < blocks.length; index += 1) {
     const block = blocks[index]
@@ -687,7 +913,7 @@ export function buildDocxDocument({ title = 'Documento VITIMAX', subtitle = '', 
       const header = block.header || []
       const rows = block.rows || []
       if (!header.length) continue
-      const width = Math.floor(100 / header.length)
+      const widths = docxTableWidths(header, rows)
       children.push(new Table({
         width: { size: 100, type: WidthType.PERCENTAGE },
         layout: TableLayoutType.AUTOFIT,
@@ -702,10 +928,10 @@ export function buildDocxDocument({ title = 'Documento VITIMAX', subtitle = '', 
         rows: [
           new TableRow({
             tableHeader: true,
-            children: header.map((cell) => docxTableCell(cell, { header: true, width }))
+            children: header.map((cell, cellIndex) => docxTableCell(cell, { header: true, width: widths[cellIndex] }))
           }),
           ...rows.map((row, rowIndex) => new TableRow({
-            children: header.map((_, cellIndex) => docxTableCell(row[cellIndex] || '', { zebra: rowIndex % 2 === 1, width }))
+            children: header.map((_, cellIndex) => docxTableCell(row[cellIndex] || '', { zebra: rowIndex % 2 === 1, width: widths[cellIndex] }))
           }))
         ]
       }))
@@ -735,6 +961,46 @@ export function buildDocxDocument({ title = 'Documento VITIMAX', subtitle = '', 
         children: []
       }))
     }
+  }
+
+  // Totales reales calculados desde el catálogo de la app.
+  if (catalogMode && totals) {
+    children.push(new Paragraph({
+      spacing: { before: 320, after: 140 },
+      children: [new TextRun({ text: 'Totales del catálogo', bold: true, size: 27, color: BRAND.forest })]
+    }))
+    children.push(new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      borders: {
+        top: { style: BorderStyle.SINGLE, size: 4, color: BRAND.line },
+        bottom: { style: BorderStyle.SINGLE, size: 4, color: BRAND.line },
+        left: { style: BorderStyle.SINGLE, size: 4, color: BRAND.line },
+        right: { style: BorderStyle.SINGLE, size: 4, color: BRAND.line },
+        insideHorizontal: { style: BorderStyle.SINGLE, size: 2, color: BRAND.line },
+        insideVertical: { style: BorderStyle.SINGLE, size: 2, color: BRAND.line }
+      },
+      rows: [
+        new TableRow({
+          tableHeader: true,
+          children: [
+            docxTableCell('Concepto', { header: true, width: 34 }),
+            docxTableCell('Valor', { header: true, width: 66 })
+          ]
+        }),
+        ...[
+          ['Productos registrados', String(totals.count)],
+          ['Unidades en stock', String(totals.units)],
+          ['Valor de inventario (Precio × Stock)', formatClp(totals.inventoryValue)],
+          ['Suma de precios de lista', formatClp(totals.priceSum)],
+          ['Precio promedio', formatClp(totals.avgPrice)]
+        ].map((row, rowIndex) => new TableRow({
+          children: [
+            docxTableCell(row[0], { zebra: rowIndex % 2 === 1, width: 34 }),
+            docxTableCell(row[1], { zebra: rowIndex % 2 === 1, width: 66 })
+          ]
+        }))
+      ]
+    }))
   }
 
   const footer = new Footer({
@@ -823,10 +1089,15 @@ function deckFromBlocks(blocks, deckTitle) {
   return slides
 }
 
-export async function buildPptxDocument({ title = 'Presentación VITIMAX', subtitle = '', content = '', dateLabel = '' } = {}) {
+export async function buildPptxDocument({ title = 'Presentación VITIMAX', subtitle = '', content = '', dateLabel = '', catalog = [], isDemo = false } = {}) {
   const deckTitle = plainText(title) || 'Presentación VITIMAX'
+  const cleanSubtitle = plainText(subtitle)
   const date = dateLabel || todayLabel()
-  const blocks = parseDocument(content)
+  const rawBlocks = parseDocument(content)
+  const catalogMode = Array.isArray(catalog) && catalog.length > 0
+    && isCatalogDocument(deckTitle, cleanSubtitle, rawBlocks)
+  const blocks = prepareDocumentBlocks(rawBlocks, catalogMode)
+  const totals = catalogMode ? computeCatalogTotals(catalog) : null
   let slides = deckFromBlocks(blocks, deckTitle)
 
   if (!slides.length) {
@@ -865,7 +1136,7 @@ export async function buildPptxDocument({ title = 'Presentación VITIMAX', subti
   pptx.title = deckTitle
   pptx.theme = { headFontFace: 'Segoe UI Semibold', bodyFontFace: 'Segoe UI', lang: 'es-CL' }
 
-  const coverSubtitle = plainText(subtitle)
+  const coverSubtitle = cleanSubtitle
     || expanded[0]?.paragraphs?.[0]?.text
     || 'Centro de Gestión · Informe ejecutivo'
 
@@ -908,15 +1179,71 @@ export async function buildPptxDocument({ title = 'Presentación VITIMAX', subti
   // Quita el prefijo "1." / "1)" cuando la propia diapositiva ya dibuja el número.
   const stripOrder = (text) => String(text || '').replace(/^\s*\d{1,3}[.)]\s+/, '')
 
-  const addFooter = (slide, index) => {
+  const addFooter = (slide, pageNumber) => {
     slide.addText('VITIMAX · Centro de Gestión', {
       x: 0.6, y: 7.12, w: 5, h: 0.25,
       fontSize: 8, color: '8AA79A'
     })
-    slide.addText(String(index + 2), {
+    slide.addText(String(pageNumber), {
       x: 12.1, y: 7.12, w: 0.7, h: 0.25,
       fontSize: 8, color: '8AA79A', align: 'right'
     })
+  }
+
+  // Tarjetas de resumen ejecutivo con los datos reales del catálogo.
+  if (catalogMode && totals) {
+    const summary = pptx.addSlide()
+    summary.background = { color: 'F7FAF7' }
+    summary.addShape(pptx.ShapeType.rect, {
+      x: 0, y: 0, w: 13.333, h: 0.42,
+      fill: { color: BRAND.forest }, line: { color: BRAND.forest }
+    })
+    summary.addText('VITIMAX', {
+      x: 0.55, y: 0.06, w: 3, h: 0.3,
+      fontSize: 9, bold: true, color: BRAND.white, charSpacing: 3
+    })
+    summary.addText('Resumen Ejecutivo', {
+      x: 0.6, y: 0.75, w: 12.1, h: 0.8,
+      fontSize: 28, bold: true, color: BRAND.deep, valign: 'top', fit: 'shrink'
+    })
+    summary.addShape(pptx.ShapeType.rect, {
+      x: 0.62, y: 1.62, w: 1.15, h: 0.07,
+      fill: { color: BRAND.lime }, line: { color: BRAND.lime }
+    })
+    const cards = [
+      { label: 'PRODUCTOS', value: String(totals.count) },
+      { label: 'UNIDADES EN STOCK', value: String(totals.units) },
+      { label: 'VALOR INVENTARIO', value: formatClp(totals.inventoryValue) },
+      { label: 'PRECIO PROMEDIO', value: formatClp(totals.avgPrice) }
+    ]
+    const gap = 0.32
+    const cardW = (12.1 - gap * (cards.length - 1)) / cards.length
+    cards.forEach((card, index) => {
+      const x = 0.62 + index * (cardW + gap)
+      summary.addShape(pptx.ShapeType.roundRect, {
+        x, y: 2.15, w: cardW, h: 2.35,
+        fill: { color: BRAND.white },
+        line: { color: BRAND.line, width: 0.75 },
+        rectRadius: 0.06
+      })
+      summary.addShape(pptx.ShapeType.rect, {
+        x, y: 2.15, w: cardW, h: 0.12,
+        fill: { color: BRAND.mid }, line: { color: BRAND.mid }
+      })
+      summary.addText(card.label, {
+        x: x + 0.28, y: 2.55, w: cardW - 0.56, h: 0.4,
+        fontSize: 9, bold: true, color: BRAND.muted, charSpacing: 1
+      })
+      summary.addText(card.value, {
+        x: x + 0.28, y: 3.05, w: cardW - 0.56, h: 0.9,
+        fontSize: 25, bold: true, color: BRAND.deep, valign: 'top', fit: 'shrink'
+      })
+    })
+    summary.addText('Datos calculados desde el catálogo real de VITIMAX.', {
+      x: 0.62, y: 5.0, w: 12.1, h: 0.4,
+      fontSize: 11, color: BRAND.muted
+    })
+    addFooter(summary, 2)
   }
 
   expanded.forEach((item, index) => {
@@ -973,18 +1300,29 @@ export async function buildPptxDocument({ title = 'Presentación VITIMAX', subti
           }
         })))
       ]
+      const weights = header.map((label, columnIndex) => {
+        const key = plainText(label).toLowerCase()
+        if (/^(id|c[oó]digo|sku|n[°º])$/.test(key)) return 6
+        if (/precio|valor|monto|total|stock|cantidad|unidades|iva|clp/.test(key)) return 13
+        if (/nombre|producto/.test(key)) return 26
+        if (/descripci[oó]n|dosis|uso|modo|recomendaci|caracter|detalle/.test(key)) return 32
+        const longest = rows.reduce((max, row) => Math.max(max, String(row[columnIndex] ?? '').length), 0)
+        return Math.max(14, Math.min(34, longest * 0.7 + 6))
+      })
+      const totalWeight = weights.reduce((sum, weight) => sum + weight, 0) || 1
+      const colW = weights.map((weight) => (weight / totalWeight) * 12.1)
       slide.addTable(tableRows, {
         x: 0.62,
         y: bodyY,
         w: 12.1,
-        colW: header.map(() => 12.1 / header.length),
+        colW,
         border: { type: 'solid', color: BRAND.line, pt: 1 },
         align: 'left',
         valign: 'middle',
         margin: 6,
         autoPage: false
       })
-      addFooter(slide, index)
+      addFooter(slide, index + (catalogMode ? 3 : 2))
       return
     }
 
@@ -994,7 +1332,7 @@ export async function buildPptxDocument({ title = 'Presentación VITIMAX', subti
         x: 0.7, y: bodyY + 0.2, w: 11.9, h: 4.4,
         fontSize: 18, color: BRAND.ink, fit: 'shrink', valign: 'top'
       })
-      addFooter(slide, index)
+      addFooter(slide, index + (catalogMode ? 3 : 2))
       return
     }
 
@@ -1048,8 +1386,62 @@ export async function buildPptxDocument({ title = 'Presentación VITIMAX', subti
         })
       })
     }
-    addFooter(slide, index)
+    addFooter(slide, index + (catalogMode ? 3 : 2))
   })
+
+  // Totales reales del catálogo antes del cierre.
+  if (catalogMode && totals) {
+    const totalsSlide = pptx.addSlide()
+    totalsSlide.background = { color: 'F7FAF7' }
+    totalsSlide.addShape(pptx.ShapeType.rect, {
+      x: 0, y: 0, w: 13.333, h: 0.42,
+      fill: { color: BRAND.forest }, line: { color: BRAND.forest }
+    })
+    totalsSlide.addText('VITIMAX', {
+      x: 0.55, y: 0.06, w: 3, h: 0.3,
+      fontSize: 9, bold: true, color: BRAND.white, charSpacing: 3
+    })
+    totalsSlide.addText('Totales del catálogo', {
+      x: 0.6, y: 0.75, w: 12.1, h: 0.8,
+      fontSize: 28, bold: true, color: BRAND.deep, valign: 'top', fit: 'shrink'
+    })
+    totalsSlide.addShape(pptx.ShapeType.rect, {
+      x: 0.62, y: 1.62, w: 1.15, h: 0.07,
+      fill: { color: BRAND.lime }, line: { color: BRAND.lime }
+    })
+    const rows = [
+      ['Productos registrados', String(totals.count)],
+      ['Unidades en stock', String(totals.units)],
+      ['Valor de inventario (Precio × Stock)', formatClp(totals.inventoryValue)],
+      ['Suma de precios de lista', formatClp(totals.priceSum)],
+      ['Precio promedio', formatClp(totals.avgPrice)]
+    ]
+    totalsSlide.addTable([
+      [
+        { text: 'Concepto', options: { fill: { color: BRAND.forest }, color: BRAND.white, bold: true, fontSize: 13 } },
+        { text: 'Valor', options: { fill: { color: BRAND.forest }, color: BRAND.white, bold: true, fontSize: 13 } }
+      ],
+      ...rows.map((row, rowIndex) => row.map((cell) => ({
+        text: cell,
+        options: {
+          fill: { color: rowIndex % 2 ? BRAND.zebra : BRAND.white },
+          color: BRAND.ink,
+          fontSize: 13
+        }
+      })))
+    ], {
+      x: 0.62,
+      y: 2.1,
+      w: 12.1,
+      colW: [7.4, 4.7],
+      border: { type: 'solid', color: BRAND.line, pt: 1 },
+      align: 'left',
+      valign: 'middle',
+      margin: 8,
+      autoPage: false
+    })
+    addFooter(totalsSlide, expanded.length + 3)
+  }
 
   // Cierre con próximos pasos
   const closing = pptx.addSlide()
@@ -1093,6 +1485,287 @@ export async function buildPptxDocument({ title = 'Presentación VITIMAX', subti
   })
 
   return pptx.write({ outputType: 'blob' })
+}
+
+// ---------------------------------------------------------------------------
+// 6a. Página de catálogo moderna (Tailwind + Lucide + WhatsApp)
+// ---------------------------------------------------------------------------
+
+const CATALOG_PAGE_HINT = /cat[aá]logo|tienda|productos|inventario|lista de precios|precios|vivero|agr[ií]cola|fertiliz|bioestimul/i
+const TAILWIND_CDN = '<script src="https://cdn.tailwindcss.com"></script>'
+const LUCIDE_CDN = '<script src="https://unpkg.com/lucide@latest"></script>'
+
+export function isCatalogPageRequest({ title = '', subtitle = '', source = '', catalog = [] } = {}) {
+  if (!Array.isArray(catalog) || !catalog.length) return false
+  const haystack = `${title} ${subtitle} ${String(source || '').slice(0, 600)}`
+  return CATALOG_PAGE_HINT.test(haystack)
+}
+
+// Detecta si el HTML que devolvió la IA ya es una interfaz moderna
+// (Tailwind + grilla/búsqueda) y no una tabla antigua.
+export function hasModernCatalogUi(html = '') {
+  const source = String(html || '')
+  if (!source) return false
+  const tailwind = /cdn\.tailwindcss\.com|tailwindcss/i.test(source)
+  const search = /type=["']search["']|<input[^>]+(?:buscar|busca|search|filtro)/i.test(source)
+  const grid = /grid-template-columns|class=["'][^"']*\bgrid\b/i.test(source)
+  return Boolean(grid && (tailwind || search))
+}
+
+export function ensureModernAssets(html = '') {
+  let page = ensureCharset(ensureViewport(String(html || '')))
+  if (!/cdn\.tailwindcss\.com/i.test(page)) {
+    page = /<\/head>/i.test(page) ? page.replace(/<\/head>/i, `${TAILWIND_CDN}\n</head>`) : `${TAILWIND_CDN}\n${page}`
+  }
+  if (!/lucide/i.test(page)) {
+    page = /<\/head>/i.test(page) ? page.replace(/<\/head>/i, `${LUCIDE_CDN}\n</head>`) : `${LUCIDE_CDN}\n${page}`
+  }
+  if (/lucide/i.test(page) && !/createIcons\s*\(/.test(page)) {
+    const init = '<script>window.addEventListener("DOMContentLoaded",function(){if(window.lucide)window.lucide.createIcons();});</script>'
+    page = /<\/body>/i.test(page) ? page.replace(/<\/body>/i, `${init}\n</body>`) : `${page}\n${init}`
+  }
+  return page
+}
+
+function whatsappUrl(phone, message) {
+  const digits = String(phone || '').replace(/\D/g, '')
+  const text = encodeURIComponent(message)
+  return digits ? `https://wa.me/${digits}?text=${text}` : `https://wa.me/?text=${text}`
+}
+
+function prepareCatalogProducts(catalog = [], phone = '') {
+  return (Array.isArray(catalog) ? catalog : []).filter(Boolean).map((item) => {
+    const name = sanitizeText(item.name) || 'Producto VITIMAX'
+    const category = sanitizeText(item.category) || 'General'
+    const format = sanitizeText(item.format)
+    const description = sanitizeText(item.description)
+    const usage = sanitizeText(item.usage)
+    const price = parseNumberLoose(item.price)
+    const previousPrice = parseNumberLoose(item.previousPrice)
+    const stockPending = item.stock === '' || item.stock === null || item.stock === undefined
+    const stock = stockPending ? null : Math.max(0, Math.round(parseNumberLoose(item.stock)))
+    const image = String(item.image || '').trim()
+    return {
+      name,
+      category,
+      format,
+      description,
+      usage,
+      price,
+      priceLabel: formatClp(price),
+      previousPrice: previousPrice > price ? previousPrice : 0,
+      previousPriceLabel: previousPrice > price ? formatClp(previousPrice) : '',
+      stock,
+      stockPending,
+      image: /^(https?:|data:image\/)/i.test(image) ? image : '',
+      whatsapp: whatsappUrl(phone, `Hola VITIMAX, quiero cotizar ${name}${format ? ` (${format})` : ''}. ¿Está disponible?`)
+    }
+  })
+}
+
+const catalogPageScript = (payload) => String.raw`
+const PRODUCTS = ${payload};
+const state = { q: '', category: 'Todos' };
+const grid = document.getElementById('catalog-grid');
+const empty = document.getElementById('empty-state');
+const countEl = document.getElementById('result-count');
+const filters = document.getElementById('category-filters');
+const searchInput = document.getElementById('catalog-search');
+
+const esc = (value) => String(value == null ? '' : value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const categories = ['Todos'].concat(Array.from(new Set(PRODUCTS.map((p) => p.category).filter(Boolean))));
+
+function stockBadge(product) {
+  if (product.stockPending) return '<span class="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-bold text-slate-600"><span class="h-1.5 w-1.5 rounded-full bg-slate-400"></span>Stock pendiente</span>';
+  if (!product.stock) return '<span class="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-2.5 py-1 text-[11px] font-bold text-red-700"><span class="h-1.5 w-1.5 rounded-full bg-red-500"></span>Sin stock</span>';
+  if (product.stock <= 5) return '<span class="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-bold text-amber-800"><span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span>Últimas ' + product.stock + ' u.</span>';
+  return '<span class="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-bold text-emerald-800"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Stock: ' + product.stock + ' u.</span>';
+}
+
+function card(product) {
+  const media = product.image
+    ? '<img src="' + esc(product.image) + '" alt="' + esc(product.name) + '" class="h-44 w-full object-cover" loading="lazy">'
+    : '<div class="flex h-44 w-full items-center justify-center bg-gradient-to-br from-[#1E4D2B] via-[#2F8058] to-[#12321F]"><i data-lucide="sprout" class="h-14 w-14 text-[#D8F55F]"></i></div>';
+  const previous = product.previousPriceLabel ? '<span class="text-sm text-slate-400 line-through">' + esc(product.previousPriceLabel) + '</span>' : '';
+  const dose = product.usage ? '<div class="mt-3 flex items-start gap-2 rounded-xl bg-[#F4F7F4] px-3 py-2 text-xs leading-relaxed text-[#5F7969]"><i data-lucide="droplets" class="mt-0.5 h-4 w-4 shrink-0 text-[#2F8058]"></i><span><span class="font-semibold text-[#1E4D2B]">Dosis: </span>' + esc(product.usage) + '</span></div>' : '';
+  const description = product.description ? '<p class="mt-2 line-clamp-3 text-sm leading-relaxed text-slate-600">' + esc(product.description) + '</p>' : '';
+  const format = product.format ? '<span class="mt-1 inline-flex items-center gap-1 text-xs font-medium text-slate-500"><i data-lucide="package" class="h-3.5 w-3.5"></i>' + esc(product.format) + '</span>' : '';
+  return '<article class="group flex flex-col overflow-hidden rounded-2xl border border-[#DDE7DA] bg-white shadow-sm transition duration-300 hover:-translate-y-1 hover:shadow-xl">' +
+    media +
+    '<div class="flex flex-1 flex-col p-5">' +
+      '<div class="flex items-center justify-between gap-2">' +
+        '<span class="inline-flex items-center rounded-full bg-[#EAF3D0] px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide text-[#1E4D2B]">' + esc(product.category) + '</span>' +
+        stockBadge(product) +
+      '</div>' +
+      '<h3 class="mt-3 text-lg font-bold leading-snug text-[#12321F]">' + esc(product.name) + '</h3>' +
+      format +
+      description + dose +
+      '<div class="mt-auto pt-5">' +
+        '<div class="flex items-end justify-between gap-3">' +
+          '<div><p class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Precio</p><p class="text-2xl font-extrabold text-[#1E4D2B]">' + esc(product.priceLabel) + '</p>' + previous + '</div>' +
+        '</div>' +
+        '<a href="' + esc(product.whatsapp) + '" target="_blank" rel="noopener" class="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-[#25D366] px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-[#1EBE5D]"><i data-lucide="message-circle" class="h-4 w-4"></i>Cotizar por WhatsApp</a>' +
+      '</div>' +
+    '</div>' +
+  '</article>';
+}
+
+function matches(product) {
+  if (state.category !== 'Todos' && product.category !== state.category) return false;
+  if (!state.q) return true;
+  const hay = (product.name + ' ' + product.category + ' ' + product.format + ' ' + product.description + ' ' + product.usage).toLowerCase();
+  return hay.indexOf(state.q) > -1;
+}
+
+function renderFilters() {
+  filters.innerHTML = categories.map(function (category) {
+    const active = category === state.category;
+    return '<button type="button" data-category="' + esc(category) + '" class="rounded-full border px-4 py-2 text-sm font-semibold transition ' + (active ? 'border-[#1E4D2B] bg-[#1E4D2B] text-white shadow' : 'border-[#DDE7DA] bg-white text-[#24382B] hover:border-[#2F8058] hover:text-[#1E4D2B]') + '">' + esc(category) + '</button>';
+  }).join('');
+}
+
+function render() {
+  const list = PRODUCTS.filter(matches);
+  grid.innerHTML = list.map(card).join('');
+  empty.classList.toggle('hidden', list.length > 0);
+  countEl.textContent = list.length + (list.length === 1 ? ' producto' : ' productos');
+  if (window.lucide) window.lucide.createIcons();
+}
+
+filters.addEventListener('click', function (event) {
+  const button = event.target.closest('button[data-category]');
+  if (!button) return;
+  state.category = button.getAttribute('data-category');
+  renderFilters();
+  render();
+});
+
+searchInput.addEventListener('input', function (event) {
+  state.q = String(event.target.value || '').trim().toLowerCase();
+  render();
+});
+
+renderFilters();
+render();
+`
+
+export function buildModernCatalogPage({ title = 'Catálogo VITIMAX', subtitle = '', catalog = [], phone = '', isDemo = false } = {}) {
+  const cleanTitle = sanitizeText(title) || 'Catálogo VITIMAX'
+  const cleanSubtitle = sanitizeText(subtitle) || 'Productos, precios y stock actualizados de VITIMAX.'
+  const products = prepareCatalogProducts(catalog, phone)
+  const totals = computeCatalogTotals(catalog)
+  const categories = new Set(products.map((product) => product.category).filter(Boolean))
+  const data = JSON.stringify(products)
+    .replace(/</g, '\\u003c')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029')
+  const stats = [
+    { label: 'Productos', value: String(totals.count) },
+    { label: 'Categorías', value: String(categories.size) },
+    { label: 'Unidades en stock', value: String(totals.units) },
+    { label: 'Valor inventario', value: formatClp(totals.inventoryValue) }
+  ]
+
+  return `<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="${escapeHtml(cleanSubtitle)}">
+<title>${escapeHtml(cleanTitle)} · VITIMAX</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+${TAILWIND_CDN}
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        forest: '#1E4D2B', deep: '#12321F', mid: '#2F8058', lime: '#D8F55F',
+        gold: '#E9C46A', paper: '#F4F7F4', ink: '#24382B'
+      },
+      fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] }
+    }
+  }
+}
+</script>
+${LUCIDE_CDN}
+<style>
+  html { scroll-behavior: smooth }
+  body { font-family: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif }
+  .hero-glow { background: radial-gradient(60% 80% at 85% 0%, rgba(216,245,95,.28), transparent 60%), radial-gradient(50% 70% at 10% 100%, rgba(233,196,106,.18), transparent 65%) }
+  ::selection { background: #D8F55F; color: #12321F }
+</style>
+</head>
+<body class="bg-[#F4F7F4] text-[#24382B] antialiased">
+<header class="relative overflow-hidden bg-[#1E4D2B] text-white">
+  <div class="absolute inset-0 hero-glow"></div>
+  <div class="relative mx-auto max-w-7xl px-4 py-14 sm:px-6 sm:py-20 lg:px-8">
+    <div class="flex flex-wrap items-center gap-3">
+      <span class="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.2em] text-[#D8F55F]"><i data-lucide="leaf" class="h-3.5 w-3.5"></i>VITIMAX · Centro de Gestión</span>
+      ${isDemo ? '<span class="rounded-full bg-[#E9C46A] px-3 py-1 text-[11px] font-bold uppercase tracking-wide text-[#12321F]">Datos de ejemplo</span>' : ''}
+    </div>
+    <h1 class="mt-5 max-w-3xl text-4xl font-extrabold leading-tight tracking-tight sm:text-5xl">${escapeHtml(cleanTitle)}</h1>
+    <p class="mt-4 max-w-2xl text-base leading-relaxed text-[#D6E8DC] sm:text-lg">${escapeHtml(cleanSubtitle)}</p>
+    <div class="mt-8 max-w-xl">
+      <label for="catalog-search" class="sr-only">Buscar producto</label>
+      <div class="relative">
+        <i data-lucide="search" class="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-[#5F7969]"></i>
+        <input id="catalog-search" type="search" autocomplete="off" placeholder="Buscar por producto, categoría o dosis…" class="w-full rounded-2xl border-0 bg-white py-4 pl-12 pr-4 text-base text-[#12321F] shadow-2xl shadow-black/20 outline-none ring-2 ring-transparent transition placeholder:text-slate-400 focus:ring-[#D8F55F]">
+      </div>
+    </div>
+    <dl class="mt-10 grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
+      ${stats.map((item) => `<div class="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur"><dt class="text-[11px] font-bold uppercase tracking-wide text-[#D8F55F]">${escapeHtml(item.label)}</dt><dd class="mt-1 text-xl font-extrabold sm:text-2xl">${escapeHtml(item.value)}</dd></div>`).join('')}
+    </dl>
+  </div>
+</header>
+
+${isDemo ? '<div class="border-b border-amber-200 bg-amber-50 px-4 py-3 text-center text-sm font-medium text-amber-900">Datos de ejemplo generados por IA. No son información oficial de VITIMAX.</div>' : ''}
+
+<div class="sticky top-0 z-30 border-b border-[#DDE7DA] bg-white/95 backdrop-blur">
+  <div class="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
+    <div id="category-filters" class="flex flex-wrap gap-2"></div>
+    <p id="result-count" class="text-sm font-semibold text-[#5F7969]"></p>
+  </div>
+</div>
+
+<main class="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
+  <div id="catalog-grid" class="grid gap-6 sm:grid-cols-2 lg:grid-cols-3"></div>
+  <div id="empty-state" class="hidden rounded-3xl border border-dashed border-[#DDE7DA] bg-white px-6 py-16 text-center">
+    <i data-lucide="search-x" class="mx-auto h-12 w-12 text-[#2F8058]"></i>
+    <h2 class="mt-4 text-xl font-bold text-[#12321F]">Sin resultados</h2>
+    <p class="mt-2 text-sm text-[#5F7969]">Prueba con otra palabra o cambia la categoría.</p>
+  </div>
+</main>
+
+<footer class="border-t border-[#DDE7DA] bg-white">
+  <div class="mx-auto flex max-w-7xl flex-col items-center justify-between gap-3 px-4 py-8 text-sm text-[#5F7969] sm:flex-row sm:px-6 lg:px-8">
+    <p class="font-semibold text-[#1E4D2B]">VITIMAX · Centro de Gestión</p>
+    <p>Catálogo generado el ${escapeHtml(todayLabel())}</p>
+  </div>
+</footer>
+
+<script>${catalogPageScript(data)}</script>
+</body>
+</html>`
+}
+
+function wrapModernFragment(body, title, subtitle) {
+  return ensureModernAssets(`<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="${escapeHtml(subtitle || title)}">
+<title>${escapeHtml(title)} · VITIMAX</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+${TAILWIND_CDN}
+</head>
+<body class="bg-[#F4F7F4] text-[#24382B] antialiased">
+${body}
+</body>
+</html>`)
 }
 
 // ---------------------------------------------------------------------------
@@ -1162,10 +1835,27 @@ function blocksToHtml(markdown) {
 
 const HTML_TAG = /<(?:!doctype|html|head|body|div|section|article|h[1-6]|p|ul|ol|li|table|thead|tbody|tr|td|th|header|main|footer|style|script|span|a|img|br|strong|em|button|form|input|label|nav)\b/i
 
-export function buildHtmlPage({ title = 'Página VITIMAX', subtitle = '', html = '' } = {}) {
+export function buildHtmlPage({ title = 'Página VITIMAX', subtitle = '', html = '', catalog = [], phone = '', isDemo = false } = {}) {
   const cleanTitle = plainText(title) || 'Página VITIMAX'
   const cleanSubtitle = plainText(subtitle)
   const source = stripSandboxLinks(String(html || '')).trim()
+  const catalogRequest = isCatalogPageRequest({ title: cleanTitle, subtitle: cleanSubtitle, source, catalog })
+
+  // Catálogo real: se construye una página moderna con búsqueda, filtros y
+  // tarjetas aunque la IA haya devuelto una tabla antigua o Markdown.
+  if (catalogRequest) {
+    if (/<html[\s>]/i.test(source) && hasModernCatalogUi(source)) {
+      return ensureModernAssets(source)
+    }
+    if (source && !/<html[\s>]/i.test(source) && hasModernCatalogUi(source)) {
+      const fragment = /<body[\s>]/i.test(source)
+        ? source.replace(/^[\s\S]*?<body[^>]*>/i, '').replace(/<\/body>[\s\S]*$/i, '')
+        : source
+      return wrapModernFragment(fragment, cleanTitle, cleanSubtitle)
+    }
+    return buildModernCatalogPage({ title: cleanTitle, subtitle: cleanSubtitle, catalog, phone, isDemo })
+  }
+
   if (!source) throw new Error('La página HTML está vacía.')
 
   if (/<html[\s>]/i.test(source)) {

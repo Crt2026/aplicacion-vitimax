@@ -1630,7 +1630,7 @@ function App({ user, onSignOut, guest = false }) {
     const sheets = template
       ? mergeWorkbookSheets([], [], records, { allowDemo: false }).map((sheet) => ({ ...sheet, rows: [] }))
       : mergeWorkbookSheets(aiSheets, baseProducts, records, { allowDemo: !products.length, ...options })
-    const blob = await createExcelBlob(sheets)
+    const blob = await createExcelBlob(sheets, { products: baseProducts })
     const name = filename || (template ? 'plantilla-vitimax-7-hojas.xlsx' : 'catalogo-vitimax-ia.xlsx')
     const saved = await saveBlob(blob, name)
     setNotice(template
@@ -1690,19 +1690,26 @@ function App({ user, onSignOut, guest = false }) {
     let saved = null
     if (type === 'pdf') {
       filename = withExtension(baseName, 'documento-vitimax', 'pdf')
-      saved = await saveBlob(buildPdfDocument({ title, subtitle, content: body }), filename)
+      saved = await saveBlob(buildPdfDocument({ title, subtitle, content: body, catalog: catalogSource, isDemo }), filename)
     } else if (type === 'word') {
       filename = withExtension(baseName, 'documento-vitimax', 'docx')
-      saved = await saveBlob(await buildDocxDocument({ title, subtitle, content: body }), filename)
+      saved = await saveBlob(await buildDocxDocument({ title, subtitle, content: body, catalog: catalogSource, isDemo }), filename)
     } else if (type === 'ppt') {
       filename = withExtension(baseName, 'presentacion-vitimax', 'pptx')
-      saved = await saveBlob(await buildPptxDocument({ title, subtitle, content: body }), filename)
+      saved = await saveBlob(await buildPptxDocument({ title, subtitle, content: body, catalog: catalogSource, isDemo }), filename)
     } else if (type === 'code') {
       const extracted = aiText ? extractFencedCode(aiText) : { language: 'html', code: '' }
       const language = extracted.language || 'html'
       const isHtml = language === 'html' || /<!doctype html|<html[\s>]/i.test(extracted.code || '')
       const code = isHtml
-        ? buildHtmlPage({ title, subtitle: '', html: extracted.code || catalogMarkdown(title, catalogSource, isDemo) })
+        ? buildHtmlPage({
+          title,
+          subtitle: '',
+          html: extracted.code || catalogMarkdown(title, catalogSource, isDemo),
+          catalog: catalogSource,
+          phone: profile.phone,
+          isDemo
+        })
         : String(extracted.code || '').trim()
       if (!code) throw new Error('No se recibió código para guardar.')
       const extension = CODE_EXTENSIONS[language] || (isHtml ? 'html' : 'txt')
@@ -1718,7 +1725,7 @@ function App({ user, onSignOut, guest = false }) {
     const source = String(html || '').trim()
     if (!source) throw new Error('La página HTML está vacía.')
     const title = plainText(titulo || 'Página VITIMAX') || 'Página VITIMAX'
-    const page = buildHtmlPage({ title, subtitle, html: source })
+    const page = buildHtmlPage({ title, subtitle, html: source, catalog: products, phone: profile.phone })
     const slug = normalize(title).replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'pagina-vitimax'
     const base = String(filename || '').trim().replace(/\.html?$/i, '') || `pagina-${slug}`
     const name = `${base}.html`
