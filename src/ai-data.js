@@ -1201,6 +1201,42 @@ function normalizeAiSheet(raw) {
   return { name, columns, rows }
 }
 
+// Todo libro generado por el asistente debe traer un Resumen Ejecutivo con
+// fórmulas reales, incluso cuando el modelo solo pidió el catálogo de 7 hojas
+// y no envió KPIs. Las referencias se calculan desde las columnas de la hoja
+// Productos que realmente se va a escribir.
+function ensureSummarySheet(sheets, products = []) {
+  if (sheets.some((sheet) => /resumen|kpi|dashboard|indicador/i.test(sheet?.name || ''))) return sheets
+  const productSheet = sheets.find((sheet) => /producto/i.test(sheet?.name || '')) || sheets[0] || {}
+  const headers = (productSheet.columns || []).map((header) => String(header).toLowerCase())
+  const indexOf = (pattern, fallback) => {
+    const found = headers.findIndex((header) => pattern.test(header))
+    return found >= 0 ? found : fallback
+  }
+  const nameIndex = indexOf(/nombre|producto|descripci/i, 0)
+  const priceIndex = indexOf(/precio|valor|monto/i, 2)
+  const stockIndex = indexOf(/stock|existencia|cantidad|unidades/i, 3)
+  const lastRow = Math.max((productSheet.rows?.length || products.length || 0) + 1, 11)
+  const range = (index) => {
+    const letter = excelColumnLetter(index + 1)
+    return `${letter}2:${letter}${lastRow}`
+  }
+  const nameRange = range(nameIndex)
+  const priceRange = range(priceIndex)
+  const stockRange = range(stockIndex)
+  const summary = {
+    name: 'Resumen Ejecutivo',
+    columns: ['KPI', 'Valor', 'Unidad', 'Interpretación'],
+    rows: [
+      ['Productos registrados', `=COUNTA(Productos!${nameRange})`, 'unidades', 'Filas reales del catálogo VITIMAX'],
+      ['Unidades en stock', `=SUM(Productos!${stockRange})`, 'unidades', 'Existencias disponibles'],
+      ['Valor de inventario', `=SUMPRODUCT(Productos!${priceRange},Productos!${stockRange})`, 'CLP', 'Suma de precio por unidad en stock'],
+      ['Precio promedio', `=AVERAGE(Productos!${priceRange})`, 'CLP', 'Promedio de precios del catálogo']
+    ]
+  }
+  return [summary, ...sheets]
+}
+
 export function mergeWorkbookSheets(aiSheets, products = [], records = {}, options = {}) {
   const provided = new Map()
   if (Array.isArray(aiSheets)) {
@@ -1216,7 +1252,7 @@ export function mergeWorkbookSheets(aiSheets, products = [], records = {}, optio
   // Si la IA entregó solo hojas propias (auditoría, KPIs, datos limpios), se
   // respeta ese libro tal cual y no se rellenan las 7 hojas de VITIMAX.
   if (provided.size && !hasCanonical) {
-    return [...provided.values()]
+    return ensureSummarySheet([...provided.values()], products)
   }
   const allowDemo = options.allowDemo ?? !products.length
   const merged = SHEET_NAMES.map((name) => {
@@ -1234,11 +1270,11 @@ export function mergeWorkbookSheets(aiSheets, products = [], records = {}, optio
   // Las hojas de resumen/KPIs van primero; el resto de hojas propias al final.
   const summaryExtras = extras.filter(([, sheet]) => /resumen|kpi|dashboard|indicador/i.test(sheet.name))
   const otherExtras = extras.filter(([, sheet]) => !/resumen|kpi|dashboard|indicador/i.test(sheet.name))
-  return [
+  return ensureSummarySheet([
     ...summaryExtras.map(([, sheet]) => sheet),
     ...merged,
     ...otherExtras.map(([, sheet]) => sheet)
-  ]
+  ], products)
 }
 
 function safeSheetName(name, index) {

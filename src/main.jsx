@@ -652,7 +652,7 @@ function aiErrorMessage(error, fallback) {
   const message = String(error?.message || '')
   if (/429|rate.?limit|too many requests|saturad/i.test(message)) return 'La IA gratuita está saturada en este momento. Espera unos segundos y vuelve a enviar el mensaje.'
   if (/401|invalid.*api.*key|no auth|unauthorized/i.test(message)) return 'La clave de IA no es válida. Revisa la clave en Configuración.'
-  if (/402|insufficient|credit|quota/i.test(message)) return 'La cuenta de IA no tiene crédito disponible en este momento.'
+  if (/402|insufficient|credit|quota/i.test(message)) return 'OpenRouter no tiene saldo suficiente para esa respuesta. Envía una solicitud más corta o recarga crédito en openrouter.ai/settings/credits.'
   if (/403|forbidden/i.test(message)) return 'El servicio de IA bloqueó la solicitud. Inténtalo de nuevo en unos minutos.'
   if (/network|failed to fetch|fetch failed|conexión|offline/i.test(message)) return 'No hay conexión a internet o el servicio de IA no responde. Revisa Wi-Fi o datos móviles.'
   return message || fallback
@@ -701,6 +701,17 @@ function attachmentContentParts(attachment) {
   return parts
 }
 
+// OpenRouter responde 402 cuando el saldo no cubre el máximo de tokens
+// solicitado (no solo cuando no hay crédito). El mensaje incluye cuántos
+// tokens se pueden costear: se reintenta con ese límite más bajo.
+function affordableTokensFromError(payload) {
+  const text = JSON.stringify(payload?.error || payload || '')
+  const values = [...text.matchAll(/afford\s+(\d[\d,]*)/gi)]
+    .map((match) => Number(match[1].replace(/,/g, '')))
+    .filter((value) => Number.isFinite(value) && value >= 128)
+  return values.length ? Math.min(...values) : 0
+}
+
 async function askOpenRouterChatOnce({ messages, apiKey, tools, toolChoice, maxTokens = 1500, temperature = 0.7, responseFormat }) {
   const body = {
     models: DIRECT_AI_MODELS,
@@ -742,6 +753,19 @@ async function askOpenRouterChatOnce({ messages, apiKey, tools, toolChoice, maxT
           : part)
       }
       : item)
+    response = await send()
+    payload = await response.json().catch(() => ({}))
+  }
+  // Crédito insuficiente para el máximo pedido: bajar max_tokens y reintentar.
+  let lowered = 0
+  while (!response.ok && response.status === 402 && lowered < 3) {
+    const affordable = affordableTokensFromError(payload)
+    const next = affordable
+      ? Math.min(Math.floor(body.max_tokens * 0.85), Math.floor(affordable * 0.85))
+      : Math.floor(body.max_tokens * 0.6)
+    if (next < 256 || next >= body.max_tokens) break
+    body.max_tokens = next
+    lowered += 1
     response = await send()
     payload = await response.json().catch(() => ({}))
   }
@@ -821,7 +845,7 @@ async function importWorkbookWithAi(rawText, fileName, settings) {
           { role: 'user', content: prompt }
         ],
         apiKey: directKey,
-        maxTokens: 3200,
+        maxTokens: 1800,
         responseFormat: { type: 'json_object' },
         temperature: 0.2
       })
@@ -835,7 +859,7 @@ async function importWorkbookWithAi(rawText, fileName, settings) {
       const response = await fetchWithTimeout(`${aiUrl}/api/assistant`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: prompt, history: [], maxTokens: 3200 })
+        body: JSON.stringify({ message: prompt, history: [], maxTokens: 1800 })
       }, 120_000)
       const data = await response.json().catch(() => ({}))
       if (response.ok) {
@@ -2227,7 +2251,7 @@ function App({ user, onSignOut, guest = false }) {
       }
       return { ok: false, error: `Herramienta no reconocida: ${name}` }
     }
-    const callDirectAgent = async ({ message, systemPrompt = DIRECT_AI_SYSTEM_PROMPT, maxTokens = 3000, conversation = history, attachment: fileAttachment = attachment, tools = ASSISTANT_TOOLS, toolChoice = 'auto', temperature = 0.7 }) => {
+    const callDirectAgent = async ({ message, systemPrompt = DIRECT_AI_SYSTEM_PROMPT, maxTokens = 2200, conversation = history, attachment: fileAttachment = attachment, tools = ASSISTANT_TOOLS, toolChoice = 'auto', temperature = 0.7 }) => {
       const messagesForAi = [
         { role: 'system', content: withMemory(systemPrompt) },
         ...conversation.map((item) => ({ role: item.role, content: item.content })),
@@ -2415,7 +2439,7 @@ function App({ user, onSignOut, guest = false }) {
           const result = await callDirectAgent({
             message: text,
             systemPrompt: DIRECT_AI_SYSTEM_PROMPT,
-            maxTokens: 7000,
+            maxTokens: 2200,
             conversation: history
           })
           if (!result.created.length) {
@@ -2455,8 +2479,14 @@ function App({ user, onSignOut, guest = false }) {
         }
         let localCreated = []
         try { localCreated = await generateLocalFiles() } catch { /* el aviso ya se muestra */ }
-        finish(localFallback, localCreated)
-        setNotice(aiErrorMessage(error, 'La IA no respondió. Se conservó la respuesta local.'))
+        const friendly = aiErrorMessage(error, 'La IA no respondió.')
+        // No culpar a la configuración cuando la clave sí existe: el motivo
+        // real (402, 401, red, etc.) debe verse en el propio chat.
+        const answer = directKey
+          ? `${friendly}\n\nMientras tanto sigo pudiendo generar archivos locales con los datos de VITIMAX.`
+          : localFallback
+        finish(answer, localCreated)
+        setNotice(friendly)
       }
     })()
   }
