@@ -27,6 +27,50 @@ El catálogo, perfil y preferencias se sincronizan por usuario en Firestore. Las
 fotografías de productos se guardan en Storage bajo `users/{uid}/products/`.
 Si Firebase no está configurado, la aplicación mantiene un modo local/invitado.
 
+### Microsoft: por qué rechaza cuentas personales e institucionales
+
+El botón "Continuar con Microsoft" usa el proveedor OAuth de Firebase
+(`microsoft.com`). Firebase delega en un **App Registration de Azure/Entra ID**:
+si ahí se cargó un Application (client) ID que no existe (por ejemplo el texto
+`vitimax`), Microsoft rechaza **toda** cuenta, tanto personal (`@outlook.com`,
+`@hotmail.com`) como institucional.
+
+En este proyecto el proveedor Microsoft quedó configurado con `client_id=vitimax`,
+que no es válido. Para corregirlo, en la cuenta de Azure del administrador:
+
+1. Entra a **Azure Portal → Entra ID → Registros de aplicaciones → Nuevo registro**.
+2. Nombre: `VITIMAX`.
+3. En **Tipos de cuenta admitidos** elige
+   **Cuentas en cualquier directorio organizativo y cuentas personales de Microsoft**
+   (esto habilita `common`, necesario para aceptar ambos tipos).
+4. En **URI de redireccionamiento** agrega plataforma **Web** con **ambas**
+   URLs (Firebase usa la de `firebaseapp.com` en el flujo de redirección):
+   - `https://vitimax-4094b.firebaseapp.com/__/auth/handler`
+   - `https://vitimax-4094b.web.app/__/auth/handler`
+5. En **Información general** copia el **Application (client) ID** (un UUID).
+6. En **Certificados y secretos → Nuevo secreto de cliente** crea uno y copia su
+   valor (solo se muestra una vez).
+
+Luego en **Firebase Console → Authentication → Sign-in method → Microsoft**:
+
+1. Habilita el proveedor y pega el Application ID y el secreto de Azure.
+2. Guarda los cambios.
+3. En **Authentication → Settings → Authorized domains** confirma que esté
+   `vitimax-4094b.web.app`.
+
+Para verificarlo sin iniciar sesión, la URL que genera Firebase debe contener un
+UUID real:
+
+```
+https://login.microsoftonline.com/common/oauth2/v2.0/authorize?...&client_id=<UUID>...
+```
+
+Si sigue diciendo `client_id=vitimax`, el cambio en Firebase no se guardó.
+El mismo proveedor se usa en Android e iPhone, así que no hace falta otro
+cambio en el código móvil; solo recompilar los artefactos.
+
+Mientras tanto se puede entrar con correo y contraseña o como invitado.
+
 ## Asistente de IA (BOT IA VITIMAX)
 
 El bot funciona en **dos modos**. La app elige automáticamente el mejor

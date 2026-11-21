@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as XLSX from 'xlsx'
 import { jsPDF } from 'jspdf'
 import { Html5Qrcode } from 'html5-qrcode'
-import { GoogleAuthProvider, OAuthProvider, createUserWithEmailAndPassword, getRedirectResult, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, signInWithCredential, signInWithEmailAndPassword, signInWithPopup, signOut, updateProfile } from 'firebase/auth'
+import { GoogleAuthProvider, OAuthProvider, createUserWithEmailAndPassword, getRedirectResult, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, signInWithCredential, signInWithEmailAndPassword, signInWithPopup, signInWithRedirect, signOut, updateProfile } from 'firebase/auth'
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication'
 import { Capacitor, registerPlugin } from '@capacitor/core'
 import { Directory, Filesystem } from '@capacitor/filesystem'
@@ -525,8 +525,55 @@ function authErrorMessage(code) {
                                         : code ? `Firebase no pudo completar el acceso (${code}). Revisa la configuración y vuelve a intentar.` : 'Firebase no devolvió un error identificable. Cierra y abre la aplicación nuevamente.'
 }
 
+// El proveedor Microsoft de Firebase necesita un Application (client) ID real
+// de Azure/Entra ID. Si está mal configurado, Firebase devuelve errores genéricos
+// y el usuario ve "rechazó la cuenta" sin saber qué revisar.
+const MICROSOFT_SETUP_HINT = 'Revisa Firebase → Authentication → Sign-in method → Microsoft: debe usar un Application (client) ID real de Azure/Entra ID y su secret, con "Accounts in any organizational directory and personal Microsoft accounts" y los redirects https://vitimax-4094b.firebaseapp.com/__/auth/handler y https://vitimax-4094b.web.app/__/auth/handler autorizados en Azure.'
+
+function microsoftErrorMessage(code) {
+  if (code === 'auth/operation-not-allowed') return `El proveedor Microsoft no está activado en Firebase. ${MICROSOFT_SETUP_HINT}`
+  if (code === 'auth/unauthorized-domain' || code === 'auth/unauthorized-continue-uri' || code === 'auth/invalid-continue-uri') return `Firebase bloqueó el regreso de Microsoft. Agrega vitimax-4094b.web.app en Authentication → Settings → Authorized domains. ${MICROSOFT_SETUP_HINT}`
+  if (code === 'auth/invalid-credential' || code === 'auth/internal-error' || code === 'auth/account-exists-with-different-credential') return `Microsoft rechazó la cuenta. El proveedor Microsoft de Firebase está mal configurado. ${MICROSOFT_SETUP_HINT}`
+  if (code === 'auth/popup-blocked' || code === 'auth/popup-closed-by-user' || code === 'auth/popup-timeout') return 'El navegador cerró o bloqueó la ventana de Microsoft. Se intentará con redirección; si sigue fallando, usa correo y contraseña o entra como invitado.'
+  return `${authErrorMessage(code)} ${MICROSOFT_SETUP_HINT}`
+}
+
 function isNativeApp() {
   return Boolean(globalThis.Capacitor?.isNativePlatform?.())
+}
+
+function providerCustomParameters(provider) {
+  // "common" permite cuentas personales de Microsoft y cuentas de cualquier
+  // organización, siempre que el App Registration de Azure sea multi-tenant.
+  return provider?.providerId === 'microsoft.com'
+    ? { prompt: 'select_account', tenant: 'common' }
+    : { prompt: 'select_account' }
+}
+
+function providerErrorMessage(provider, error) {
+  const code = error?.code || ''
+  if (provider?.providerId === 'microsoft.com') return microsoftErrorMessage(code)
+  if (isGoogleConfigError(error)) return `Google rechazó esta instalación porque falta autorizar el teléfono en Firebase. Mientras se activa, puedes entrar con correo y contraseña o con Microsoft. Huella SHA-1 que debes registrar: ${ANDROID_APP_SHA1}`
+  return authErrorMessage(code)
+}
+
+async function openProviderSignIn(provider) {
+  if (isNativeApp()) return signInWithNativeProvider(provider.providerId)
+  try {
+    return await Promise.race([
+      signInWithPopup(firebaseAuth, provider),
+      new Promise((_, reject) => setTimeout(() => reject({ code: 'auth/popup-timeout' }), 15000))
+    ])
+  } catch (error) {
+    const code = error?.code || ''
+    // En WebView y navegadores con bloqueador de popups, la redirección es
+    // más confiable que la ventana emergente.
+    if (/popup-blocked|popup-timeout|popup-closed-by-user/.test(code)) {
+      await signInWithRedirect(firebaseAuth, provider)
+      return null
+    }
+    throw error
+  }
 }
 
 // Permisos del teléfono: notificaciones, cámara y archivos/fotos.
@@ -1245,16 +1292,9 @@ function AuthScreen({ configured, initialError = '', onAuthenticated, onGuest })
     if (!firebaseAuth) return
     setBusy(true)
     try {
-      provider.setCustomParameters?.({ prompt: 'select_account' })
-      if (isNativeApp()) {
-        await signInWithNativeProvider(provider.providerId)
-      } else {
-        await Promise.race([
-          signInWithPopup(firebaseAuth, provider),
-          new Promise((_, reject) => setTimeout(() => reject({ code: 'auth/popup-timeout' }), 20000))
-        ])
-      }
-    } catch (authError) { setError(authErrorMessage(authError.code)) }
+      provider.setCustomParameters?.(providerCustomParameters(provider))
+      await openProviderSignIn(provider)
+    } catch (authError) { setError(providerErrorMessage(provider, authError)) }
     finally { setBusy(false) }
   }
   return <main className="auth-screen"><section className="auth-card"><div className="auth-brand"><div className="brand-mark"><BrandMark size={22} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div></div>{!configured ? <div className="auth-setup"><CircleHelp size={28} /><h1>Accede a VITIMAX</h1><p>El acceso de administrador necesita configurar Firebase. Mientras tanto puedes entrar como invitado para consultar la aplicación.</p><small>El modo invitado es solo de lectura: no permite editar productos, importar Excel ni cambiar la configuración.</small><button className="btn primary auth-guest" onClick={onGuest}>Entrar como invitado</button></div> : <><p className="eyebrow">ACCESO DE ADMINISTRADOR</p><h1>{mode === 'login' ? 'Iniciar sesión' : 'Crear cuenta'}</h1><p className="auth-muted">Accede al centro de gestión de VITIMAX.</p><div className="social-actions"><button className="social-btn google" disabled={busy} onClick={() => providerLogin(new GoogleAuthProvider())}><GoogleBrandIcon /> Continuar con Google</button><button className="social-btn microsoft" disabled={busy} onClick={() => providerLogin(new OAuthProvider('microsoft.com'))}><MicrosoftBrandIcon /> Continuar con Microsoft</button></div><div className="auth-divider"><span>o con correo</span></div><form onSubmit={submit} className="auth-form"><label>Correo electrónico<input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" /></label><label>Contraseña<input type="password" required minLength="6" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} /></label>{error && <p className="auth-error">{error}</p>}<button className="btn primary auth-submit" disabled={busy}>{busy ? 'Conectando...' : mode === 'login' ? 'Iniciar sesión' : 'Registrarme'}</button></form><button className="auth-switch" onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError('') }}>{mode === 'login' ? 'Crear cuenta de administrador' : 'Ya tengo una cuenta'}</button><button className="auth-guest-link" onClick={onGuest}>Continuar como invitado</button></>}</section></main>
@@ -1327,22 +1367,12 @@ function AuthScreenV2({ configured, initialError = '', initialNotice = '', onAut
     if (!firebaseAuth) return
     setBusy(true)
     try {
-      provider.setCustomParameters?.({ prompt: 'select_account' })
-      const result = isNativeApp()
-        ? await signInWithNativeProvider(provider.providerId)
-        : await Promise.race([
-          signInWithPopup(firebaseAuth, provider),
-          new Promise((_, reject) => setTimeout(() => reject({ code: 'auth/popup-timeout' }), 20000))
-        ])
+      provider.setCustomParameters?.(providerCustomParameters(provider))
+      const result = await openProviderSignIn(provider)
       if (result?.user?.email) rememberEmail(result.user.email)
-      onAuthenticated?.(result?.user || null)
-    } catch (authError) {
-      if (isGoogleConfigError(authError)) {
-        setError(`Google rechazó esta instalación porque falta autorizar el teléfono en Firebase. Mientras se activa, puedes entrar con correo y contraseña o con Microsoft. Huella SHA-1 que debes registrar: ${ANDROID_APP_SHA1}`)
-      } else {
-        setError(authErrorMessage(authError.code))
-      }
-    } finally { setBusy(false) }
+      if (result?.user) onAuthenticated?.(result.user)
+    } catch (authError) { setError(providerErrorMessage(provider, authError)) }
+    finally { setBusy(false) }
   }
 
   if (!configured) return <main className="auth-screen"><section className="auth-card"><div className="auth-brand"><div className="brand-mark"><BrandMark size={22} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div></div><div className="auth-setup"><CircleHelp size={28} /><h1>Accede a VITIMAX</h1><p>El acceso de administrador necesita configurar Firebase. Mientras tanto puedes entrar como invitado para consultar la aplicación.</p><small>El modo invitado es solo de lectura.</small><button className="btn primary auth-guest" onClick={onGuest}>Entrar como invitado</button></div></section></main>
