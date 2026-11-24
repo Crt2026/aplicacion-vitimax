@@ -26,8 +26,8 @@ const upstreamTimeout = Number(process.env.AI_TIMEOUT_MS || 60_000)
 const rateLimitWindow = 60_000
 const rateLimitMax = Number(process.env.AI_RATE_LIMIT_PER_MINUTE || 30)
 const maxBodyBytes = 12 * 1024 * 1024
-const maxHistoryItems = 12
-const maxMessageLength = 4000
+const maxHistoryItems = 300
+const maxMessageLength = 6000
 const maxMemories = 100
 
 const rawOrigins = (process.env.AI_ALLOWED_ORIGINS || '*')
@@ -39,7 +39,7 @@ const allowAllOrigins = rawOrigins.length === 0 || rawOrigins.includes('*')
 const systemInstruction = `Eres VITIMAX IA: un colaborador inteligente, cercano y con criterio. Trabajas junto al usuario como un colega senior: entiendes el contexto, vas al grano y resuelves.
 
 IDENTIDAD Y FORMA DE HABLAR
-- Solo en el primer mensaje de una conversación nueva puedes abrir con un saludo breve y profesional adaptado a la hora del día (por ejemplo, "Buenos días, administrador"). Después, ve directo al grano y no repitas saludos.
+- Empieza la PRIMERA ORACIÓN con la respuesta, el cálculo o la acción. No uses saludos de apertura ("Buenos días", "Hola", "Qué tal"), aunque sea el primer mensaje, ni despedidas al final.
 - Nunca uses frases cliché como "Claro que sí, aquí tienes...", "¡Por supuesto!", "Como asistente de IA..." ni variantes.
 - Adapta el tono y la energía al usuario: natural y cercano si escribe relajado; preciso y ejecutivo si pide algo técnico o profesional.
 - Responde en el idioma del usuario (español por defecto), con registro natural.
@@ -98,12 +98,14 @@ Cuando el usuario pida un archivo o una acción, responde con un bloque \`\`\`js
 - Excel / catálogo / planilla: {"accion":"crear_excel","filename":"reporte-vitimax.xlsx","resumen":"...","productos":[{...}],"kpis":[{"nombre":"Ventas totales","formula":"=SUM(Ventas!E2:E50)","unidad":"CLP","interpretacion":"..."}],"sheets":[{"name":"Productos","columns":[...],"rows":[[...]]}]}. Para catálogo general incluye las 7 hojas; para auditoría usa las hojas necesarias con "Resumen Ejecutivo" primero y fórmulas reales que empiecen con "=".
 - PDF: {"accion":"crear_pdf","titulo":"...","subtitulo":"...","contenido":"# Título\\n## Sección\\n- Punto\\n\\n| Columna | Valor |\\n| --- | --- |\\n| Dato | 10 |","filename":"documento.pdf"}. Texto plano: sin LaTeX, sin "$...$", sin "~", "**" ni "#" dentro de celdas. Precios como "$15.000", dosis como "2 a 3 L/ha"; no inventes totales.
 - Word: {"accion":"crear_word","titulo":"...","subtitulo":"...","contenido":"# Título\\n## Sección\\n- Punto","filename":"documento.docx"}. Mismas reglas de texto plano y totales reales.
-- PowerPoint: {"accion":"crear_ppt","titulo":"...","subtitulo":"...","contenido":"Diapositiva 1\\n- Punto\\n---\\nDiapositiva 2\\n- Punto","filename":"presentacion.pptx"} o, si prefieres, "diapositivas":[{"titulo":"...","puntos":["..."]}]. Formato 16:9, máximo 5 viñetas por diapositiva y sin LaTeX.
+- PowerPoint: {"accion":"crear_ppt","titulo":"...","subtitulo":"...","contenido":"Diapositiva 1\\n- Punto\\n---\\nDiapositiva 2\\n- Punto","filename":"presentacion.pptx"} o, si prefieres, "diapositivas":[{"titulo":"...","puntos":["..."]}]. Formato 16:9, máximo 5 viñetas y 5 filas de tabla por diapositiva, tablas con columnas Nombre, Categoría, Formato, Precio y Descripción, y cierre "Próximos Pasos" con 3 o 4 recomendaciones accionables sin repetir nombres de productos. Sin LaTeX.
 - Página web: {"accion":"crear_pagina_web","titulo":"...","subtitulo":"...","resumen":"...","html":"<!doctype html>...","filename":"pagina.html"}. HTML COMPLETO, sin truncar y sin placeholders como "<!-- Agregar más productos aquí -->": incluye todos los registros reales del catálogo. Una sola carga de Tailwind CSS (https://cdn.tailwindcss.com), iconos Lucide, hero #1E4D2B con acentos lima/dorado, búsqueda en vivo por nombre/descripción, filtros por categoría, tarjetas con precio CLP, badge de stock y botón "Cotizar por WhatsApp" funcional en cada tarjeta. Año 2026 en el pie de página. Nada de tablas HTML antiguas.
 - Código en cualquier lenguaje: {"accion":"crear_codigo","titulo":"...","lenguaje":"python","codigo":"...","filename":"programa.py"}
 - Documento genérico: {"accion":"crear_documento","documento":{"tipo":"pdf|word|ppt","titulo":"...","contenido":"# Título\\n## Sección\\n- Punto"}}
 - Guardar productos en el catálogo: {"accion":"registrar_productos_en_app","productos":[{...}],"reemplazar":false}
 - Simular ventas: {"accion":"simular_ventas","periodoDias":30,"crecimientoMensual":0}
+- Excel: la primera hoja es "Resumen Ejecutivo" con tarjetas de KPIs, fórmulas reales (=SUM, =AVERAGE, =COUNTIF, =IF), formato CLP "$#,##0", columnas autoajustadas, encabezados congelados y autofiltros. Cero Markdown en celdas.
+- PDF y Word: banner corporativo verde bosque #1E4D2B, tarjetas con sumas reales verificadas y tablas proporcionales. Sanitización absoluta: sin "\\$", sin LaTeX como "$50kg/ha$" y sin marcas crudas "#" ni "**".
 - Guardar un recuerdo persistente: {"accion":"guardar_memoria","categoria":"Negocio|Preferencias|Instrucciones|Datos personales|Clientes|Productos|Finanzas|Otros","dato":"..."}
 - Olvidar o actualizar un recuerdo: {"accion":"olvidar_memoria","clave_o_id":"...","nuevo_dato":"..."}
 
@@ -224,6 +226,41 @@ Datos que el usuario pidió recordar entre sesiones. Úsalos de forma natural, s
 ${lines.join('\n')}`
 }
 
+const HISTORY_MARKER = 'HISTORIAL COMPLETO DE LA CONVERSACIÓN'
+
+function conversationBlock(history) {
+  const rows = (Array.isArray(history) ? history : [])
+    .filter((item) => item && ['user', 'assistant', 'tool'].includes(item.role) && typeof item.content === 'string' && item.content.trim())
+    .slice(-300)
+  if (!rows.length) return ''
+  const lines = []
+  let total = 0
+  for (const item of rows) {
+    const speaker = item.role === 'user' ? 'USUARIO' : item.role === 'tool' ? 'HERRAMIENTA' : 'VITIMAX IA'
+    const text = String(item.content).replace(/\s+/g, ' ').trim().slice(0, 4000)
+    const line = `${speaker}: ${text}`
+    if (total + line.length > 60_000) break
+    lines.push(line)
+    total += line.length + 1
+  }
+  if (!lines.length) return ''
+  return `
+
+### ${HISTORY_MARKER}
+Continúa esta conversación con naturalidad. Es contexto ya compartido: no lo repitas, no lo enumeres y no digas que lo estás consultando.
+${lines.join('\n')}`
+}
+
+// System prompt único con memoria e historial, sin duplicar bloques que la app
+// ya haya inyectado antes de enviar la solicitud.
+function buildSystemPrompt(system, memories, history) {
+  const base = typeof system === 'string' && system.trim() ? system.slice(0, 100_000) : systemInstruction
+  let result = base
+  if (!result.includes('MEMORIA PERSISTENTE')) result += memoryBlock(memories)
+  if (!result.includes(HISTORY_MARKER)) result += conversationBlock(history)
+  return result
+}
+
 function attachmentParts(attachment) {
   const parts = []
   if (!attachment || typeof attachment !== 'object') return parts
@@ -270,9 +307,10 @@ async function askOpenRouter({ catalog, message, history, attachment, signal, sy
     if (item.kind === 'image') content.push({ type: 'image_url', image_url: { url: `data:${item.mimeType};base64,${item.data}` } })
     if (item.kind === 'file') content.push({ type: 'file', file: { filename: item.name, file_data: `data:${item.mimeType};base64,${item.data}` } })
   }
+  const fullSystem = buildSystemPrompt(system, memories, history)
   const messages = [
-    { role: 'system', content: `${system || systemInstruction}${memoryBlock(memories)}` },
-    ...history.map((item) => ({ role: item.role, content: item.content })),
+    { role: 'system', content: fullSystem },
+    ...(fullSystem.includes(HISTORY_MARKER) ? [] : history.map((item) => ({ role: item.role, content: item.content }))),
     { role: 'user', content }
   ]
   const modelList = [model, ...fallbackModels].filter(Boolean).slice(0, 3)
@@ -304,7 +342,8 @@ async function askGemini({ catalog, message, history, attachment, signal, system
     if (item.kind === 'image') parts.push({ inline_data: { mime_type: item.mimeType, data: item.data } })
     if (item.kind === 'file') parts.push({ inline_data: { mime_type: item.mimeType, data: item.data } })
   }
-  const contents = history.map((item) => ({
+  const fullSystem = buildSystemPrompt(system, memories, history)
+  const contents = fullSystem.includes(HISTORY_MARKER) ? [] : history.map((item) => ({
     role: item.role === 'assistant' ? 'model' : 'user',
     parts: [{ text: item.content }]
   }))
@@ -314,7 +353,7 @@ async function askGemini({ catalog, message, history, attachment, signal, system
     signal,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      system_instruction: { parts: [{ text: `${system || systemInstruction}${memoryBlock(memories)}` }] },
+      system_instruction: { parts: [{ text: fullSystem }] },
       contents,
       generationConfig: { temperature: 0.7, maxOutputTokens: Math.min(Math.max(Number(maxTokens) || 1500, 100), 8000) }
     })
@@ -394,7 +433,7 @@ const server = http.createServer(async (request, response) => {
         history: safeHistory,
         attachment,
         signal: controller.signal,
-        system: typeof system === 'string' && system.trim() ? system.slice(0, 4000) : undefined,
+        system: typeof system === 'string' && system.trim() ? system.slice(0, 80_000) : undefined,
         memories: sanitizeMemories(memories),
         maxTokens
       })

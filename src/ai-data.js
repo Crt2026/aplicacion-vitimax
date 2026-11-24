@@ -430,12 +430,10 @@ function recordFromRaw(kind, raw) {
   })
   if (record.fecha !== undefined) record.fecha = formatDateCell(raw.fecha)
   const primary = kind === 'proveedores' ? 'proveedor' : kind === 'plantas' ? 'nombre' : 'cliente'
-  if (!record[primary]) {
-    const fallback = record.nombre || record.email || record.telefono || record.producto || record.consulta
-    if (fallback) record[primary] = fallback
-  }
-  if (!record[primary] && !Object.values(record).some(hasValue)) return null
-  if (!record[primary]) record[primary] = 'Sin nombre'
+  if (!record[primary] && primary !== 'nombre' && record.nombre) record[primary] = record.nombre
+  // No se importan filas de resumen ni registros sin un nombre real: son
+  // residuos de Excel que ensucian Clientes, Ventas, Asesorías, etc.
+  if (!record[primary] || isJunkProductName(record[primary])) return null
   record.id = cleanCell(raw.id) || makeId(kind.slice(0, 3))
   return record
 }
@@ -1008,7 +1006,7 @@ export function fixAsesoriaRecords(records = [], products = []) {
 const TOTALS_ROW = /^(gran\s+)?(total|totales|subtotal|suma|resumen|total\s+general|total\s+valorado|total\s+inventario|valor\s+total|valorizado|valor\s+inventario)\b/i
 
 // Nombre de fila/registro que corresponde a un total y no a un producto real.
-const JUNK_PRODUCT_NAME = /^(?:gran\s+)?(?:total(?:es)?|subtotal(?:es)?|suma|resumen|valor(?:izado)?)(?:\s+(?:general|valorado|inventario|productos|stock|clp|ejecutivo|de|del|la|el))*\s*$/i
+const JUNK_PRODUCT_NAME = /^(?:gran\s+)?(?:total(?:es)?|subtotal(?:es)?|suma|resumen|valor(?:izado)?)(?:\s+(?:general|valorado|inventario|productos|stock|clp|ejecutivo|clientes|ventas|asesorias|plantas|proveedores|pedidos|registros|filas|de|del|la|el))*\s*$/i
 
 /**
  * Detecta filas de totales que llegan desde Excel (por ejemplo
@@ -1151,7 +1149,13 @@ function reconcileSummarySheets(sheets) {
   if (!summary.length) return sheets
   const metrics = workbookMetrics(sheets)
   if (!metrics) return sheets
+  const unitsFormula = metrics.formulas.units || ''
+  const stockRange = unitsFormula.startsWith('=SUM(') ? unitsFormula.slice(5, -1) : ''
+  // El orden importa: "Stock bajo" y "Estado" se resuelven antes que los
+  // patrones genéricos de stock/inventario para no sobrescribir sus fórmulas.
   const definitions = [
+    { pattern: /bajo|reposici[oó]n|cr[ií]tico/, label: 'Productos con stock bajo (5 o menos)', value: '', formula: stockRange ? `=COUNTIF(${stockRange},"<=5")` : '' },
+    { pattern: /estado|operativ/, label: 'Estado del inventario', value: '', formula: unitsFormula ? `=IF(${unitsFormula}>0,"Operativo","Revisar existencias")` : '' },
     { pattern: /unidad|stock/, label: 'Unidades en stock', value: metrics.units, formula: metrics.formulas.units },
     { pattern: /inventario|valorizado|valor/, label: 'Valor inventario CLP', value: metrics.inventoryTotal, formula: metrics.formulas.inventoryTotal },
     { pattern: /precio|promedio/, label: 'Precio promedio CLP', value: metrics.avgPrice, formula: metrics.formulas.avgPrice },
@@ -1170,7 +1174,8 @@ function reconcileSummarySheets(sheets) {
       ))
       if (index >= 0) {
         used.add(index)
-        rows[index][1] = value
+        // Si la IA ya escribió una fórmula real, se conserva intacta.
+        if (!String(rows[index][1] ?? '').trim().startsWith('=')) rows[index][1] = value
         return
       }
       const next = new Array(columns.length).fill('')
@@ -1231,7 +1236,9 @@ function ensureSummarySheet(sheets, products = []) {
       ['Productos registrados', `=COUNTA(Productos!${nameRange})`, 'unidades', 'Filas reales del catálogo VITIMAX'],
       ['Unidades en stock', `=SUM(Productos!${stockRange})`, 'unidades', 'Existencias disponibles'],
       ['Valor de inventario', `=SUMPRODUCT(Productos!${priceRange},Productos!${stockRange})`, 'CLP', 'Suma de precio por unidad en stock'],
-      ['Precio promedio', `=AVERAGE(Productos!${priceRange})`, 'CLP', 'Promedio de precios del catálogo']
+      ['Precio promedio', `=AVERAGE(Productos!${priceRange})`, 'CLP', 'Promedio de precios del catálogo'],
+      ['Productos con stock bajo (5 o menos)', `=COUNTIF(Productos!${stockRange},"<=5")`, 'unidades', 'Filas que requieren reposición'],
+      ['Estado del inventario', `=IF(SUM(Productos!${stockRange})>0,"Operativo","Revisar existencias")`, 'estado', 'Lectura automática del stock total']
     ]
   }
   return [summary, ...sheets]
@@ -1853,10 +1860,38 @@ Cuando el usuario diga "recuerda que...", "mi nombre es...", "siempre aplica..."
 No guardes contraseñas, claves, tokens ni datos de tarjetas.`
 }
 
+/**
+ * bloque que se inyecta en el system prompt con la conversación completa.
+ * Se usa como contexto silencioso: la IA no debe enumerarlo ni mencionar que
+ * lo está leyendo. Cada mensaje se recorta solo para no exceder el contexto.
+ */
+export function buildConversationSection(history = []) {
+  const rows = (Array.isArray(history) ? history : [])
+    .filter((item) => item && ['user', 'assistant', 'tool'].includes(item.role) && typeof item.content === 'string' && item.content.trim())
+    .slice(-300)
+  if (!rows.length) return ''
+  const lines = []
+  let total = 0
+  rows.forEach((item) => {
+    const speaker = item.role === 'user' ? 'USUARIO' : item.role === 'tool' ? 'HERRAMIENTA' : 'VITIMAX IA'
+    const text = String(item.content).replace(/\s+/g, ' ').trim().slice(0, 4000)
+    const line = `${speaker}: ${text}`
+    if (total + line.length > 60_000) return
+    lines.push(line)
+    total += line.length + 1
+  })
+  if (!lines.length) return ''
+  return `
+
+### HISTORIAL COMPLETO DE LA CONVERSACIÓN
+Continúa esta conversación con naturalidad. Es contexto ya compartido: no lo repitas, no lo enumeres y no digas que lo estás consultando.
+${lines.join('\n')}`
+}
+
 export const DIRECT_AI_SYSTEM_PROMPT = `Eres VITIMAX IA: un colaborador inteligente, cercano y con criterio. No eres un asistente que repite fórmulas: trabajas junto al usuario como un colega senior que entiende su contexto, va al grano y resuelve.
 
 IDENTIDAD Y FORMA DE HABLAR
-- Solo en el primer mensaje de una conversación nueva puedes abrir con un saludo breve y profesional adaptado a la hora del día (por ejemplo, "Buenos días, administrador" o "Buenas tardes"). Después de eso, ve directo al grano: no repitas saludos ni fórmulas de apertura.
+- Empieza la PRIMERA ORACIÓN con la respuesta, el cálculo o la acción. No uses saludos de apertura ("Buenos días", "Hola", "Qué tal"), aunque sea el primer mensaje, ni despedidas al final.
 - Nunca uses frases cliché como "Claro que sí, aquí tienes...", "¡Por supuesto!", "Como asistente de IA..." ni variantes. Sin relleno, sin disculpas innecesarias y sin repetir la pregunta.
 - Adapta el tono y la energía al usuario: si escribe relajado y breve, responde natural y cercano; si pide algo técnico, ejecutivo o profesional, sube el nivel y sé preciso.
 - Responde en el idioma del usuario (español por defecto) con registro natural, sin sonar acartonado ni excesivamente entusiasta.
@@ -1921,8 +1956,11 @@ HERRAMIENTAS
 - crear_excel: libro .xlsx real con hojas, columnas, filas y fórmulas activas. Para un catálogo general usa las 7 hojas: Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores. No agregues filas de totales ("Total", "Total Valorado Inventario", "Subtotal", "Resumen") dentro de las hojas de datos: los totales van solo en la hoja Resumen, calculados desde Productos e Inventario. En Asesorias, la columna Cultivo debe decir el cultivo real (Vid, Tomate, Palto, Cítricos, Hortalizas…), nunca el nombre del producto, y la columna Recomendación debe indicar el producto VITIMAX sugerido (nunca vacía).
 - crear_pdf, crear_word, crear_ppt: documentos reales en PDF, Word y PowerPoint. Usa "# " para títulos, "## " para secciones, "- " para viñetas, tablas Markdown con "|" y --- para separar diapositivas. Máximo 5 viñetas por diapositiva. Escribe texto plano: nunca uses LaTeX, "$...$", "~", "**", "__" ni "#" dentro de las celdas. Precios como "$15.000" y dosis como "2 a 3 L/ha". No inventes totales: la app los calcula desde el catálogo real.
 - crear_pagina_web: página web HTML5 completa con una sola carga de Tailwind CSS (https://cdn.tailwindcss.com) e iconos Lucide. PROHIBIDO truncar el código o dejar comentarios/placeholders como "<!-- Agregar más productos aquí -->": incluye TODOS los registros reales del catálogo, sin omitir ninguno. Para catálogos usa hero verde #1E4D2B con acentos lima #D8F55F y dorado, barra de búsqueda en vivo por nombre/descripción, botones de filtro por categoría, badge de stock disponible y botón "Cotizar por WhatsApp" funcional en cada tarjeta, con el año 2026 en el pie de página. Nada de tablas HTML antiguas. La app permite verla en vivo antes de descargar.
-- crear_codigo: entrega código completo y ejecutable en cualquier lenguaje (Python, JavaScript, SQL, HTML, PHP, etc.). Indica el lenguaje y el nombre de archivo con la extensión correcta; el código se muestra en el chat para copiar y también se descarga como archivo real.
+- crear_codigo: entrega código completo y ejecutable en cualquier lenguaje (Python, JavaScript, SQL, HTML, PHP, etc.). Indica el lenguaje y el nombre de archivo con la extensión correcta; el código se muestra en el chat para copiar y también se descarga como archivo real. Nunca cortes un bloque ni dejes placeholders.
 - crear_html: alias de crear_pagina_web para páginas web completas.
+- PowerPoint: tablas limpias por diapositiva con columnas exactas Nombre, Categoría, Formato, Precio y Descripción; máximo 5 filas por diapositiva. La diapositiva final se titula "Próximos Pasos" y contiene solo 3 o 4 recomendaciones accionables, sin repetir nombres de productos.
+- Excel: hoja "Resumen Ejecutivo" primero, tarjetas de KPIs y fórmulas reales (=SUM, =AVERAGE, =COUNTIF, =IF), formato CLP "$#,##0", columnas autoajustadas, encabezados congelados y autofiltros. Cero Markdown dentro de las celdas.
+- PDF y Word: banner corporativo verde bosque #1E4D2B, tarjetas con sumas reales verificadas y tablas proporcionales. Sanitización absoluta: sin "\\$", sin LaTeX como "$50kg/ha$" y sin marcas crudas "#" ni "**".
 - crear_documento: alternativa genérica para PDF, Word o PowerPoint cuando no aplique una herramienta específica.
 - Puedes analizar documentos adjuntos (PDF, texto, Excel/CSV) y crear versiones nuevas en Word, PowerPoint o PDF. Si un .docx o .pptx no se puede leer directamente, pide exportarlo a PDF o pegar el contenido; nunca inventes su contenido.
 - registrar_productos_en_app: guarda productos en el catálogo real de VITIMAX.
@@ -1932,7 +1970,7 @@ HERRAMIENTAS
 - Si una herramienta falla, dilo con claridad y ofrece la alternativa más útil.
 
 CONTEXTO
-Recibes el catálogo, los módulos y registros de VITIMAX, el historial de la conversación y los archivos adjuntos. Úsalos con criterio, sin repetirlos innecesariamente y sin anunciar que los estás leyendo.`
+Recibes el catálogo, los módulos y registros de VITIMAX, el historial COMPLETO de la conversación y los recuerdos persistentes dentro de este system prompt, además de los archivos adjuntos. Úsalos con criterio, sin repetirlos innecesariamente y sin anunciar que los estás leyendo. Si el usuario se refiere a algo dicho antes, retómalo sin pedirlo de nuevo.`
 
 export const EXCEL_SYSTEM_PROMPT = `Eres el generador de Excel de VITIMAX. Creas planillas reales, completas y listas para usar, con fórmulas activas y formato profesional.
 Debes llamar a la herramienta crear_excel (o devolver SOLO un objeto JSON si la herramienta no está disponible) con esta forma:

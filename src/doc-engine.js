@@ -818,10 +818,12 @@ export function buildDocxDocument({ title = 'Documento VITIMAX', subtitle = '', 
 
   // Membrete / portada corporativa
   children.push(new Paragraph({
-    spacing: { after: 80 },
+    shading: { type: ShadingType.CLEAR, color: 'auto', fill: BRAND.forest },
+    indent: { left: 200, right: 200 },
+    spacing: { before: 0, after: 160 },
     children: [
-      new TextRun({ text: 'VITIMAX', bold: true, size: 22, color: BRAND.forest, characterSpacing: 80 }),
-      new TextRun({ text: '   CENTRO DE GESTIÓN', size: 16, color: BRAND.muted, characterSpacing: 40 })
+      new TextRun({ text: 'VITIMAX', bold: true, size: 22, color: BRAND.white, characterSpacing: 80 }),
+      new TextRun({ text: '   CENTRO DE GESTIÓN', size: 16, color: BRAND.lime, characterSpacing: 40 })
     ]
   }))
   children.push(new Paragraph({
@@ -1166,6 +1168,36 @@ export async function buildPptxDocument({ title = 'Presentación VITIMAX', subti
     }
   })
 
+  // Tablas limpias del catálogo: columnas exactas y máximo 5 filas por slide.
+  // Se eliminan las tablas genéricas para no repetir datos ni columnas raras.
+  if (catalogMode && Array.isArray(catalog) && catalog.length) {
+    const junkName = /^(?:gran\s+)?(?:total(?:es)?|subtotal(?:es)?|suma|resumen|valor(?:izado)?)(?:\s+(?:general|valorado|inventario|productos|stock|clp|ejecutivo|de|del|la|el))*\s*$/i
+    const productRows = catalog
+      .filter((item) => item && !junkName.test(String(item.name ?? item.nombre ?? item.producto ?? '').trim()))
+      .map((item) => [
+        plainText(item.name ?? item.nombre ?? item.producto ?? ''),
+        plainText(item.category ?? item.categoria ?? ''),
+        plainText(item.format ?? item.formato ?? ''),
+        formatClp(item.price ?? item.precio ?? 0),
+        plainText(item.description ?? item.descripcion ?? '').slice(0, 120)
+      ])
+    const productSlides = []
+    for (let index = 0; index < productRows.length; index += 5) {
+      productSlides.push({
+        title: `Productos VITIMAX · ${Math.floor(index / 5) + 1}`,
+        bullets: [],
+        paragraphs: [],
+        table: {
+          header: ['Nombre', 'Categoría', 'Formato', 'Precio', 'Descripción'],
+          rows: productRows.slice(index, index + 5)
+        }
+      })
+    }
+    const withoutGenericTables = expanded.filter((slide) => !slide.table)
+    expanded.length = 0
+    expanded.push(...withoutGenericTables, ...productSlides)
+  }
+
   const pptx = new pptxgen()
   pptx.layout = 'LAYOUT_WIDE'
   pptx.author = 'VITIMAX'
@@ -1217,15 +1249,19 @@ export async function buildPptxDocument({ title = 'Presentación VITIMAX', subti
   // Quita el prefijo "1." / "1)" cuando la propia diapositiva ya dibuja el número.
   const stripOrder = (text) => String(text || '').replace(/^\s*\d{1,3}[.)]\s+/, '')
 
-  const addFooter = (slide, pageNumber) => {
+  // La portada es la página 1; el numerador se lleva aquí para que el orden
+  // siga siendo correcto aunque se inserten tablas de catálogo.
+  let pageCounter = 2
+  const addFooter = (slide) => {
     slide.addText('VITIMAX · Centro de Gestión', {
       x: 0.6, y: 7.12, w: 5, h: 0.25,
       fontSize: 8, color: '8AA79A'
     })
-    slide.addText(String(pageNumber), {
+    slide.addText(String(pageCounter), {
       x: 12.1, y: 7.12, w: 0.7, h: 0.25,
       fontSize: 8, color: '8AA79A', align: 'right'
     })
+    pageCounter += 1
   }
 
   // Tarjetas de resumen ejecutivo con los datos reales del catálogo.
@@ -1323,7 +1359,7 @@ export async function buildPptxDocument({ title = 'Presentación VITIMAX', subti
 
     if (hasTable) {
       const header = item.table.header
-      const rows = item.table.rows.slice(0, 8)
+      const rows = item.table.rows.slice(0, 5)
       const tableRows = [
         header.map((cell) => ({
           text: cell,
@@ -1488,20 +1524,32 @@ export async function buildPptxDocument({ title = 'Presentación VITIMAX', subti
     x: 0, y: 0, w: 0.18, h: 7.5,
     fill: { color: BRAND.lime }, line: { color: BRAND.lime }
   })
-  closing.addText('PRÓXIMOS PASOS', {
+  closing.addText('CIERRE EJECUTIVO', {
     x: 0.9, y: 0.9, w: 8, h: 0.4,
     fontSize: 12, bold: true, color: BRAND.lime, charSpacing: 3
   })
-  closing.addText('Gracias', {
+  closing.addText('Próximos Pasos', {
     x: 0.9, y: 1.45, w: 9, h: 1.1,
     fontSize: 40, bold: true, color: BRAND.white
   })
   const lastBullets = expanded[expanded.length - 1]?.bullets || []
-  const nextSteps = (lastBullets.length ? lastBullets : [
-    'Revisar el documento y validar los datos clave.',
-    'Definir responsables y fechas para la ejecución.',
-    'Medir resultados y ajustar el plan en el próximo periodo.'
-  ]).slice(0, 3).map(stripOrder)
+  const productNames = (Array.isArray(catalog) ? catalog : [])
+    .map((item) => String(item?.name ?? item?.nombre ?? item?.producto ?? '').trim().toLowerCase())
+    .filter((name) => name.length > 3)
+  const mentionsProduct = (text) => productNames.some((name) => String(text).toLowerCase().includes(name))
+  const actionable = (text) => /^(?:revisar|validar|definir|publicar|medir|asignar|confirmar|actualizar|programar|capacitar|documentar|priorizar|implementar|monitorear|preparar|comunicar|analizar|ajustar)\b/i.test(text)
+  const genericSteps = [
+    'Validar precios y existencias con el equipo comercial antes de publicar.',
+    'Definir responsables y una fecha concreta para la siguiente revisión.',
+    'Medir consultas, conversiones y rotación en 30 días y ajustar el plan.',
+    'Documentar los cambios y dejar registrada la decisión final.'
+  ]
+  const usefulSteps = lastBullets
+    .map(stripOrder)
+    .filter((text) => text && actionable(text) && !mentionsProduct(text))
+  // En catálogos siempre se usan pasos genéricos: ningún nombre de producto
+  // se repite en el cierre.
+  const nextSteps = (catalogMode ? genericSteps : (usefulSteps.length >= 3 ? usefulSteps : genericSteps)).slice(0, 4)
   nextSteps.forEach((step, index) => {
     const y = 3.0 + index * 1.0
     closing.addShape(pptx.ShapeType.ellipse, {
@@ -2054,7 +2102,18 @@ export function detectLanguage(value) {
 
 export function extractFencedCode(value, fallbackLanguage = 'txt') {
   const source = String(value || '')
-  const fenced = source.match(/```([a-zA-Z0-9+#.-]*)\s*\n?([\s\S]*?)```/)
-  if (fenced) return { language: (fenced[1] || fallbackLanguage).toLowerCase(), code: fenced[2].trim() }
+  const blocks = []
+  const fenced = /```([a-zA-Z0-9+#.-]*)\s*\n?([\s\S]*?)```/g
+  let match
+  while ((match = fenced.exec(source))) {
+    blocks.push({ language: (match[1] || fallbackLanguage).toLowerCase(), code: match[2].trim() })
+  }
+  // Si el modelo devuelve varios bloques, se conserva el completo más largo:
+  // nunca se entrega un fragmento truncado del código.
+  if (blocks.length) {
+    return blocks.reduce((best, block) => block.code.length > best.code.length ? block : best)
+  }
+  const open = source.match(/```([a-zA-Z0-9+#.-]*)\s*\n?([\s\S]*)$/)
+  if (open) return { language: (open[1] || fallbackLanguage).toLowerCase(), code: open[2].trim() }
   return { language: fallbackLanguage, code: source.trim() }
 }

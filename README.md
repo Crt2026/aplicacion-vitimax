@@ -77,6 +77,18 @@ El bot funciona en **dos modos**. La app elige automáticamente el mejor
 disponible y, si uno falla, prueba el siguiente antes de usar las respuestas
 locales.
 
+### Capacidades actuales
+
+- Responde desde la primera oración, sin saludos ni relleno, y adapta el tono al usuario.
+- Inyecta memoria persistente e historial completo de la conversación en el system prompt.
+- Analiza Excel, CSV, PDF y texto adjunto; auditando datos reales antes de transformarlos.
+- Encadena herramientas en un mismo turno (hasta 8 pasos) con `tool_choice: "auto"`.
+- Genera Excel con "Resumen Ejecutivo", fórmulas reales, formato CLP, autofiltros y encabezados congelados.
+- Genera PDF y Word con banner verde bosque, sumas verificadas y texto limpio (sin LaTeX ni Markdown crudo).
+- Genera PowerPoint con tablas de 5 filas, columnas Nombre/Categoría/Formato/Precio/Descripción y cierre "Próximos Pasos".
+- Genera páginas web completas con Tailwind, buscador, filtros, WhatsApp y vista previa en vivo.
+- Descarta filas de totales y registros sin nombre real al importar, exportar o sincronizar.
+
 ### Modo directo (funciona en Android sin servidor)
 
 Es el modo que usa el APK por defecto. La app llama directamente a OpenRouter

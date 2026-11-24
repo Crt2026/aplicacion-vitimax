@@ -14,5 +14,6 @@ build/
 
 *.log
 *.apk
+verificacion-entregables/
 .firebase/
 .DS_Store

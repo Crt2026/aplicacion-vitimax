@@ -42,12 +42,14 @@ import {
   MEMORY_CATEGORIES,
   MEMORY_STORAGE_KEY,
   analyzeWorkbook,
+  buildConversationSection,
   buildDemoProducts,
   buildMemorySection,
   createExcelBlob,
   extractPdfText,
   filterJunkProducts,
   fixAsesoriaRecords,
+  isJunkProductName,
   mergeImportedProducts,
   mergeImportedRecords,
   mergeWorkbookSheets,
@@ -70,6 +72,31 @@ const SETTINGS_KEY = 'vitimax-settings-v1'
 const CHAT_KEY = 'vitimax-assistant-chat-v1'
 const MODULES_KEY = 'vitimax-modules-v1'
 const EMPTY_MODULES = { pedidos: [], clientes: [], asesorias: [], contenido: [], ventas: [], plantas: [], proveedores: [] }
+
+const RECORD_PRIMARY_FIELDS = {
+  pedidos: ['cliente'], clientes: ['nombre'], asesorias: ['cliente'],
+  ventas: ['cliente'], plantas: ['nombre'], proveedores: ['proveedor']
+}
+
+/** Quita filas de totales y registros sin nombre real de cualquier módulo. */
+function filterJunkRecords(kind, list = []) {
+  if (!Array.isArray(list)) return []
+  const fields = RECORD_PRIMARY_FIELDS[kind] || []
+  return list.filter((row) => {
+    if (!row || typeof row !== 'object') return false
+    if (!fields.length) return true
+    const value = String(fields.map((field) => row[field]).find(Boolean) || '').trim()
+    return Boolean(value) && !isJunkProductName(value)
+  })
+}
+
+function filterJunkModules(modules = {}) {
+  const clean = { ...modules }
+  Object.keys(RECORD_PRIMARY_FIELDS).forEach((kind) => {
+    if (Array.isArray(clean[kind])) clean[kind] = filterJunkRecords(kind, clean[kind])
+  })
+  return clean
+}
 
 function readLocalJson(key, fallback) {
   try {
@@ -1205,7 +1232,8 @@ const MODULE_CONFIG = {
       { key: 'cultivo', label: 'Cultivo', placeholder: 'Ej.: tomate, vid, cítricos' },
       { key: 'consulta', label: 'Consulta', type: 'textarea', full: true, placeholder: 'Describe el problema o la consulta' },
       { key: 'estado', label: 'Estado', type: 'select', options: ['Abierta', 'En revisión', 'Resuelta'], default: 'Abierta' },
-      { key: 'prioridad', label: 'Prioridad', type: 'select', options: ['Normal', 'Alta', 'Urgente'], default: 'Normal' }
+      { key: 'prioridad', label: 'Prioridad', type: 'select', options: ['Normal', 'Alta', 'Urgente'], default: 'Normal' },
+      { key: 'recomendacion', label: 'Recomendación', type: 'textarea', full: true, placeholder: 'Producto VITIMAX sugerido y dosis o modo de uso' }
     ],
     statusKey: 'estado',
     primary: (r) => r.cliente || 'Cliente sin nombre',
@@ -1484,7 +1512,7 @@ function App({ user, onSignOut, guest = false }) {
     }
   })
   const [settings, setSettings] = useState(() => readLocalJson(localKey(SETTINGS_KEY), { notifications: true, lowStock: 5, currency: 'ARS', aiServerUrl: '', aiToken: '' }))
-  const [records, setRecords] = useState(() => ({ ...EMPTY_MODULES, ...readLocalJson(localKey(MODULES_KEY), {}) }))
+  const [records, setRecords] = useState(() => filterJunkModules({ ...EMPTY_MODULES, ...readLocalJson(localKey(MODULES_KEY), {}) }))
   const [moduleModal, setModuleModal] = useState(null)
   const [active, setActive] = useState('Resumen')
   const [query, setQuery] = useState('')
@@ -1523,7 +1551,7 @@ function App({ user, onSignOut, guest = false }) {
       if (data.profile) setProfile((current) => ({ ...current, ...data.profile }))
       if (data.settings) setSettings((current) => ({ ...current, ...data.settings }))
       if (data.modules) setRecords((current) => {
-        const merged = { ...current, ...data.modules }
+        const merged = filterJunkModules({ ...current, ...data.modules })
         if (Array.isArray(merged.asesorias)) {
           merged.asesorias = fixAsesoriaRecords(merged.asesorias, cloudProducts || products)
         }
@@ -1698,7 +1726,8 @@ function App({ user, onSignOut, guest = false }) {
     }
   }
   async function exportProducts() {
-    const worksheet = XLSX.utils.json_to_sheet(products)
+    // Solo productos reales: nunca se exportan filas de totales ni resúmenes.
+    const worksheet = XLSX.utils.json_to_sheet(filterJunkProducts(products))
     const workbook = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Productos')
     const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' })
@@ -1883,7 +1912,7 @@ function App({ user, onSignOut, guest = false }) {
       }
 
       setProducts(mergedProducts)
-      setRecords(nextRecords)
+      setRecords(filterJunkModules(nextRecords))
       setImportReport({
         fileName: file.name,
         rows: parsed.rows || parsed.rawRows || 0,
@@ -2088,7 +2117,6 @@ function App({ user, onSignOut, guest = false }) {
     const userText = attachmentFile ? `${text}\n📎 ${attachmentFile.name}` : text
     const history = messages
       .filter((item) => !item.pending && item.text !== '…' && typeof item.text === 'string' && item.text.trim())
-      .slice(-24)
       .flatMap((item) => {
         const rows = [{ role: item.role === 'tool' ? 'assistant' : item.role, content: item.text }]
         if (Array.isArray(item.tools)) {
@@ -2099,16 +2127,20 @@ function App({ user, onSignOut, guest = false }) {
         }
         return rows
       })
-    // La memoria se lee justo antes de cada consulta para incluir lo que la IA
-    // acaba de guardar en el mismo turno o en sesiones anteriores.
+    // La memoria y el historial completo se leen justo antes de cada consulta y
+    // se inyectan en el system prompt, incluido lo guardado en este mismo turno.
     const memorySection = () => buildMemorySection(memoriesRef.current)
-    const withMemory = (base) => `${base || DIRECT_AI_SYSTEM_PROMPT}${memorySection()}`
+    const conversationSection = (source = history) => buildConversationSection(source)
+    const withContext = (base, source = history) => `${base || DIRECT_AI_SYSTEM_PROMPT}${memorySection()}${conversationSection(source)}`
     const catalogForAi = (list = workingProducts) => JSON.stringify(list.map(({ id, name, category, price, stock, format, description, usage, recommendations, features, source }) => ({
       id, name, category, price, stock, format, description, usage, recommendations, features, source
     })))
     const recordsForAi = () => JSON.stringify({
       clientes: (records.clientes || []).slice(0, 30),
       pedidos: (records.pedidos || []).slice(0, 30),
+      ventas: (records.ventas || []).slice(0, 30),
+      plantas: (records.plantas || []).slice(0, 30),
+      proveedores: (records.proveedores || []).slice(0, 30),
       asesorias: (records.asesorias || []).slice(0, 30),
       contenido: (records.contenido || []).slice(0, 10)
     })
@@ -2283,8 +2315,7 @@ function App({ user, onSignOut, guest = false }) {
     }
     const callDirectAgent = async ({ message, systemPrompt = DIRECT_AI_SYSTEM_PROMPT, maxTokens = 2200, conversation = history, attachment: fileAttachment = attachment, tools = ASSISTANT_TOOLS, toolChoice = 'auto', temperature = 0.7 }) => {
       const messagesForAi = [
-        { role: 'system', content: withMemory(systemPrompt) },
-        ...conversation.map((item) => ({ role: item.role, content: item.content })),
+        { role: 'system', content: withContext(systemPrompt, conversation) },
         {
           role: 'user',
           content: [
@@ -2297,7 +2328,9 @@ function App({ user, onSignOut, guest = false }) {
       const registered = []
       const toolTrace = []
       let lastText = ''
-      for (let step = 0; step < 5; step += 1) {
+      // Hasta 8 pasos permiten encadenar auditoría + Excel + informe + web en
+      // un solo turno, con tool_choice "auto" en cada paso.
+      for (let step = 0; step < 8; step += 1) {
         const result = await askOpenRouterMessages({
           messages: messagesForAi,
           apiKey: directKey,
@@ -2340,13 +2373,13 @@ function App({ user, onSignOut, guest = false }) {
             const httpResponse = await fetchWithTimeout(`${aiUrl}/api/assistant`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', ...(aiToken ? { 'X-Vitimax-Token': aiToken } : {}) },
-              body: JSON.stringify({ message, products: workingProducts, attachment: fileAttachment, history: conversation, system: withMemory(systemPrompt), memories: memoriesRef.current, maxTokens })
+              body: JSON.stringify({ message, products: workingProducts, attachment: fileAttachment, history: conversation, system: withContext(systemPrompt, conversation), memories: memoriesRef.current, maxTokens })
             }, 90_000)
             const data = await httpResponse.json().catch(() => ({}))
             if (!httpResponse.ok) throw new Error(data.error || 'La IA no respondió.')
             answer = data.text
           } else {
-            const request = httpsCallable(firebaseFunctions, 'vitimaxAssistant')({ message, products: workingProducts, attachment: fileAttachment, system: withMemory(systemPrompt), memories: memoriesRef.current, maxTokens })
+            const request = httpsCallable(firebaseFunctions, 'vitimaxAssistant')({ message, products: workingProducts, attachment: fileAttachment, system: withContext(systemPrompt, conversation), memories: memoriesRef.current, maxTokens })
             const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('La IA remota tardó demasiado.')), 30_000))
             const { data } = await Promise.race([request, timeout])
             answer = data.text
