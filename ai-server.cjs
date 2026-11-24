@@ -99,7 +99,7 @@ Cuando el usuario pida un archivo o una acción, responde con un bloque \`\`\`js
 - PDF: {"accion":"crear_pdf","titulo":"...","subtitulo":"...","contenido":"# Título\\n## Sección\\n- Punto\\n\\n| Columna | Valor |\\n| --- | --- |\\n| Dato | 10 |","filename":"documento.pdf"}. Texto plano: sin LaTeX, sin "$...$", sin "~", "**" ni "#" dentro de celdas. Precios como "$15.000", dosis como "2 a 3 L/ha"; no inventes totales.
 - Word: {"accion":"crear_word","titulo":"...","subtitulo":"...","contenido":"# Título\\n## Sección\\n- Punto","filename":"documento.docx"}. Mismas reglas de texto plano y totales reales.
 - PowerPoint: {"accion":"crear_ppt","titulo":"...","subtitulo":"...","contenido":"Diapositiva 1\\n- Punto\\n---\\nDiapositiva 2\\n- Punto","filename":"presentacion.pptx"} o, si prefieres, "diapositivas":[{"titulo":"...","puntos":["..."]}]. Formato 16:9, máximo 5 viñetas y 5 filas de tabla por diapositiva, tablas con columnas Nombre, Categoría, Formato, Precio y Descripción, y cierre "Próximos Pasos" con 3 o 4 recomendaciones accionables sin repetir nombres de productos. Sin LaTeX.
-- Página web: {"accion":"crear_pagina_web","titulo":"...","subtitulo":"...","resumen":"...","html":"<!doctype html>...","filename":"pagina.html"}. HTML COMPLETO, sin truncar y sin placeholders como "<!-- Agregar más productos aquí -->": incluye todos los registros reales del catálogo. Una sola carga de Tailwind CSS (https://cdn.tailwindcss.com), iconos Lucide, hero #1E4D2B con acentos lima/dorado, búsqueda en vivo por nombre/descripción, filtros por categoría, tarjetas con precio CLP, badge de stock y botón "Cotizar por WhatsApp" funcional en cada tarjeta. Año 2026 en el pie de página. Nada de tablas HTML antiguas.
+- Página web: {"accion":"crear_pagina_web","titulo":"...","subtitulo":"...","resumen":"...","html":"<!doctype html>...","filename":"pagina.html"}. HTML COMPLETO, sin truncar y sin placeholders como "<!-- Agregar más productos aquí -->": incluye todos los registros reales del catálogo. Una sola carga de Tailwind CSS (https://cdn.tailwindcss.com), iconos Lucide, hero #1E4D2B con acentos lima/dorado, búsqueda en vivo por nombre/descripción, filtros por categoría, tarjetas con precio CLP, badge de stock y botón "Cotizar por WhatsApp" funcional en cada tarjeta. Año y fecha exactos del bloque "RELOJ Y CONTEXTO TEMPORAL EN VIVO" en el pie de página. Nada de tablas HTML antiguas.
 - Código en cualquier lenguaje: {"accion":"crear_codigo","titulo":"...","lenguaje":"python","codigo":"...","filename":"programa.py"}
 - Documento genérico: {"accion":"crear_documento","documento":{"tipo":"pdf|word|ppt","titulo":"...","contenido":"# Título\\n## Sección\\n- Punto"}}
 - Guardar productos en el catálogo: {"accion":"registrar_productos_en_app","productos":[{...}],"reemplazar":false}
@@ -115,6 +115,12 @@ MEMORIA PERSISTENTE:
 - Si dice que un dato cambió o ya no aplica, usa olvidar_memoria (con nuevo_dato para actualizarlo).
 - No guardes contraseñas, claves, tokens ni datos de tarjetas.
 - No contradigas un recuerdo vigente.
+
+TIEMPO Y CONTINUIDAD:
+- Cada solicitud incluye un bloque "### RELOJ Y CONTEXTO TEMPORAL EN VIVO" con fecha, hora, zona horaria, día, semana, trimestre y tiempo desde el último mensaje, leídos del dispositivo al enviar. Es la única referencia válida: no uses fechas memorizadas ni supongas otro año.
+- Resuelve "hoy", "mañana", "ayer", "esta semana", "próximo lunes", "fin de mes" y cualquier plazo con esa fecha y zona horaria. Para ventas o asesorías recientes, filtra con las fechas reales de los registros; si un registro no tiene fecha, dilo en vez de inventarla.
+- Fecha todos los entregables con esa fecha local en español; el pie de una web lleva el año real del reloj.
+- Si el usuario vuelve horas después o al día siguiente, retoma con naturalidad y saluda con la franja exacta (Buenos días / Buenas tardes / Buenas noches). En respuestas normales la primera oración sigue siendo la respuesta.
 
 REGLAS DE TRABAJO:
 - No uses "-" como dato. Si falta un dato, deja el campo vacío o escribe "Pendiente".
@@ -186,7 +192,14 @@ function sanitizeHistory(history) {
   return history
     .filter((item) => item && (item.role === 'user' || item.role === 'assistant') && typeof item.content === 'string' && item.content.trim())
     .slice(-maxHistoryItems)
-    .map((item) => ({ role: item.role, content: item.content.trim().slice(0, maxMessageLength) }))
+    .map((item) => {
+      const at = item.at || item.timestamp
+      return {
+        role: item.role,
+        content: item.content.trim().slice(0, maxMessageLength),
+        ...(typeof at === 'string' && at ? { at: at.slice(0, 40) } : {})
+      }
+    })
 }
 
 function sanitizeMemories(memories) {
@@ -226,6 +239,130 @@ Datos que el usuario pidió recordar entre sesiones. Úsalos de forma natural, s
 ${lines.join('\n')}`
 }
 
+// Reloj en vivo del servidor. La app envía su reloj local; si no llega, el
+// proxy usa éste para no caer en fechas fijas ni en zonas horarias supuestas.
+const TEMPORAL_MARKER = 'RELOJ Y CONTEXTO TEMPORAL EN VIVO'
+const DAY_MS = 86400000
+
+function safeDate(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value
+  if (typeof value === 'number' && Number.isFinite(value)) return new Date(value)
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = new Date(value)
+    if (!Number.isNaN(parsed.getTime())) return parsed
+  }
+  return new Date()
+}
+
+function serverTemporalContext(now = new Date()) {
+  const date = safeDate(now)
+  const locale = 'es-CL'
+  const year = date.getFullYear()
+  const monthIndex = date.getMonth()
+  const minute = String(date.getMinutes()).padStart(2, '0')
+  const second = String(date.getSeconds()).padStart(2, '0')
+  const hour = date.getHours()
+  let weekday = ''
+  let month = ''
+  try {
+    weekday = new Intl.DateTimeFormat(locale, { weekday: 'long' }).format(date)
+    month = new Intl.DateTimeFormat(locale, { month: 'long' }).format(date)
+  } catch {
+    weekday = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'][date.getDay()]
+    month = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'][monthIndex]
+  }
+  let zone = 'America/Santiago'
+  try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || zone } catch { /* valor por defecto */ }
+  const offsetMinutes = -date.getTimezoneOffset()
+  const offset = `UTC${offsetMinutes < 0 ? '-' : '+'}${Math.floor(Math.abs(offsetMinutes) / 60)}${offsetMinutes % 60 ? `:${String(Math.abs(offsetMinutes) % 60).padStart(2, '0')}` : ''}`
+  const target = new Date(Date.UTC(year, monthIndex, date.getDate()))
+  const isoDay = target.getUTCDay() || 7
+  target.setUTCDate(target.getUTCDate() + 4 - isoDay)
+  const yearStart = new Date(Date.UTC(target.getUTCFullYear(), 0, 1))
+  const week = Math.ceil(((target.getTime() - yearStart.getTime()) / DAY_MS + 1) / 7)
+  const day = date.getDate()
+  const fechaCorta = `${day} de ${month} de ${year}`
+  return {
+    epoch: date.getTime(),
+    fechaISO: `${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
+    fechaCompleta: `${weekday.charAt(0).toUpperCase()}${weekday.slice(1)}, ${fechaCorta}`,
+    diaSemana: `${weekday.charAt(0).toUpperCase()}${weekday.slice(1)}`,
+    mes: `${month.charAt(0).toUpperCase()}${month.slice(1)}`,
+    hora24: `${String(hour).padStart(2, '0')}:${minute}:${second}`,
+    hora24Short: `${String(hour).padStart(2, '0')}:${minute}`,
+    hora12: `${hour % 12 || 12}:${minute}:${second} ${hour >= 12 ? 'p. m.' : 'a. m.'}`,
+    trimestre: Math.floor(monthIndex / 3) + 1,
+    numeroSemana: week,
+    diasRestantesSemana: 7 - (date.getDay() === 0 ? 7 : date.getDay()),
+    diasRestantesMes: new Date(year, monthIndex + 1, 0).getDate() - day,
+    zonaHoraria: zone,
+    offset,
+    franja: hour >= 5 && hour < 12 ? 'Buenos días' : hour >= 12 && hour < 20 ? 'Buenas tardes' : 'Buenas noches'
+  }
+}
+
+function sanitizeTemporal(input) {
+  const fallback = serverTemporalContext()
+  if (!input || typeof input !== 'object') return fallback
+  const text = (key, max) => typeof input[key] === 'string' && input[key].trim() ? input[key].trim().slice(0, max) : fallback[key]
+  const number = (key, max) => Number.isFinite(Number(input[key])) ? Math.min(Math.max(Number(input[key]), 0), max) : fallback[key]
+  return {
+    epoch: Number.isFinite(Number(input.epoch)) ? Number(input.epoch) : fallback.epoch,
+    fechaISO: text('fechaISO', 10),
+    fechaCompleta: text('fechaCompleta', 120),
+    diaSemana: text('diaSemana', 40),
+    mes: text('mes', 40),
+    hora24: text('hora24', 12),
+    hora24Short: text('hora24Short', 8),
+    hora12: text('hora12', 32),
+    trimestre: number('trimestre', 4) || fallback.trimestre,
+    numeroSemana: number('numeroSemana', 53) || fallback.numeroSemana,
+    diasRestantesSemana: number('diasRestantesSemana', 6),
+    diasRestantesMes: number('diasRestantesMes', 31),
+    zonaHoraria: text('zonaHoraria', 80),
+    offset: text('offset', 16),
+    franja: ['Buenos días', 'Buenas tardes', 'Buenas noches'].includes(input.franja) ? input.franja : fallback.franja
+  }
+}
+
+function serverElapsed(history, reference) {
+  for (let index = (history || []).length - 1; index >= 0; index -= 1) {
+    const stamp = history[index]?.at || history[index]?.timestamp
+    if (!stamp) continue
+    const last = safeDate(stamp)
+    if (Number.isNaN(last.getTime())) continue
+    const seconds = Math.max(0, Math.floor((reference.getTime() - last.getTime()) / 1000))
+    const when = serverTemporalContext(last)
+    const stampText = `${when.fechaCompleta} a las ${when.hora24Short} (${when.zonaHoraria})`
+    let elapsed = 'menos de un minuto'
+    if (seconds >= 60 && seconds < 3600) {
+      const value = Math.floor(seconds / 60)
+      elapsed = `${value} ${value === 1 ? 'minuto' : 'minutos'}`
+    } else if (seconds >= 3600 && seconds < DAY_MS / 1000) {
+      const value = Math.floor(seconds / 3600)
+      elapsed = `${value} ${value === 1 ? 'hora' : 'horas'}`
+    } else if (seconds >= DAY_MS / 1000 && seconds < 7 * DAY_MS / 1000) {
+      const value = Math.floor(seconds / DAY_MS)
+      elapsed = `${value} ${value === 1 ? 'día' : 'días'}`
+    } else if (seconds >= 7 * DAY_MS / 1000) {
+      const value = Math.floor(seconds / (7 * DAY_MS / 1000))
+      elapsed = `${value} ${value === 1 ? 'semana' : 'semanas'}`
+    }
+    return `Última interacción registrada el ${stampText}; han pasado ${elapsed}.`
+  }
+  return ''
+}
+
+function serverTemporalBlock(input, history) {
+  const clock = sanitizeTemporal(input)
+  const elapsed = serverElapsed(history, safeDate(clock.epoch))
+  return `
+
+### ${TEMPORAL_MARKER}: Hoy es ${clock.fechaCompleta}, son las ${clock.hora24} (${clock.franja}). Semana ${clock.numeroSemana} del año. Usa esta referencia exacta para saludar acorde a la hora real, calcular plazos ("hoy", "mañana", "esta semana", "próximo lunes", "fin de mes"), filtrar ventas/asesorías recientes y fechar documentos (Excel, PDF, Word, PowerPoint y Web) sin inventar ni desfasar fechas.
+Día de la semana: ${clock.diaSemana}. Mes: ${clock.mes}. Trimestre: ${clock.trimestre}. Hora en 12 horas: ${clock.hora12}. Zona horaria: ${clock.zonaHoraria} (${clock.offset}). Faltan ${clock.diasRestantesSemana} días para terminar la semana y ${clock.diasRestantesMes} días para terminar el mes.
+${elapsed || 'Es la primera interacción de esta conversación.'}`
+}
+
 const HISTORY_MARKER = 'HISTORIAL COMPLETO DE LA CONVERSACIÓN'
 
 function conversationBlock(history) {
@@ -238,24 +375,28 @@ function conversationBlock(history) {
   for (const item of rows) {
     const speaker = item.role === 'user' ? 'USUARIO' : item.role === 'tool' ? 'HERRAMIENTA' : 'VITIMAX IA'
     const text = String(item.content).replace(/\s+/g, ' ').trim().slice(0, 4000)
-    const line = `${speaker}: ${text}`
+    const when = item.at ? serverTemporalContext(item.at) : null
+    const prefix = when ? `[${when.fechaISO} ${when.hora24Short}] ` : ''
+    const line = `${prefix}${speaker}: ${text}`
     if (total + line.length > 60_000) break
     lines.push(line)
     total += line.length + 1
   }
   if (!lines.length) return ''
+  const elapsed = serverElapsed(rows, serverTemporalContext())
   return `
 
 ### ${HISTORY_MARKER}
 Continúa esta conversación con naturalidad. Es contexto ya compartido: no lo repitas, no lo enumeres y no digas que lo estás consultando.
-${lines.join('\n')}`
+${elapsed ? `${elapsed}\n` : ''}${lines.join('\n')}`
 }
 
-// System prompt único con memoria e historial, sin duplicar bloques que la app
-// ya haya inyectado antes de enviar la solicitud.
-function buildSystemPrompt(system, memories, history) {
+// System prompt único con memoria, reloj e historial, sin duplicar bloques que
+// la app ya haya inyectado antes de enviar la solicitud.
+function buildSystemPrompt(system, memories, history, temporal) {
   const base = typeof system === 'string' && system.trim() ? system.slice(0, 100_000) : systemInstruction
   let result = base
+  if (!result.includes(TEMPORAL_MARKER)) result += serverTemporalBlock(temporal, history)
   if (!result.includes('MEMORIA PERSISTENTE')) result += memoryBlock(memories)
   if (!result.includes(HISTORY_MARKER)) result += conversationBlock(history)
   return result
@@ -295,7 +436,7 @@ function attachmentParts(attachment) {
   return parts
 }
 
-async function askOpenRouter({ catalog, message, history, attachment, signal, system, memories, maxTokens = 1500 }) {
+async function askOpenRouter({ catalog, message, history, attachment, signal, system, memories, temporal, maxTokens = 1500 }) {
   const content = []
   const attachmentItems = attachmentParts(attachment)
   const textBlocks = [`CATÁLOGO REAL DE VITIMAX:\n${catalog}`, `CONSULTA DEL USUARIO:\n${message}`]
@@ -307,7 +448,7 @@ async function askOpenRouter({ catalog, message, history, attachment, signal, sy
     if (item.kind === 'image') content.push({ type: 'image_url', image_url: { url: `data:${item.mimeType};base64,${item.data}` } })
     if (item.kind === 'file') content.push({ type: 'file', file: { filename: item.name, file_data: `data:${item.mimeType};base64,${item.data}` } })
   }
-  const fullSystem = buildSystemPrompt(system, memories, history)
+  const fullSystem = buildSystemPrompt(system, memories, history, temporal)
   const messages = [
     { role: 'system', content: fullSystem },
     ...(fullSystem.includes(HISTORY_MARKER) ? [] : history.map((item) => ({ role: item.role, content: item.content }))),
@@ -335,14 +476,14 @@ async function askOpenRouter({ catalog, message, history, attachment, signal, sy
   return { text: payload.choices?.[0]?.message?.content?.trim(), model: payload.model || model }
 }
 
-async function askGemini({ catalog, message, history, attachment, signal, system, memories, maxTokens = 1500 }) {
+async function askGemini({ catalog, message, history, attachment, signal, system, memories, temporal, maxTokens = 1500 }) {
   const parts = [{ text: `CATÁLOGO REAL DE VITIMAX:\n${catalog}\n\nCONSULTA DEL USUARIO:\n${message}` }]
   for (const item of attachmentParts(attachment)) {
     if (item.kind === 'text') parts.push({ text: item.text })
     if (item.kind === 'image') parts.push({ inline_data: { mime_type: item.mimeType, data: item.data } })
     if (item.kind === 'file') parts.push({ inline_data: { mime_type: item.mimeType, data: item.data } })
   }
-  const fullSystem = buildSystemPrompt(system, memories, history)
+  const fullSystem = buildSystemPrompt(system, memories, history, temporal)
   const contents = fullSystem.includes(HISTORY_MARKER) ? [] : history.map((item) => ({
     role: item.role === 'assistant' ? 'model' : 'user',
     parts: [{ text: item.content }]
@@ -408,7 +549,7 @@ const server = http.createServer(async (request, response) => {
 
   try {
     const body = JSON.parse(await readBody(request))
-    const { message, products = [], attachment, history = [], system, memories = [], maxTokens } = body || {}
+    const { message, products = [], attachment, history = [], system, memories = [], temporal, maxTokens } = body || {}
     if (typeof message !== 'string' || !message.trim()) {
       return sendJson(request, response, 400, { error: 'La consulta está vacía.' })
     }
@@ -435,6 +576,7 @@ const server = http.createServer(async (request, response) => {
         signal: controller.signal,
         system: typeof system === 'string' && system.trim() ? system.slice(0, 80_000) : undefined,
         memories: sanitizeMemories(memories),
+        temporal,
         maxTokens
       })
     } finally {

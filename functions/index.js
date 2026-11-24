@@ -32,11 +32,28 @@ Reglas obligatorias:
 - No uses "-" como dato: deja el campo vacío o escribe "Pendiente". Precios en CLP como números.
 - Responde en español, de forma clara, práctica y accionable.`
 
+const TEMPORAL_MARKER = 'RELOJ Y CONTEXTO TEMPORAL EN VIVO'
+
+// La app envía el system prompt ya construido con el reloj del dispositivo.
+// Este respaldo evita fechas fijas si una versión anterior del cliente no lo envía.
+function buildCloudSystem(system, temporal) {
+  if (typeof system === 'string' && system.trim() && system.includes(TEMPORAL_MARKER)) return system.slice(0, 100_000)
+  const clock = temporal && typeof temporal === 'object' ? temporal : {}
+  const when = new Date()
+  const fecha = String(clock.fechaCompleta || when.toLocaleDateString('es-CL', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })).slice(0, 120)
+  const hora = String(clock.hora24 || when.toLocaleTimeString('es-CL', { hour12: false })).slice(0, 12)
+  const zona = String(clock.zonaHoraria || 'America/Santiago').slice(0, 80)
+  const franja = ['Buenos días', 'Buenas tardes', 'Buenas noches'].includes(clock.franja) ? clock.franja : 'Buenas noches'
+  const fallback = `\n\n### ${TEMPORAL_MARKER}\nHoy es ${fecha}, son las ${hora} (${franja}). Zona horaria: ${zona}. Usa esta referencia exacta para saludar, calcular plazos y fechar entregables; no uses fechas memorizadas.`
+  const base = typeof system === 'string' && system.trim() ? system.slice(0, 100_000) : systemInstruction
+  return base.includes(TEMPORAL_MARKER) ? base : `${base}${fallback}`
+}
+
 exports.vitimaxAssistant = onCall(
   { region: vertexLocation, enforceAppCheck: false },
   async (request) => {
     if (!request.auth) throw new HttpsError('unauthenticated', 'Debes iniciar sesión para usar la IA.')
-    const { message, products = [], attachment } = request.data || {}
+    const { message, products = [], attachment, system, temporal } = request.data || {}
     if (typeof message !== 'string' || !message.trim()) {
       throw new HttpsError('invalid-argument', 'La consulta está vacía.')
     }
@@ -110,7 +127,7 @@ exports.vitimaxAssistant = onCall(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemInstruction }] },
+        systemInstruction: { parts: [{ text: buildCloudSystem(system, temporal) }] },
         contents: [{ role: 'user', parts }],
         generationConfig: { temperature: 0.2, maxOutputTokens: 1200 }
       })

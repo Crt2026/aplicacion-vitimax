@@ -24,6 +24,7 @@ import {
   parseNumberLoose,
   sanitizeText
 } from './text-utils.js'
+import { formatSpanishDate } from './temporal.js'
 
 // ---------------------------------------------------------------------------
 // Paleta corporativa VITIMAX
@@ -48,11 +49,7 @@ const rgb = (hex) => [
 ]
 
 function todayLabel() {
-  try {
-    return new Date().toLocaleDateString('es-CL', { day: 'numeric', month: 'long', year: 'numeric' })
-  } catch {
-    return new Date().toISOString().slice(0, 10)
-  }
+  return formatSpanishDate(new Date())
 }
 
 // ---------------------------------------------------------------------------
@@ -1793,7 +1790,7 @@ renderFilters();
 render();
 `
 
-export function buildModernCatalogPage({ title = 'Catálogo VITIMAX', subtitle = '', catalog = [], phone = '', isDemo = false } = {}) {
+export function buildModernCatalogPage({ title = 'Catálogo VITIMAX', subtitle = '', catalog = [], phone = '', isDemo = false, dateLabel = '' } = {}) {
   const cleanTitle = sanitizeText(title) || 'Catálogo VITIMAX'
   const cleanSubtitle = sanitizeText(subtitle) || 'Productos, precios y stock actualizados de VITIMAX.'
   const products = prepareCatalogProducts(catalog, phone)
@@ -1886,7 +1883,7 @@ ${isDemo ? '<div class="border-b border-amber-200 bg-amber-50 px-4 py-3 text-cen
 <footer class="border-t border-[#DDE7DA] bg-white">
   <div class="mx-auto flex max-w-7xl flex-col items-center justify-between gap-3 px-4 py-8 text-sm text-[#5F7969] sm:flex-row sm:px-6 lg:px-8">
     <p class="font-semibold text-[#1E4D2B]">VITIMAX · Centro de Gestión</p>
-    <p>© ${currentYear()} VITIMAX · Catálogo generado el ${escapeHtml(todayLabel())}</p>
+    <p>© ${currentYear()} VITIMAX · Catálogo generado el ${escapeHtml(dateLabel || todayLabel())}</p>
   </div>
 </footer>
 
@@ -1895,13 +1892,14 @@ ${isDemo ? '<div class="border-b border-amber-200 bg-amber-50 px-4 py-3 text-cen
 </html>`
 }
 
-function wrapModernFragment(body, title, subtitle) {
+function wrapModernFragment(body, title, subtitle, dateLabel = '') {
   return ensureModernAssets(`<!doctype html>
 <html lang="es">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="${escapeHtml(subtitle || title)}">
+${dateLabel ? `<meta name="generated-at" content="${escapeHtml(dateLabel)}">` : ''}
 <title>${escapeHtml(title)} · VITIMAX</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 ${TAILWIND_CDN}
@@ -1979,7 +1977,7 @@ function blocksToHtml(markdown) {
 
 const HTML_TAG = /<(?:!doctype|html|head|body|div|section|article|h[1-6]|p|ul|ol|li|table|thead|tbody|tr|td|th|header|main|footer|style|script|span|a|img|br|strong|em|button|form|input|label|nav)\b/i
 
-export function buildHtmlPage({ title = 'Página VITIMAX', subtitle = '', html = '', catalog = [], phone = '', isDemo = false } = {}) {
+export function buildHtmlPage({ title = 'Página VITIMAX', subtitle = '', html = '', catalog = [], phone = '', isDemo = false, dateLabel = '' } = {}) {
   const cleanTitle = plainText(title) || 'Página VITIMAX'
   const cleanSubtitle = plainText(subtitle)
   const source = stripSandboxLinks(String(html || '')).trim()
@@ -1996,9 +1994,9 @@ export function buildHtmlPage({ title = 'Página VITIMAX', subtitle = '', html =
       const fragment = /<body[\s>]/i.test(source)
         ? source.replace(/^[\s\S]*?<body[^>]*>/i, '').replace(/<\/body>[\s\S]*$/i, '')
         : source
-      return wrapModernFragment(fragment, cleanTitle, cleanSubtitle)
+      return wrapModernFragment(fragment, cleanTitle, cleanSubtitle, dateLabel)
     }
-    return buildModernCatalogPage({ title: cleanTitle, subtitle: cleanSubtitle, catalog, phone, isDemo })
+    return buildModernCatalogPage({ title: cleanTitle, subtitle: cleanSubtitle, catalog, phone, isDemo, dateLabel })
   }
 
   if (!source) throw new Error('La página HTML está vacía.')
@@ -2036,7 +2034,7 @@ export function buildHtmlPage({ title = 'Página VITIMAX', subtitle = '', html =
   <main class="vitimax-content">
 ${body}
   </main>
-  <footer class="vitimax-foot">© ${currentYear()} VITIMAX · Generado el ${escapeHtml(todayLabel())}</footer>
+  <footer class="vitimax-foot">© ${currentYear()} VITIMAX · Generado el ${escapeHtml(dateLabel || todayLabel())}</footer>
 </div>
 </body>
 </html>`

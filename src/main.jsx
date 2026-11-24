@@ -45,9 +45,14 @@ import {
   buildConversationSection,
   buildDemoProducts,
   buildMemorySection,
+  buildTemporalSection,
+  buildWelcomeMessage,
   createExcelBlob,
   extractPdfText,
   filterJunkProducts,
+  formatSpanishDate,
+  getTemporalContext,
+  isWelcomeMessage,
   fixAsesoriaRecords,
   isJunkProductName,
   mergeImportedProducts,
@@ -277,10 +282,38 @@ function normalize(value) {
 }
 
 function greetingForNow() {
-  const hour = new Date().getHours()
-  if (hour < 12) return 'Buenos días'
-  if (hour < 20) return 'Buenas tardes'
-  return 'Buenas noches'
+  return getTemporalContext().franja
+}
+
+// Reloj en vivo del dispositivo. Se reevalúa al abrir la app, al volver a
+// enfocarla y cada 15 segundos, pero solo provoca un render cuando cambia el
+// minuto, el día o la franja horaria.
+function useTemporalClock() {
+  const [clock, setClock] = useState(() => getTemporalContext())
+  useEffect(() => {
+    const refresh = () => {
+      const next = getTemporalContext()
+      setClock((current) => (
+        current.hora24.slice(0, 5) === next.hora24.slice(0, 5)
+        && current.slot === next.slot
+        && current.fechaISO === next.fechaISO
+          ? current
+          : next
+      ))
+    }
+    refresh()
+    const timer = setInterval(refresh, 15_000)
+    window.addEventListener('focus', refresh)
+    window.addEventListener('pageshow', refresh)
+    document.addEventListener('visibilitychange', refresh)
+    return () => {
+      clearInterval(timer)
+      window.removeEventListener('focus', refresh)
+      window.removeEventListener('pageshow', refresh)
+      document.removeEventListener('visibilitychange', refresh)
+    }
+  }, [])
+  return clock
 }
 
 function makeId() {
@@ -1407,7 +1440,7 @@ function AuthScreenV2({ configured, initialError = '', initialNotice = '', onAut
 
   const register = mode === 'register'
   const reset = mode === 'reset'
-  const today = new Date().toISOString().slice(0, 10)
+  const today = getTemporalContext().fechaISO
   const strength = passwordStrength(password)
   const strengthLabel = ['', 'Débil', 'Buena', 'Fuerte'][strength]
   function switchMode(next) { setMode(next); setError(''); setNotice('') }
@@ -1500,6 +1533,7 @@ function App({ user, onSignOut, guest = false }) {
   // Cada cuenta guarda su copia local con su propio uid, así al cerrar sesión
   // y entrar con otra cuenta no se mezclan el perfil ni los datos.
   const uid = user?.uid || ''
+  const temporal = useTemporalClock()
   const localKey = (base) => scopedKey(base, uid)
   const [products, setProducts] = useState(() => filterJunkProducts(readLocalJson(localKey(STORAGE_KEY), [])))
   const [profile, setProfile] = useState(() => {
@@ -1528,8 +1562,15 @@ function App({ user, onSignOut, guest = false }) {
   const [overlay, setOverlay] = useState(null)
   const [importReport, setImportReport] = useState(null)
   const [messages, setMessages] = useState(() => {
-    const saved = readLocalJson(localKey(CHAT_KEY), [{ role: 'assistant', text: `${greetingForNow()}, ${profile.name || 'administrador'}. Soy VITIMAX IA: puedo ayudarte con código, estudios, cálculos, redacción, negocios y toda la gestión de VITIMAX. También genero Excel, PDF, Word, PowerPoint y páginas web reales. ¿Qué resolvemos?` }])
-    return restoreChatMessages(saved)
+    const saved = readLocalJson(localKey(CHAT_KEY), [])
+    const restored = restoreChatMessages(saved)
+    if (restored.length) return restored
+    return [{
+      role: 'assistant',
+      text: buildWelcomeMessage(profile.name || 'administrador', getTemporalContext()),
+      welcome: true,
+      at: new Date().toISOString()
+    }]
   })
   const [memories, setMemories] = useState(() => normalizeMemories(readLocalJson(localKey(MEMORY_STORAGE_KEY), [])))
   const [cloudReady, setCloudReady] = useState(!user || !firebaseDb)
@@ -1590,6 +1631,20 @@ function App({ user, onSignOut, guest = false }) {
     if (user && firebaseDb && cloudReady) setDoc(doc(firebaseDb, 'users', user.uid), { modules: records }, { merge: true }).catch(() => setNotice('No se pudieron guardar los módulos en la nube.'))
   }, [records, user, cloudReady])
   useEffect(() => { messagesRef.current = messages }, [messages])
+  // El saludo de bienvenida se reescribe al cambiar de franja horaria o de día,
+  // sin tocar el resto de la conversación guardada.
+  useEffect(() => {
+    setMessages((items) => items.map((item, index) => (
+      index === 0 && item.role === 'assistant' && isWelcomeMessage(item)
+        ? {
+          ...item,
+          text: buildWelcomeMessage(profile.name || 'administrador', temporal),
+          at: item.at || new Date().toISOString(),
+          welcome: true
+        }
+        : item
+    )))
+  }, [temporal.slot, temporal.fechaISO, profile.name])
   useEffect(() => { memoriesRef.current = memories }, [memories])
   useEffect(() => {
     // Los archivos generados contienen Blob y no se pueden guardar en localStorage.
@@ -1657,10 +1712,25 @@ function App({ user, onSignOut, guest = false }) {
 
   function navigate(item) { setActive(item); setQuery(''); setMobileMenuOpen(false); setOverlay(null); contentRef.current?.scrollTo?.({ top: 0 }) }
   function saveModuleRecord(moduleKey, values, existing) {
+    const clock = getTemporalContext()
+    const dated = ['pedidos', 'ventas', 'asesorias', 'contenido'].includes(moduleKey)
     setRecords((current) => {
       const list = current[moduleKey] || []
-      if (existing) return { ...current, [moduleKey]: list.map((row) => row.id === existing.id ? { ...row, ...values } : row) }
-      return { ...current, [moduleKey]: [{ id: makeId(), createdAt: new Date().toISOString(), ...values }, ...list] }
+      if (existing) {
+        return {
+          ...current,
+          [moduleKey]: list.map((row) => row.id === existing.id
+            ? { ...row, ...values, fecha_actualizacion: clock.fechaCompleta }
+            : row)
+        }
+      }
+      const stamp = {
+        id: makeId(),
+        createdAt: clock.iso,
+        ...(dated ? { fecha: clock.fechaISO, fechaLocal: clock.fechaCompleta } : {}),
+        ...values
+      }
+      return { ...current, [moduleKey]: [stamp, ...list] }
     })
     setModuleModal(null)
     setNotice(existing ? 'Registro actualizado correctamente' : 'Registro guardado correctamente')
@@ -1799,18 +1869,19 @@ function App({ user, onSignOut, guest = false }) {
     const catalogSource = realProducts.length ? realProducts : buildDemoProducts()
     const isDemo = !realProducts.length
     const body = String(aiText || '').trim() || catalogMarkdown(title, catalogSource, isDemo)
+    const dateLabel = getTemporalContext().fechaCompleta
     const baseName = String(filenameOverride || '').trim()
     let filename = baseName || 'documento-vitimax'
     let saved = null
     if (type === 'pdf') {
       filename = withExtension(baseName, 'documento-vitimax', 'pdf')
-      saved = await saveBlob(buildPdfDocument({ title, subtitle, content: body, catalog: catalogSource, isDemo }), filename)
+      saved = await saveBlob(buildPdfDocument({ title, subtitle, content: body, catalog: catalogSource, isDemo, dateLabel }), filename)
     } else if (type === 'word') {
       filename = withExtension(baseName, 'documento-vitimax', 'docx')
-      saved = await saveBlob(await buildDocxDocument({ title, subtitle, content: body, catalog: catalogSource, isDemo }), filename)
+      saved = await saveBlob(await buildDocxDocument({ title, subtitle, content: body, catalog: catalogSource, isDemo, dateLabel }), filename)
     } else if (type === 'ppt') {
       filename = withExtension(baseName, 'presentacion-vitimax', 'pptx')
-      saved = await saveBlob(await buildPptxDocument({ title, subtitle, content: body, catalog: catalogSource, isDemo }), filename)
+      saved = await saveBlob(await buildPptxDocument({ title, subtitle, content: body, catalog: catalogSource, isDemo, dateLabel }), filename)
     } else if (type === 'code') {
       const extracted = aiText ? extractFencedCode(aiText) : { language: 'html', code: '' }
       const language = extracted.language || 'html'
@@ -1822,7 +1893,8 @@ function App({ user, onSignOut, guest = false }) {
           html: extracted.code || catalogMarkdown(title, catalogSource, isDemo),
           catalog: catalogSource,
           phone: profile.phone,
-          isDemo
+          isDemo,
+          dateLabel
         })
         : String(extracted.code || '').trim()
       if (!code) throw new Error('No se recibió código para guardar.')
@@ -1839,7 +1911,7 @@ function App({ user, onSignOut, guest = false }) {
     const source = String(html || '').trim()
     if (!source) throw new Error('La página HTML está vacía.')
     const title = plainText(titulo || 'Página VITIMAX') || 'Página VITIMAX'
-    const page = buildHtmlPage({ title, subtitle, html: source, catalog: filterJunkProducts(products), phone: profile.phone })
+    const page = buildHtmlPage({ title, subtitle, html: source, catalog: filterJunkProducts(products), phone: profile.phone, dateLabel: getTemporalContext().fechaCompleta })
     const slug = normalize(title).replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'pagina-vitimax'
     const base = String(filename || '').trim().replace(/\.html?$/i, '') || `pagina-${slug}`
     const name = `${base}.html`
@@ -2118,11 +2190,11 @@ function App({ user, onSignOut, guest = false }) {
     const history = messages
       .filter((item) => !item.pending && item.text !== '…' && typeof item.text === 'string' && item.text.trim())
       .flatMap((item) => {
-        const rows = [{ role: item.role === 'tool' ? 'assistant' : item.role, content: item.text }]
+        const rows = [{ role: item.role === 'tool' ? 'assistant' : item.role, content: item.text, ...(item.at ? { at: item.at } : {}) }]
         if (Array.isArray(item.tools)) {
           for (const tool of item.tools.slice(-6)) {
             const detail = typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result || {})
-            rows.push({ role: 'assistant', content: `[Herramienta ${tool.name || 'IA'}] ${detail.slice(0, 500)}` })
+            rows.push({ role: 'assistant', content: `[Herramienta ${tool.name || 'IA'}] ${detail.slice(0, 500)}`, ...(item.at ? { at: item.at } : {}) })
           }
         }
         return rows
@@ -2131,7 +2203,9 @@ function App({ user, onSignOut, guest = false }) {
     // se inyectan en el system prompt, incluido lo guardado en este mismo turno.
     const memorySection = () => buildMemorySection(memoriesRef.current)
     const conversationSection = (source = history) => buildConversationSection(source)
-    const withContext = (base, source = history) => `${base || DIRECT_AI_SYSTEM_PROMPT}${memorySection()}${conversationSection(source)}`
+    // El reloj se lee de nuevo en cada llamada (y en cada paso del agente), no
+    // una vez al abrir la app: la referencia temporal va al segundo exacto.
+    const withContext = (base, source = history) => `${base || DIRECT_AI_SYSTEM_PROMPT}${buildTemporalSection(getTemporalContext(), source)}${memorySection()}${conversationSection(source)}`
     const catalogForAi = (list = workingProducts) => JSON.stringify(list.map(({ id, name, category, price, stock, format, description, usage, recommendations, features, source }) => ({
       id, name, category, price, stock, format, description, usage, recommendations, features, source
     })))
@@ -2201,8 +2275,17 @@ function App({ user, onSignOut, guest = false }) {
       return created
     }
     const requestId = makeId()
-    setMessages((items) => [...items, { role: 'user', text: userText }, { role: 'assistant', text: 'El asistente está pensando…', requestId, pending: true }])
-    const replace = (nextText, extra = {}) => setMessages((items) => items.map((item) => item.requestId === requestId ? { ...item, text: nextText, pending: false, ...extra } : item))
+    const sentAt = new Date().toISOString()
+    setMessages((items) => [
+      ...items,
+      { role: 'user', text: userText, at: sentAt },
+      { role: 'assistant', text: 'El asistente está pensando…', requestId, pending: true, at: sentAt }
+    ])
+    const replace = (nextText, extra = {}) => setMessages((items) => items.map((item) => (
+      item.requestId === requestId
+        ? { ...item, text: nextText, pending: false, at: new Date().toISOString(), ...extra }
+        : item
+    )))
     const finish = (messageText, created = [], registered = [], tools = []) => {
       // Se adjuntan TODOS los archivos generados en el turno (por ejemplo, un
       // Excel corregido + un informe PDF), no solo el último.
@@ -2331,6 +2414,7 @@ function App({ user, onSignOut, guest = false }) {
       // Hasta 8 pasos permiten encadenar auditoría + Excel + informe + web en
       // un solo turno, con tool_choice "auto" en cada paso.
       for (let step = 0; step < 8; step += 1) {
+        messagesForAi[0] = { role: 'system', content: withContext(systemPrompt, conversation) }
         const result = await askOpenRouterMessages({
           messages: messagesForAi,
           apiKey: directKey,
@@ -2373,13 +2457,13 @@ function App({ user, onSignOut, guest = false }) {
             const httpResponse = await fetchWithTimeout(`${aiUrl}/api/assistant`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', ...(aiToken ? { 'X-Vitimax-Token': aiToken } : {}) },
-              body: JSON.stringify({ message, products: workingProducts, attachment: fileAttachment, history: conversation, system: withContext(systemPrompt, conversation), memories: memoriesRef.current, maxTokens })
+              body: JSON.stringify({ message, products: workingProducts, attachment: fileAttachment, history: conversation, temporal: getTemporalContext(), system: withContext(systemPrompt, conversation), memories: memoriesRef.current, maxTokens })
             }, 90_000)
             const data = await httpResponse.json().catch(() => ({}))
             if (!httpResponse.ok) throw new Error(data.error || 'La IA no respondió.')
             answer = data.text
           } else {
-            const request = httpsCallable(firebaseFunctions, 'vitimaxAssistant')({ message, products: workingProducts, attachment: fileAttachment, system: withContext(systemPrompt, conversation), memories: memoriesRef.current, maxTokens })
+            const request = httpsCallable(firebaseFunctions, 'vitimaxAssistant')({ message, products: workingProducts, attachment: fileAttachment, history: conversation, temporal: getTemporalContext(), system: withContext(systemPrompt, conversation), memories: memoriesRef.current, maxTokens })
             const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('La IA remota tardó demasiado.')), 30_000))
             const { data } = await Promise.race([request, timeout])
             answer = data.text
@@ -2580,7 +2664,13 @@ function App({ user, onSignOut, guest = false }) {
         .forEach((key) => localStorage.removeItem(key))
     } catch { /* sin almacenamiento */ }
     clearErrorLog()
-    setMessages([{ role: 'assistant', text: `${greetingForNow()}, ${profile.name || 'administrador'}. Reinicié la conversación para dejar el chat limpio. ¿Qué necesitas?` }])
+    const clock = getTemporalContext()
+    setMessages([{
+      role: 'assistant',
+      text: `${clock.franja}, ${profile.name || 'administrador'}. Hoy es ${clock.fechaCompleta}, son las ${clock.hora24Short} (${clock.zonaHoraria}). Reinicié la conversación para dejar el chat limpio. ¿Qué necesitas?`,
+      welcome: true,
+      at: new Date().toISOString()
+    }])
     setAssistantOpen(true)
   }
   function handleQrResult(value) {
@@ -2589,7 +2679,7 @@ function App({ user, onSignOut, guest = false }) {
     if (match) {
       setActive('Catálogo')
       setQuery(match.name)
-      setMessages((items) => [...items, { role: 'assistant', text: `Encontré ${match.name} en el catálogo. La ficha muestra únicamente la información registrada en VITIMAX.` }])
+      setMessages((items) => [...items, { role: 'assistant', text: `Encontré ${match.name} en el catálogo. La ficha muestra únicamente la información registrada en VITIMAX.`, at: new Date().toISOString() }])
       setAssistantOpen(true)
       return
     }
@@ -2626,7 +2716,7 @@ function App({ user, onSignOut, guest = false }) {
       <header className="topbar"><button className="mobile-menu" aria-label="Abrir menú" onClick={() => setMobileMenuOpen(true)}><Menu size={21} /></button><div className="crumb"><span className={`crumb-icon ${activeTone}`}><ActiveIcon size={14} /></span> VITIMAX <ChevronRight size={14} /> <b>{active}</b></div><div className="top-actions"><button className="icon-btn" title="Escanear código QR" aria-label="Escanear código QR" onClick={() => setQrOpen(true)}><QrCode size={18} /></button><button className="icon-btn" title="Notificaciones" aria-label="Notificaciones" onClick={() => setOverlay('notifications')}><Bell size={18} /><i /></button><button className="user-chip" onClick={() => setOverlay('profile')}><Avatar name={profile.name} photo={profile.photo} className="small" /><span>{profile.name || 'Administrador'}</span><ChevronRight size={15} /></button></div></header>
       <div className="content" ref={contentRef}>
         <SectionBoundary scope="contenido" resetKey={active} title="No pudimos mostrar esta sección" message="Puedes cambiar de sección o reintentar. Tu catálogo, tu perfil y tus datos siguen guardados.">
-        {active === 'Resumen' && <Dashboard products={products} lowStock={lowStock} missingData={missingData} onImport={canManage ? () => fileRef.current?.click() : undefined} onTemplate={canManage ? downloadTemplate : undefined} onNavigate={navigate} records={records} />}
+        {active === 'Resumen' && <Dashboard products={products} lowStock={lowStock} missingData={missingData} onImport={canManage ? () => fileRef.current?.click() : undefined} onTemplate={canManage ? downloadTemplate : undefined} onNavigate={navigate} records={records} temporal={temporal} />}
         {active === 'Informe' && <ApplicationReport products={products} lowStock={lowStock} missingData={missingData} guest={guest} />}
         {active === 'Catálogo' && <Catalog products={filtered} allProducts={products} categories={categories} query={query} setQuery={setQuery} category={category} setCategory={setCategory} onImport={canManage ? () => fileRef.current?.click() : undefined} onExport={canManage ? exportProducts : undefined} onTemplate={canManage ? downloadTemplate : undefined} onCreate={canManage ? () => { setEditing(null); setShowProduct(true) } : undefined} onEdit={canManage ? (p) => { setEditing(p); setShowProduct(true) } : undefined} onDelete={canManage ? (id) => setProducts((all) => all.filter((p) => p.id !== id)) : undefined} readOnly={guest} />}
         {active === 'Inventario' && <Inventory products={products} lowStock={lowStock} onImport={canManage ? () => fileRef.current?.click() : undefined} readOnly={guest} />}
@@ -2651,7 +2741,7 @@ function App({ user, onSignOut, guest = false }) {
       {assistantOpen ? <X size={22} /> : <><img className="assistant-bot-image" src="/bot-vitimax.png" alt="" /><span>BOT IA VITIMAX</span></>}
     </button>
     {assistantOpen && <SectionBoundary scope="asistente" resetKey={assistantOpen} compact title="El chat tuvo un problema" message="Tu catálogo, tu perfil y tus conversaciones están guardados. Reintenta o limpia la conversación; el resto de la app sigue funcionando." onReset={resetAssistantChat} resetLabel="Limpiar conversación">
-      <Assistant messages={messages} onClose={() => setAssistantOpen(false)} onAsk={askAssistant} onDownload={downloadMessageFile} onOpen={openMessageFile} aiReady={Boolean(resolveAiUrl(settings) || resolveDirectKey(settings) || (firebaseFunctions && import.meta.env.VITE_ENABLE_CLOUD_ASSISTANT === 'true' && !guest))} memories={memories} onSaveMemory={saveMemory} onDeleteMemory={(id) => forgetMemory(id)} onClearMemories={clearMemories} />
+      <Assistant messages={messages} onClose={() => setAssistantOpen(false)} onAsk={askAssistant} onDownload={downloadMessageFile} onOpen={openMessageFile} aiReady={Boolean(resolveAiUrl(settings) || resolveDirectKey(settings) || (firebaseFunctions && import.meta.env.VITE_ENABLE_CLOUD_ASSISTANT === 'true' && !guest))} memories={memories} onSaveMemory={saveMemory} onDeleteMemory={(id) => forgetMemory(id)} onClearMemories={clearMemories} temporal={temporal} />
     </SectionBoundary>}
     {qrOpen && <QrScanner onClose={() => setQrOpen(false)} onResult={handleQrResult} />}
     {moduleModal && canManage && <ModuleFormModal config={MODULE_CONFIG[moduleModal.module]} record={moduleModal.record} onClose={() => setModuleModal(null)} onSave={(values) => saveModuleRecord(MODULE_CONFIG[moduleModal.module].key, values, moduleModal.record)} />}
@@ -2659,7 +2749,7 @@ function App({ user, onSignOut, guest = false }) {
   </div>
 }
 
-function Dashboard({ products, lowStock, missingData, onImport, onTemplate, onNavigate, records = EMPTY_MODULES }) {
+function Dashboard({ products, lowStock, missingData, onImport, onTemplate, onNavigate, records = EMPTY_MODULES, temporal = getTemporalContext() }) {
   const readOnly = !onImport
   const totalStock = products.reduce((sum, p) => sum + (Number(p.stock) || 0), 0)
   const categories = new Set(products.map((p) => p.category).filter(Boolean))
@@ -2680,7 +2770,13 @@ function Dashboard({ products, lowStock, missingData, onImport, onTemplate, onNa
     { label: 'Contenido', icon: Sparkles, tone: 'violet', text: 'Páginas y promociones', count: (records.contenido || []).length, unit: 'contenidos' }
   ]
   return <>
-    <SectionHeader icon={LayoutDashboard} tone="lime" eyebrow="CENTRO DIGITAL · 01" title={readOnly ? 'Bienvenido a VITIMAX' : 'Buenos días, administrador'} aside={<span className="heading-spark"><Sparkles size={20} /></span>} description={readOnly ? 'Consulta el catálogo y la información disponible.' : 'Aquí tienes una vista general de la operación de VITIMAX.'} actions={!readOnly && <><button className="btn secondary" onClick={onTemplate}><FileSpreadsheet size={16} /> Plantilla Excel</button><button className="btn primary" onClick={onImport}><Upload size={16} /> Importar productos</button></>} />
+    <SectionHeader icon={LayoutDashboard} tone="lime" eyebrow={`CENTRO DIGITAL · 01 · ${temporal.fechaISO}`} title={`${temporal.franja}, ${readOnly ? 'invitado' : 'administrador'}`} aside={<span className="heading-spark"><Sparkles size={20} /></span>} description={`${temporal.fechaCompleta} · ${temporal.hora24Short} (${temporal.zonaHoraria}, ${temporal.offset}) · Semana ${temporal.numeroSemana} del año`} actions={!readOnly && <><button className="btn secondary" onClick={onTemplate}><FileSpreadsheet size={16} /> Plantilla Excel</button><button className="btn primary" onClick={onImport}><Upload size={16} /> Importar productos</button></>} />
+    <div className="temporal-bar" role="status" aria-live="polite">
+      <span className="temporal-item"><Clock size={14} /><strong>{temporal.franja}</strong> · {temporal.hora24}</span>
+      <span className="temporal-item"><CalendarDays size={14} />{temporal.fechaCompleta}</span>
+      <span className="temporal-item">{temporal.diaSemana} · Mes {temporal.mes} · Trimestre {temporal.trimestre} · Semana {temporal.numeroSemana}</span>
+      <span className="temporal-item">{temporal.diasRestantesSemana} días para terminar la semana · {temporal.diasRestantesMes} días para terminar el mes · {temporal.zonaHoraria} ({temporal.offset})</span>
+    </div>
     <section className="hero-card hero-v2">
       <div className="hero-copy">
         <span className="pill light"><Zap size={13} /> {readOnly ? 'Modo invitado' : 'Centro de trabajo activo'}</span>
@@ -2770,7 +2866,7 @@ function ApplicationReport({ products, lowStock, missingData, guest }) {
       line('Datos pendientes', missingData.length)
       line('Imagenes cargadas', withImages)
       line('Modo de acceso', guest ? 'Invitado (solo lectura)' : 'Administrador')
-      line('Generado', new Date().toLocaleString('es-AR'))
+      line('Generado', `${formatSpanishDate(new Date())} · ${getTemporalContext().hora24}`)
       if (categoryRows.length) {
         y += 6
         pdf.setFontSize(13)
@@ -3185,7 +3281,8 @@ function SettingsModal({ settings, onClose, onSave }) {
   async function testSave() {
     setSaveTest({ state: 'loading', message: 'Guardando archivo de prueba…' })
     try {
-      const saved = await saveBlob(new Blob([`Prueba de guardado VITIMAX\nFecha: ${new Date().toLocaleString('es-AR')}\nSi ves este archivo, la descarga funciona de verdad.\n`], { type: 'text/plain;charset=utf-8' }), 'prueba-vitimax.txt')
+      const clock = getTemporalContext()
+      const saved = await saveBlob(new Blob([`Prueba de guardado VITIMAX\nFecha: ${clock.fechaCompleta} · ${clock.hora24} (${clock.zonaHoraria})\nSi ves este archivo, la descarga funciona de verdad.\n`], { type: 'text/plain;charset=utf-8' }), 'prueba-vitimax.txt')
       setSaveTest({ state: 'ok', message: `Archivo guardado en: ${saved.location || saved.filename}` })
     } catch (error) {
       setSaveTest({ state: 'error', message: error?.message || 'No se pudo guardar el archivo de prueba. Revisa el permiso de almacenamiento.' })
@@ -3554,7 +3651,7 @@ function AssistantIcon() {
   return <span className="assistant-logo" aria-hidden="true"><svg viewBox="0 0 32 32" role="img"><path className="assistant-antenna" d="M16 5V2m0 0-2 2m2-2 2 2" /><rect x="5" y="7" width="22" height="18" rx="6" /><path d="M10 15h.01M22 15h.01M11 20c3 2 7 2 10 0" /><path className="assistant-ear" d="M5 14H2m25 0h3" /></svg><b>IA</b></span>
 }
 
-function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memories = [], onSaveMemory, onDeleteMemory, onClearMemories }) {
+function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memories = [], onSaveMemory, onDeleteMemory, onClearMemories, temporal = getTemporalContext() }) {
   const [text, setText] = useState('')
   const [attachment, setAttachment] = useState(null)
   const [attachError, setAttachError] = useState('')
@@ -3646,7 +3743,7 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
     <div className="assistant-head">
       <div className="assistant-title">
         <div className="bot-avatar"><img className="assistant-bot-image panel-bot-image" src="/bot-vitimax.png" alt="Robot BOT IA VITIMAX" /></div>
-        <div><strong>BOT IA VITIMAX</strong><span>{aiReady ? 'IA conectada · Catálogo · Archivos · Memoria' : 'IA no configurada · respuestas locales'}</span></div>
+        <div><strong>BOT IA VITIMAX</strong><span>{temporal.fechaCorta} · {temporal.hora24Short} · {temporal.franja} · {temporal.zonaHoraria}</span><span>{aiReady ? 'IA conectada · Catálogo · Archivos · Memoria' : 'IA no configurada · respuestas locales'}</span></div>
       </div>
       <div className="assistant-head-actions">
         <button type="button" className={`assistant-memory-btn${memoryOpen ? ' active' : ''}`} onClick={() => setMemoryOpen((current) => !current)} aria-expanded={memoryOpen} title="Ver lo que la IA recuerda">
@@ -3799,7 +3896,7 @@ class AppErrorBoundary extends React.Component {
   async copyDetail() {
     const error = this.state.error
     const detail = [
-      `VITIMAX · ${new Date().toISOString()}`,
+      `VITIMAX · ${formatSpanishDate(new Date())} · ${getTemporalContext().hora24}`,
       `Error: ${error?.message || error || 'desconocido'}`,
       error?.stack || ''
     ].join('\n')

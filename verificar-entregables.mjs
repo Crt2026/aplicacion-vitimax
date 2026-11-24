@@ -8,6 +8,10 @@ import {
   createExcelBlob,
   filterJunkProducts,
   isJunkProductName,
+  buildTemporalSection,
+  formatElapsedSince,
+  formatSpanishDate,
+  getTemporalContext,
   mergeWorkbookSheets,
   normalizeImportedRecords
 } from './src/ai-data.js'
@@ -80,6 +84,40 @@ const fenced = extractFencedCode('```js\nconsole.log(1)\n```\n```js\n' + 'x'.rep
 assert.equal(fenced.code.length, 500, 'Se conserva el bloque de código completo más largo')
 console.log('Memoria + historial en system prompt · código completo: OK')
 
+// Reloj en vivo: franjas exactas, fecha local, semana, zona y elapsed time.
+const morning = getTemporalContext(new Date(2026, 10, 23, 5, 0, 0))
+const afternoon = getTemporalContext(new Date(2026, 10, 23, 12, 0, 0))
+const night = getTemporalContext(new Date(2026, 10, 23, 20, 0, 0))
+const midnight = getTemporalContext(new Date(2026, 10, 23, 0, 0, 0))
+assert.equal(morning.franja, 'Buenos días')
+assert.equal(afternoon.franja, 'Buenas tardes')
+assert.equal(night.franja, 'Buenas noches')
+assert.equal(midnight.franja, 'Buenas noches')
+assert.equal(morning.hora24, '05:00:00')
+assert.equal(afternoon.hora24, '12:00:00')
+assert.equal(night.hora24, '20:00:00')
+assert.equal(morning.fechaCompleta, 'Lunes, 23 de noviembre de 2026')
+assert.equal(morning.numeroSemana, 48)
+assert.equal(morning.diaSemana, 'Lunes')
+assert.ok(morning.zonaHoraria && /^UTC[+-]\d/.test(morning.offset), 'Falta la zona horaria local')
+assert.match(morning.hora12, /a\. m\.|p\. m\./)
+const temporalSection = buildTemporalSection(morning, [])
+assert.match(temporalSection, /### RELOJ Y CONTEXTO TEMPORAL EN VIVO: Hoy es/)
+assert.match(temporalSection, /Hoy es Lunes, 23 de noviembre de 2026, son las 05:00:00 \(Buenos días\)/)
+assert.match(temporalSection, /Semana 48 del año/)
+assert.match(temporalSection, /Es la primera interacción de esta conversación\./)
+const elapsedNow = new Date(2026, 10, 23, 12, 0, 0)
+const elapsed = formatElapsedSince(new Date(2026, 10, 23, 10, 0, 0).toISOString(), elapsedNow)
+assert.match(elapsed, /han pasado 2 horas\./)
+assert.match(buildTemporalSection(afternoon, [{ role: 'user', content: 'Hola', at: new Date(2026, 10, 23, 10, 0, 0).toISOString() }]), /han pasado 2 horas\./)
+assert.match(buildConversationSection([{ role: 'user', content: 'Hola', at: new Date(2026, 10, 23, 10, 0, 0).toISOString() }]), /\[2026-11-23 10:00\] USUARIO: Hola/)
+assert.match(formatSpanishDate(new Date(2026, 10, 23, 12, 0, 0)), /23 de noviembre de 2026/)
+assert.ok(mainCode.includes('buildTemporalSection(getTemporalContext(), source)'), 'El reloj no se inyecta en cada llamada IA')
+assert.ok(mainCode.includes('temporal: getTemporalContext()'), 'El proxy no recibe el reloj del dispositivo')
+assert.ok(serverCode.includes('serverTemporalBlock('), 'El proxy no construye el bloque temporal')
+assert.ok(serverCode.includes('TEMPORAL_MARKER'), 'El proxy no evita duplicar el bloque temporal')
+console.log('Reloj local: 4 franjas, semana 48, zona horaria y elapsed time: OK')
+
 // Excel multi-hoja con KPIs y fórmulas reales.
 const sheets = mergeWorkbookSheets([], products, {}, { allowDemo: true })
 const excelBlob = await createExcelBlob(sheets, { products })
@@ -88,7 +126,7 @@ console.log(`Excel: ${excelBytes} bytes · ${sheets.length} hojas`)
 
 // PDF con contenido sucio para verificar limpieza.
 const dirty = '# Informe VITIMAX\n\n## Dosis\n$50kg/ha$ y **negrita** con # raw\n\n| Producto | Precio |\n| --- | --- |\n| Ejemplo | $15.000 |'
-const pdf = buildPdfDocument({ title: 'Informe ejecutivo', subtitle: 'Datos reales', content: dirty, catalog: products, isDemo: false })
+const pdf = buildPdfDocument({ title: 'Informe ejecutivo', subtitle: 'Datos reales', content: dirty, catalog: products, isDemo: false, dateLabel: 'Lunes, 23 de noviembre de 2026' })
 const pdfBytes = typeof pdf?.output === 'function'
   ? Buffer.from(await pdf.output('arraybuffer'))
   : Buffer.from(await pdf.arrayBuffer())
@@ -106,13 +144,14 @@ const pptBytes = await saveBlob(pptBlob, '04-presentacion.pptx')
 console.log(`PowerPoint: ${pptBytes} bytes`)
 
 // Página web completa.
-const html = buildHtmlPage({ title: 'Catálogo VITIMAX', subtitle: 'Soluciones agrícolas', html: '', catalog: products, phone: '+56912345678', isDemo: false })
+const html = buildHtmlPage({ title: 'Catálogo VITIMAX', subtitle: 'Soluciones agrícolas', html: '', catalog: products, phone: '+56912345678', isDemo: false, dateLabel: 'Lunes, 23 de noviembre de 2026' })
 fs.writeFileSync(path.join(out, '05-catalogo.html'), html)
 assert.equal((html.match(/cdn\.tailwindcss\.com/g) || []).length, 1, 'Una sola carga de Tailwind')
 for (const product of products) {
   assert.ok(html.includes(product.name), `Falta el producto ${product.name} en la web`)
 }
 assert.match(html, /Cotizar por WhatsApp|wa\.me/i, 'Falta el botón de WhatsApp')
+assert.ok(html.includes('Lunes, 23 de noviembre de 2026'), 'La web no usa la fecha sincronizada')
 console.log(`Web: ${html.length} bytes · 10/10 productos · Tailwind único · WhatsApp OK`)
 
 console.log('Todos los entregables se generaron sin errores.')

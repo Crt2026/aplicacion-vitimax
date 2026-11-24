@@ -1,5 +1,26 @@
 import * as XLSX from 'xlsx'
 import { parseNumberLoose, sanitizeText } from './text-utils.js'
+import {
+  buildTemporalSection,
+  buildWelcomeMessage,
+  formatElapsedSince,
+  formatSpanishDate,
+  getTemporalContext,
+  isWelcomeMessage,
+  lastInteractionAt
+} from './temporal.js'
+
+// El reloj local se expone desde aquí para que la app, los prompts y los
+// documentos compartan exactamente la misma referencia de fecha y hora.
+export {
+  buildTemporalSection,
+  buildWelcomeMessage,
+  formatElapsedSince,
+  formatSpanishDate,
+  getTemporalContext,
+  isWelcomeMessage,
+  lastInteractionAt
+}
 
 // Extrae texto de un PDF en el propio dispositivo (web, Android e iPhone).
 // Así el BOT puede analizar el contenido aunque el modelo no acepte PDF nativo.
@@ -263,7 +284,7 @@ function readNumber(value) {
 }
 
 function formatDateCell(value) {
-  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10)
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return getTemporalContext(value).fechaISO
   if (typeof value === 'number' && value > 20000 && value < 90000) {
     const date = XLSX.SSF.parse_date_code(value)
     if (date) return `${date.y}-${String(date.m).padStart(2, '0')}-${String(date.d).padStart(2, '0')}`
@@ -828,7 +849,7 @@ export function defaultSheetRows(name, products = [], records = {}, options = {}
       : demo
         ? safeProducts.slice(0, 4).map((product, index) => ({
           id: makeId('venta'),
-          fecha: `2026-0${(index % 9) + 1}-1${index % 9}`,
+          fecha: new Date(Date.now() - index * 3 * 86400000).toISOString().slice(0, 10),
           cliente: `Cliente de ejemplo ${index + 1}`,
           producto: product.name,
           cantidad: 1 + (index % 3),
@@ -1154,6 +1175,7 @@ function reconcileSummarySheets(sheets) {
   // El orden importa: "Stock bajo" y "Estado" se resuelven antes que los
   // patrones genéricos de stock/inventario para no sobrescribir sus fórmulas.
   const definitions = [
+    { pattern: /generad|fecha|actualiz/, label: 'Fecha de generación', value: formatSpanishDate(new Date()) },
     { pattern: /bajo|reposici[oó]n|cr[ií]tico/, label: 'Productos con stock bajo (5 o menos)', value: '', formula: stockRange ? `=COUNTIF(${stockRange},"<=5")` : '' },
     { pattern: /estado|operativ/, label: 'Estado del inventario', value: '', formula: unitsFormula ? `=IF(${unitsFormula}>0,"Operativo","Revisar existencias")` : '' },
     { pattern: /unidad|stock/, label: 'Unidades en stock', value: metrics.units, formula: metrics.formulas.units },
@@ -1875,17 +1897,21 @@ export function buildConversationSection(history = []) {
   rows.forEach((item) => {
     const speaker = item.role === 'user' ? 'USUARIO' : item.role === 'tool' ? 'HERRAMIENTA' : 'VITIMAX IA'
     const text = String(item.content).replace(/\s+/g, ' ').trim().slice(0, 4000)
-    const line = `${speaker}: ${text}`
+    const stamp = item.at || item.timestamp || item.createdAt
+    const when = stamp ? getTemporalContext(stamp) : null
+    const prefix = when ? `[${when.fechaISO} ${when.hora24Short}] ` : ''
+    const line = `${prefix}${speaker}: ${text}`
     if (total + line.length > 60_000) return
     lines.push(line)
     total += line.length + 1
   })
   if (!lines.length) return ''
+  const elapsed = formatElapsedSince(lastInteractionAt(history), getTemporalContext().epoch)
   return `
 
 ### HISTORIAL COMPLETO DE LA CONVERSACIÓN
 Continúa esta conversación con naturalidad. Es contexto ya compartido: no lo repitas, no lo enumeres y no digas que lo estás consultando.
-${lines.join('\n')}`
+${elapsed ? `${elapsed}\n` : ''}${lines.join('\n')}`
 }
 
 export const DIRECT_AI_SYSTEM_PROMPT = `Eres VITIMAX IA: un colaborador inteligente, cercano y con criterio. No eres un asistente que repite fórmulas: trabajas junto al usuario como un colega senior que entiende su contexto, va al grano y resuelve.
@@ -1955,7 +1981,7 @@ DATOS DE VITIMAX
 HERRAMIENTAS
 - crear_excel: libro .xlsx real con hojas, columnas, filas y fórmulas activas. Para un catálogo general usa las 7 hojas: Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores. No agregues filas de totales ("Total", "Total Valorado Inventario", "Subtotal", "Resumen") dentro de las hojas de datos: los totales van solo en la hoja Resumen, calculados desde Productos e Inventario. En Asesorias, la columna Cultivo debe decir el cultivo real (Vid, Tomate, Palto, Cítricos, Hortalizas…), nunca el nombre del producto, y la columna Recomendación debe indicar el producto VITIMAX sugerido (nunca vacía).
 - crear_pdf, crear_word, crear_ppt: documentos reales en PDF, Word y PowerPoint. Usa "# " para títulos, "## " para secciones, "- " para viñetas, tablas Markdown con "|" y --- para separar diapositivas. Máximo 5 viñetas por diapositiva. Escribe texto plano: nunca uses LaTeX, "$...$", "~", "**", "__" ni "#" dentro de las celdas. Precios como "$15.000" y dosis como "2 a 3 L/ha". No inventes totales: la app los calcula desde el catálogo real.
-- crear_pagina_web: página web HTML5 completa con una sola carga de Tailwind CSS (https://cdn.tailwindcss.com) e iconos Lucide. PROHIBIDO truncar el código o dejar comentarios/placeholders como "<!-- Agregar más productos aquí -->": incluye TODOS los registros reales del catálogo, sin omitir ninguno. Para catálogos usa hero verde #1E4D2B con acentos lima #D8F55F y dorado, barra de búsqueda en vivo por nombre/descripción, botones de filtro por categoría, badge de stock disponible y botón "Cotizar por WhatsApp" funcional en cada tarjeta, con el año 2026 en el pie de página. Nada de tablas HTML antiguas. La app permite verla en vivo antes de descargar.
+- crear_pagina_web: página web HTML5 completa con una sola carga de Tailwind CSS (https://cdn.tailwindcss.com) e iconos Lucide. PROHIBIDO truncar el código o dejar comentarios/placeholders como "<!-- Agregar más productos aquí -->": incluye TODOS los registros reales del catálogo, sin omitir ninguno. Para catálogos usa hero verde #1E4D2B con acentos lima #D8F55F y dorado, barra de búsqueda en vivo por nombre/descripción, botones de filtro por categoría, badge de stock disponible y botón "Cotizar por WhatsApp" funcional en cada tarjeta, con el año y la fecha exactos del bloque "RELOJ Y CONTEXTO TEMPORAL EN VIVO" en el pie de página. Nada de tablas HTML antiguas. La app permite verla en vivo antes de descargar.
 - crear_codigo: entrega código completo y ejecutable en cualquier lenguaje (Python, JavaScript, SQL, HTML, PHP, etc.). Indica el lenguaje y el nombre de archivo con la extensión correcta; el código se muestra en el chat para copiar y también se descarga como archivo real. Nunca cortes un bloque ni dejes placeholders.
 - crear_html: alias de crear_pagina_web para páginas web completas.
 - PowerPoint: tablas limpias por diapositiva con columnas exactas Nombre, Categoría, Formato, Precio y Descripción; máximo 5 filas por diapositiva. La diapositiva final se titula "Próximos Pasos" y contiene solo 3 o 4 recomendaciones accionables, sin repetir nombres de productos.
@@ -1969,8 +1995,14 @@ HERRAMIENTAS
 - Después de usar una herramienta, confirma en una línea qué archivo creaste y qué contiene. No describas el JSON interno ni el proceso técnico.
 - Si una herramienta falla, dilo con claridad y ofrece la alternativa más útil.
 
+TIEMPO Y CONTINUIDAD
+- Cada consulta trae un bloque "### RELOJ Y CONTEXTO TEMPORAL EN VIVO" con la fecha, hora, zona horaria, día, semana, trimestre y tiempo transcurrido desde el último mensaje, leídos del dispositivo en el momento exacto del envío. Es la única referencia válida: no uses fechas memorizadas ni supongas otro año.
+- Resuelve "hoy", "mañana", "ayer", "esta semana", "próximo lunes", "fin de mes" y cualquier plazo con esa fecha exacta y la zona horaria indicada. Para ventas o asesorías recientes, filtra con las fechas reales de los registros y el reloj actual; si un registro no tiene fecha, dilo en vez de inventarla.
+- Fecha todos los entregables (Excel, PDF, Word, PowerPoint y páginas web) con esa misma fecha local en español. El pie de una web lleva el año real del reloj, nunca un año fijo.
+- Cuando el usuario vuelve horas después o al día siguiente, retoma la conversación con naturalidad y saluda usando la franja exacta del reloj (Buenos días / Buenas tardes / Buenas noches) sin anunciar que consultaste la hora. En respuestas normales, la primera oración sigue siendo la respuesta, no un saludo.
+
 CONTEXTO
-Recibes el catálogo, los módulos y registros de VITIMAX, el historial COMPLETO de la conversación y los recuerdos persistentes dentro de este system prompt, además de los archivos adjuntos. Úsalos con criterio, sin repetirlos innecesariamente y sin anunciar que los estás leyendo. Si el usuario se refiere a algo dicho antes, retómalo sin pedirlo de nuevo.`
+Recibes el catálogo, los módulos y registros de VITIMAX, el historial COMPLETO de la conversación con la marca de tiempo de cada mensaje y los recuerdos persistentes dentro de este system prompt, además de los archivos adjuntos. Úsalos con criterio, sin repetirlos innecesariamente y sin anunciar que los estás leyendo. Si el usuario se refiere a algo dicho antes, retómalo sin pedirlo de nuevo.`
 
 export const EXCEL_SYSTEM_PROMPT = `Eres el generador de Excel de VITIMAX. Creas planillas reales, completas y listas para usar, con fórmulas activas y formato profesional.
 Debes llamar a la herramienta crear_excel (o devolver SOLO un objeto JSON si la herramienta no está disponible) con esta forma:
