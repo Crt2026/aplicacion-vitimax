@@ -904,7 +904,6 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 .temporal-item svg{flex:0 0 auto;color:#2f8058}
 .temporal-item strong{color:#1e4d2b;font-weight:800}
 .temporal-clock{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
-.assistant-head .assistant-clock{display:inline}
 @media(max-width:650px){.temporal-bar{gap:6px 12px;padding:9px 11px;font-size:10px}}
 /* Cabecera del chat: el título cede espacio y "Memoria" nunca se recorta. */
 .assistant-head{gap:8px}
@@ -912,7 +911,6 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 .assistant-head .assistant-title>div:last-child{min-width:0}
 .assistant-head .assistant-title>div:last-child>span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .assistant-head .assistant-title .assistant-subline>span{display:inline;margin-top:0}
-@media(max-width:650px){.assistant-head .assistant-tz{display:none}}
 
 /* Sugerencias rápidas: deslizamiento táctil sin barra de scroll visible. */
 .quick-prompts{scrollbar-width:none;-ms-overflow-style:none;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}

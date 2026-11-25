@@ -3102,7 +3102,7 @@ function App({ user, onSignOut, guest = false, oauthRefresh = 0, onConnectOAuth 
       {assistantOpen ? <X size={22} /> : <><img className="assistant-bot-image" src="/bot-vitimax.png" alt="" /><span>BOT IA VITIMAX</span></>}
     </button>
     {assistantOpen && <SectionBoundary scope="asistente" resetKey={assistantOpen} compact title="El chat tuvo un problema" message="Tu catálogo, tu perfil y tus conversaciones están guardados. Reintenta o limpia la conversación; el resto de la app sigue funcionando." onReset={resetAssistantChat} resetLabel="Limpiar conversación">
-      <Assistant messages={messages} onClose={() => setAssistantOpen(false)} onAsk={askAssistant} onDownload={downloadMessageFile} onOpen={openMessageFile} aiReady={Boolean(resolveAiUrl(settings) || resolveDirectKey(settings) || (firebaseFunctions && import.meta.env.VITE_ENABLE_CLOUD_ASSISTANT === 'true' && !guest))} memories={memories} onSaveMemory={saveMemory} onDeleteMemory={(id) => forgetMemory(id)} onClearMemories={clearMemories} temporal={temporal} oauthStatus={oauthStatus} onConnectOAuth={connectMailPermissions} connectingOAuth={connectingOAuth} pendingEmail={pendingEmail} onApproveEmail={approvePendingEmail} onCancelEmail={cancelPendingEmail} />
+      <Assistant messages={messages} onClose={() => setAssistantOpen(false)} onAsk={askAssistant} onDownload={downloadMessageFile} onOpen={openMessageFile} aiReady={Boolean(resolveAiUrl(settings) || resolveDirectKey(settings) || (firebaseFunctions && import.meta.env.VITE_ENABLE_CLOUD_ASSISTANT === 'true' && !guest))} memories={memories} onSaveMemory={saveMemory} onDeleteMemory={(id) => forgetMemory(id)} onClearMemories={clearMemories} pendingEmail={pendingEmail} onApproveEmail={approvePendingEmail} onCancelEmail={cancelPendingEmail} />
     </SectionBoundary>}
     {qrOpen && <QrScanner onClose={() => setQrOpen(false)} onResult={handleQrResult} />}
     {moduleModal && canManage && <ModuleFormModal config={MODULE_CONFIG[moduleModal.module]} record={moduleModal.record} onClose={() => setModuleModal(null)} onSave={(values) => saveModuleRecord(MODULE_CONFIG[moduleModal.module].key, values, moduleModal.record)} />}
@@ -4053,7 +4053,7 @@ function AssistantIcon() {
   return <span className="assistant-logo" aria-hidden="true"><svg viewBox="0 0 32 32" role="img"><path className="assistant-antenna" d="M16 5V2m0 0-2 2m2-2 2 2" /><rect x="5" y="7" width="22" height="18" rx="6" /><path d="M10 15h.01M22 15h.01M11 20c3 2 7 2 10 0" /><path className="assistant-ear" d="M5 14H2m25 0h3" /></svg><b>IA</b></span>
 }
 
-function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memories = [], onSaveMemory, onDeleteMemory, onClearMemories, temporal, oauthStatus, onConnectOAuth, connectingOAuth = '', pendingEmail = null, onApproveEmail, onCancelEmail }) {
+function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memories = [], onSaveMemory, onDeleteMemory, onClearMemories, pendingEmail = null, onApproveEmail, onCancelEmail }) {
   const [text, setText] = useState('')
   const [attachment, setAttachment] = useState(null)
   const [attachError, setAttachError] = useState('')
@@ -4140,18 +4140,11 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
   const messageList = Array.isArray(messages) ? messages : []
   const busy = messageList.some((m) => m.pending)
   const sizeKb = attachment ? Math.max(1, Math.ceil(attachment.size / 1024)) : 0
-  const shortMonths = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']
-  const shortDate = `${temporal.dia} ${shortMonths[temporal.mesNumero - 1]} ${temporal.anio}`
-  const connectionRows = oauthStatus?.rows || [
-    { providerId: 'google.com', label: 'Gmail', connected: false, expired: false },
-    { providerId: 'microsoft.com', label: 'Office 365', connected: false, expired: false }
-  ]
-
   return <div className="assistant-panel">
     <div className="assistant-head">
       <div className="assistant-title">
         <div className="bot-avatar"><img className="assistant-bot-image panel-bot-image" src="/bot-vitimax.png" alt="Robot BOT IA VITIMAX" /></div>
-        <div><strong>BOT IA VITIMAX</strong><span className="assistant-subline">{shortDate} · <span className="temporal-clock assistant-clock">{temporal.hora24}</span> · {temporal.franja}<span className="assistant-tz"> · {temporal.zonaHoraria}</span></span><span className="assistant-subline">{aiReady ? 'IA conectada · Archivos · Memoria' : 'IA local sin conexión'}</span></div>
+        <div><strong>BOT IA VITIMAX</strong><span className="assistant-subline">{aiReady ? 'IA conectada · Archivos · Memoria' : 'IA local sin conexión'}</span></div>
       </div>
       <div className="assistant-head-actions">
         <button type="button" className={`assistant-memory-btn${memoryOpen ? ' active' : ''}`} onClick={() => setMemoryOpen((current) => !current)} aria-expanded={memoryOpen} title="Ver lo que la IA recuerda">
@@ -4159,17 +4152,6 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
         </button>
         <button className="icon-btn" aria-label="Cerrar asistente" onClick={onClose}><X size={18} /></button>
       </div>
-    </div>
-    <div className="assistant-oauth">
-      <div className="assistant-oauth-status">
-        {connectionRows.map((row) => <span key={row.providerId} className={row.connected ? 'connected' : row.expired ? 'expired' : ''}>
-          {row.connected ? <Check size={11} /> : <Mail size={11} />}
-          {row.connected ? row.shortLabel : row.expired ? `${row.label} · permiso vencido` : `${row.label} sin conectar`}
-        </span>)}
-      </div>
-      <button type="button" onClick={() => onConnectOAuth?.(connectionRows.find((row) => !row.connected)?.providerId || connectionRows[0]?.providerId || 'google.com')} disabled={Boolean(connectingOAuth)}>
-        {connectingOAuth ? 'Autorizando…' : connectionRows.some((row) => row.expired) ? 'Autorizar permisos' : 'Conectar / Autorizar permisos'}
-      </button>
     </div>
     {memoryOpen ? <div className="assistant-memory">
       <div className="assistant-memory-head">
