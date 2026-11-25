@@ -15,9 +15,9 @@ const host = process.env.AI_SERVER_HOST || '0.0.0.0'
 const provider = (process.env.AI_PROVIDER || (process.env.OPENROUTER_API_KEY ? 'openrouter' : 'gemini')).toLowerCase()
 const apiKey = provider === 'openrouter' ? process.env.OPENROUTER_API_KEY : process.env.GEMINI_API_KEY
 const model = provider === 'openrouter'
-  ? (process.env.OPENROUTER_MODEL || 'google/gemini-2.5-flash')
+  ? (process.env.OPENROUTER_MODEL || 'baidu/ernie-5.5-flash-preview:free')
   : (process.env.GEMINI_MODEL || 'gemini-2.0-flash')
-const fallbackModels = (process.env.OPENROUTER_FALLBACK_MODELS || 'anthropic/claude-3.5-sonnet,openai/gpt-4o-mini')
+const fallbackModels = (process.env.OPENROUTER_FALLBACK_MODELS || 'nvidia/nemotron-3-ultra-550b-a55b:free,recursive/flint-v1.0:free')
   .split(',')
   .map((item) => item.trim())
   .filter(Boolean)

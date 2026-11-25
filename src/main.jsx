@@ -765,7 +765,7 @@ function aiErrorMessage(error, fallback) {
   return message || fallback
 }
 
-const DIRECT_AI_MODELS = (import.meta.env.VITE_AI_MODELS || 'google/gemini-2.5-flash,anthropic/claude-3.5-sonnet,openai/gpt-4o-mini')
+const DIRECT_AI_MODELS = (import.meta.env.VITE_AI_MODELS || 'baidu/ernie-5.5-flash-preview:free,nvidia/nemotron-3-ultra-550b-a55b:free,recursive/flint-v1.0:free')
   .split(',')
   .map((item) => item.trim())
   .filter(Boolean)

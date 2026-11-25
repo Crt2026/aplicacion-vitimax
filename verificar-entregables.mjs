@@ -116,6 +116,7 @@ assert.ok(mainCode.includes('buildTemporalSection(getTemporalContext(), source)'
 assert.ok(mainCode.includes('temporal: getTemporalContext()'), 'El proxy no recibe el reloj del dispositivo')
 assert.ok(serverCode.includes('serverTemporalBlock('), 'El proxy no construye el bloque temporal')
 assert.ok(serverCode.includes('TEMPORAL_MARKER'), 'El proxy no evita duplicar el bloque temporal')
+assert.ok(mainCode.includes('baidu/ernie-5.5-flash-preview:free'), 'El BOT no usa un modelo gratuito y estable por defecto')
 console.log('Reloj local: 4 franjas, semana 48, zona horaria y elapsed time: OK')
 
 // Excel multi-hoja con KPIs y fórmulas reales.
