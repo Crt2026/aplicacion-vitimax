@@ -32,8 +32,7 @@ Si Firebase no está configurado, la aplicación mantiene un modo local/invitado
 El botón "Continuar con Microsoft" usa el proveedor OAuth de Firebase
 (`microsoft.com`). Firebase delega en un **App Registration de Azure/Entra ID**:
 si ahí se cargó un Application (client) ID que no existe (por ejemplo el texto
-`vitimax`), Microsoft rechaza **toda** cuenta, tanto personal (`@outlook.com`,
-`@hotmail.com`) como institucional.
+`vitimax`), Microsoft rechaza **toda** cuenta, tanto personal como institucional.
 
 En este proyecto el proveedor Microsoft quedó configurado con `client_id=vitimax`,
 que no es válido. Para corregirlo, en la cuenta de Azure del administrador:

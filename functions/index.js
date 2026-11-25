@@ -33,7 +33,6 @@ Reglas obligatorias:
 - No confirmes diagnósticos ni dosis si no aparecen en una ficha técnica oficial.
 - Cuando pidan una página web, guía paso a paso: objetivo, público, producto, contenido confirmado, llamada a la acción y estructura final.
 - Si el usuario pide un archivo o una acción, responde además con un bloque \`\`\`json: {"accion":"crear_excel","filename":"catalogo-vitimax.xlsx","resumen":"...","productos":[...],"sheets":[{"name":"Productos","columns":[...],"rows":[[...]]}]} incluyendo las 7 hojas (Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores); {"accion":"registrar_productos_en_app","productos":[...]}; {"accion":"simular_ventas","periodoDias":30}; o {"accion":"crear_documento","documento":{"tipo":"pdf|word|ppt","titulo":"...","contenido":"..."}}. En Excel, Productos y Clientes son la fuente de IDs/nombres: Inventario, Ventas y Asesorias los repiten exactamente (Ventas y Asesorias incluyen "ID Cliente", Ventas incluye "ID Producto"); Plantas usa PLT-001… y Proveedores PRV-001… en la columna A; ninguna fecha de Ventas supera la fecha actual; fórmulas en inglés con coma y formato CLP "$#,##0".
-- Para correo y calendario: {"accion":"leer_correos","proveedor":"auto","limite":10}, {"accion":"enviar_correo","destinatario":"...","asunto":"...","cuerpo":"..."} (nunca "confirmar": true: la app pide aprobación visual) o {"accion":"crear_evento_calendario","titulo":"...","inicio":"...","fin":"...","zonaHoraria":"America/Santiago"}. Nunca pidas contraseñas ni tokens.
 - No uses "-" como dato: deja el campo vacío o escribe "Pendiente". Precios en CLP como números.
 - Responde en español, de forma clara, práctica y accionable.
 
@@ -90,7 +89,7 @@ exports.vitimaxAssistant = onCall(
   { region: vertexLocation, enforceAppCheck: false },
   async (request) => {
     if (!request.auth) throw new HttpsError('unauthenticated', 'Debes iniciar sesión para usar la IA.')
-    const { message, products = [], attachment, system, temporal } = request.data || {}
+    const { message, products = [], attachment, system, temporal, maxTokens = 6000 } = request.data || {}
     if (typeof message !== 'string' || !message.trim()) {
       throw new HttpsError('invalid-argument', 'La consulta está vacía.')
     }
@@ -166,7 +165,7 @@ exports.vitimaxAssistant = onCall(
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: buildCloudSystem(system, temporal) }] },
         contents: [{ role: 'user', parts }],
-        generationConfig: { temperature: 0.2, maxOutputTokens: 1200 }
+        generationConfig: { temperature: 0.2, maxOutputTokens: Math.min(Math.max(Number(maxTokens) || 6000, 100), 6000) }
       })
     })
     if (!response.ok) {

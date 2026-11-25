@@ -14,10 +14,13 @@ import {
   formatElapsedSince,
   formatSpanishDate,
   getTemporalContext,
+  MEMORY_CATEGORIES,
   mergeWorkbookSheets,
   normalizeImportedRecords,
+  normalizeMemories,
   resolveDisplayName,
   SHEET_NAMES,
+  upsertMemoryRecord,
   assistantTextFromOpenRouter,
   assistantTextFromStreamChunk,
   sanitizeAssistantText,
@@ -83,9 +86,19 @@ assert.equal(assistantTextFromOpenRouter(fullResponse), 'Listo, generé el Excel
 const streamChunk = 'data: {"choices":[{"delta":{"reasoning":"I should prepare the PDF","content":"Aquí tienes el PDF."}}]}\r\n\r\n'
 assert.equal(assistantTextFromStreamChunk(streamChunk), 'Aquí tienes el PDF.')
 assert.equal(sanitizeAssistantText('<think>Let me create the workbook</think>\nEl archivo está listo.'), 'El archivo está listo.')
+const aiDataCode = fs.readFileSync('src/ai-data.js', 'utf8')
+const mainCode = fs.readFileSync('src/main.jsx', 'utf8')
+const serverCode = fs.readFileSync('ai-server.cjs', 'utf8')
+const stylesCode = fs.readFileSync('src/styles.css', 'utf8')
+const functionsCode = fs.readFileSync('functions/index.js', 'utf8')
 assert.ok(SPANISH_ONLY_RULE.includes('IDIOMA OBLIGATORIO'))
 assert.ok(DIRECT_AI_SYSTEM_PROMPT.startsWith(SPANISH_ONLY_RULE))
 assert.ok(DIRECT_AI_SYSTEM_PROMPT.trimEnd().endsWith(SPANISH_ONLY_RULE))
+for (const [label, code] of [['proxy', serverCode], ['cloud', functionsCode]]) {
+  assert.match(code, /const systemInstruction = `\$\{SPANISH_ONLY_RULE\}/, `La regla no inicia el prompt ${label}`)
+  assert.equal((code.match(/\$\{SPANISH_ONLY_RULE\}/g) || []).length, 2, `La regla debe estar al inicio y al final del prompt ${label}`)
+  assert.ok(code.includes('${SPANISH_ONLY_RULE}`'), `La regla no cierra el prompt ${label}`)
+}
 console.log('Filtro de razonamiento e idioma obligatorio: OK')
 
 // Memoria + historial inyectados en el system prompt.
@@ -96,19 +109,46 @@ const historyPrompt = buildConversationSection([
 ])
 assert.match(memoryPrompt, /MEMORIA PERSISTENTE/)
 assert.match(historyPrompt, /HISTORIAL COMPLETO DE LA CONVERSACIÓN/)
-const aiDataCode = fs.readFileSync('src/ai-data.js', 'utf8')
-const mainCode = fs.readFileSync('src/main.jsx', 'utf8')
-const serverCode = fs.readFileSync('ai-server.cjs', 'utf8')
-const stylesCode = fs.readFileSync('src/styles.css', 'utf8')
 for (const rule of ['Próximos Pasos', 'COUNTIF', 'verde bosque']) {
   assert.ok(aiDataCode.includes(rule) || serverCode.includes(rule), `Falta la regla ${rule} en el prompt`)
 }
 assert.match(mainCode, /tool_choice:\s*"auto"|tool_choice\s*=\s*"auto"/)
 assert.match(serverCode, /HISTORY_MARKER/)
 assert.ok(!serverCode.includes("fullSystem.includes('HISTORIAL DE CONVERSACIÓN')"), 'El proxy no debe duplicar el historial')
+
+// Memoria persistente: categorías ampliadas, deduplicación y actualización
+// sin conservar versiones contradictorias del mismo dato.
+for (const category of ['Decisiones', 'Contexto', 'Preferencias', 'Instrucciones']) {
+  assert.ok(MEMORY_CATEGORIES.includes(category), `Falta la categoría de memoria ${category}`)
+}
+const firstMemory = normalizeMemories([
+  { id: 'a', categoria: 'Preferencias', contenido: 'Mi nombre es Cristóbal', fecha_actualizacion: '2026-01-01T00:00:00Z' }
+])
+const updatedMemory = upsertMemoryRecord(firstMemory, {
+  categoria: 'Preferencias', contenido: 'Mi nombre es Cristóbal Suárez', fecha_actualizacion: '2026-02-01T00:00:00Z'
+})
+assert.equal(updatedMemory.records.length, 1, 'Una actualización no debe dejar dos recuerdos del mismo dato')
+assert.equal(updatedMemory.records[0].contenido, 'Mi nombre es Cristóbal Suárez')
+assert.equal(normalizeMemories([
+  { categoria: 'Preferencias', contenido: 'Siempre aplica 19% de IVA' },
+  { categoria: 'Preferencias', contenido: 'siempre aplica 19% de iva ' }
+]).length, 1, 'Los duplicados por redacción se unifican')
+assert.ok(mainCode.includes('onUpdateMemory={updateMemory}'), 'El modal de memoria no conecta la edición')
+assert.ok(mainCode.includes('assistant-memory-edit'), 'Falta el formulario de edición de recuerdos')
+assert.ok(mainCode.includes('function memoryFactsFromUserText'), 'Falta la extracción determinista de recuerdos')
+assert.ok(mainCode.includes('persistMemoryIntent()'), 'La app no guarda la memoria cuando el modelo solo responde en texto')
+assert.ok(!mainCode.includes('He guardado en mi memoria'), 'La app no debe anunciar guardados en memoria')
+
+// Agente élite con alcance general, control de módulos y hasta 8 pasos.
+for (const phrase of ['AGENTE ÉLITE', 'hasta 8 pasos', 'Productos, Clientes, Plantas, Inventario, Ventas, Asesorías y Proveedores']) {
+  assert.ok(aiDataCode.includes(phrase), `Falta la regla del agente: ${phrase}`)
+}
+assert.ok(/maxSteps\s*=\s*8|MAX_TOOL_STEPS\s*=\s*8|\bstep\s*<\s*8\b/.test(mainCode), 'El agente no limita la ejecución a 8 pasos')
+assert.ok(mainCode.includes('ASSISTANT_TOOLS'), 'El agente no usa las herramientas declaradas')
+
 const fenced = extractFencedCode('```js\nconsole.log(1)\n```\n```js\n' + 'x'.repeat(500) + '\n```')
 assert.equal(fenced.code.length, 500, 'Se conserva el bloque de código completo más largo')
-console.log('Memoria + historial en system prompt · código completo: OK')
+console.log('Memoria + historial en system prompt · memoria editable · agente élite · código completo: OK')
 
 // Reloj en vivo: franjas exactas, fecha local, semana, zona y elapsed time.
 const morning = getTemporalContext(new Date(2026, 10, 23, 5, 0, 0))
@@ -193,35 +233,28 @@ assert.match(DIRECT_AI_SYSTEM_PROMPT, /humor sutil/)
 assert.match(DIRECT_AI_SYSTEM_PROMPT, /no escribas "Fecha:"/i)
 console.log('Saludo exacto, tono humano y reloj silencioso: OK')
 
-// Integración real de Gmail / Office: scopes, herramientas, tarjeta y token en header.
-const googleScopes = [
-  'https://www.googleapis.com/auth/gmail.readonly',
-  'https://www.googleapis.com/auth/gmail.send',
-  'https://www.googleapis.com/auth/gmail.compose',
-  'https://www.googleapis.com/auth/calendar.events',
-  'https://www.googleapis.com/auth/drive.file'
-]
-const microsoftScopes = ['User.Read', 'Mail.Read', 'Mail.Send', 'Mail.ReadWrite', 'Calendars.ReadWrite', 'Files.ReadWrite']
-for (const scope of [...googleScopes, ...microsoftScopes]) {
-  assert.ok(mainCode.includes(scope), `Falta el scope OAuth ${scope} en la app`)
-  assert.ok(aiDataCode.includes(scope), `Falta el scope OAuth ${scope} en el agente`)
+// Sin Gmail, Outlook ni Microsoft Office: se eliminaron scopes, herramientas,
+// endpoints, headers, tarjeta de confirmación y panel de permisos del BOT.
+// Google y Microsoft siguen existiendo solo como acceso Firebase.
+const allAppCode = [mainCode, aiDataCode, serverCode, stylesCode, fs.readFileSync('functions/index.js', 'utf8')].join('\n')
+for (const banned of [
+  'gmail', 'Gmail', 'outlook', 'Outlook', 'Office 365', 'Microsoft Graph',
+  'leer_correos', 'enviar_correo', 'crear_evento_calendario',
+  'X-Vitimax-OAuth-Token', 'X-Vitimax-OAuth-Provider', '/api/oauth/',
+  'GOOGLE_OAUTH_SCOPES', 'MICROSOFT_OAUTH_SCOPES', 'assistant-email-confirm',
+  'settings-oauth-status', 'assistant-oauth', 'requiere_confirmacion'
+]) {
+  assert.ok(!allAppCode.includes(banned), `Queda una referencia eliminada: ${banned}`)
 }
-for (const tool of ['leer_correos', 'enviar_correo', 'crear_evento_calendario']) {
-  assert.ok(aiDataCode.includes(`name: '${tool}'`), `Falta la herramienta ${tool}`)
-  assert.ok(mainCode.includes(`name === '${tool}'`), `Falta el ejecutor de ${tool}`)
-}
-assert.ok(mainCode.includes('requiere_confirmacion'), 'Falta la tarjeta de confirmación antes de enviar')
-assert.ok(mainCode.includes('assistant-email-confirm'), 'Falta la UI de confirmación de correo')
-assert.ok(mainCode.includes('Gmail conectado') && mainCode.includes('Office 365 conectado'), 'Faltan los indicadores de conexión en Configuración')
-assert.ok(mainCode.includes('Conectar / Autorizar permisos'), 'Falta el botón de autorización de permisos en Configuración')
-assert.ok(!mainCode.includes('<div className="assistant-oauth">'), 'La franja de conexiones no debe aparecer en el BOT')
+assert.ok(!/gmail\.googleapis\.com|graph\.microsoft\.com/i.test(allAppCode), 'Quedó un endpoint de correo o Graph')
+assert.ok(!/googleapis\.com\/auth\/(?:gmail|calendar|drive)/i.test(allAppCode), 'Quedó un scope de Gmail, Calendar o Drive')
+assert.ok(!/\bMail\.(?:Read|Send|ReadWrite)\b|\bCalendars\.ReadWrite\b/i.test(allAppCode), 'Quedó un permiso de correo o calendario')
 assert.ok(!mainCode.includes('shortDate} · <span className="temporal-clock assistant-clock"'), 'El BOT no debe mostrar fecha/hora en el encabezado')
-assert.ok(serverCode.includes('/api/oauth/messages') && serverCode.includes('/api/oauth/send') && serverCode.includes('/api/oauth/calendar'))
-assert.ok(serverCode.includes('X-Vitimax-OAuth-Token'), 'El proxy no acepta el token OAuth por header')
-assert.ok(mainCode.includes('X-Vitimax-OAuth-Token'), 'La app no envía el token OAuth por header')
 assert.ok(!/body: JSON\.stringify\(\{[^}]*accessToken/.test(mainCode), 'El token OAuth no debe ir en el body de la IA')
-assert.match(stylesCode, /\.assistant-oauth\{/)
-console.log('OAuth Google/Microsoft, herramientas de correo y confirmación visual: OK')
+// El acceso con Google y Microsoft se conserva únicamente como proveedor de login.
+assert.ok(mainCode.includes('new GoogleAuthProvider()'), 'Falta el acceso con Google')
+assert.ok(mainCode.includes("new OAuthProvider('microsoft.com')"), 'Falta el acceso con Microsoft')
+console.log('Sin Gmail/Outlook/Office: scopes, herramientas, endpoints, headers y UI eliminados: OK')
 
 // Excel multi-hoja con KPIs, fórmulas reales y coherencia referencial.
 const sheets = mergeWorkbookSheets([], products, {}, { allowDemo: true })

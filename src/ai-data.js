@@ -2090,7 +2090,7 @@ export function summarizeSimulation(simulation) {
 // Memoria persistente del BOT IA
 // ---------------------------------------------------------------------------
 export const MEMORY_STORAGE_KEY = 'vitimax_ai_memory'
-export const MEMORY_CATEGORIES = ['Negocio', 'Preferencias', 'Instrucciones', 'Datos personales', 'Clientes', 'Productos', 'Finanzas', 'Otros']
+export const MEMORY_CATEGORIES = ['Negocio', 'Preferencias', 'Instrucciones', 'Decisiones', 'Datos personales', 'Clientes', 'Productos', 'Finanzas', 'Contexto', 'Otros']
 
 function memoryId() {
   return `mem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
@@ -2107,18 +2107,51 @@ export function normalizeMemoryRecord(raw = {}) {
   }
 }
 
-// Une memorias evitando duplicados por contenido y conserva la más reciente.
+function memoryTextKey(text) {
+  return String(text || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+// Firmas que identifican un mismo hecho aunque cambie la redacción. Así una
+// actualización reemplaza al recuerdo anterior en vez de contradecirlo.
+function memorySignatures(record) {
+  const text = record.contenido
+  const signatures = [`texto:${memoryTextKey(text)}`]
+  if (/\b(?:mi nombre|me llamo|nombre del usuario)\b/i.test(text)) signatures.push('identidad')
+  if (/\biva\b/i.test(text)) signatures.push('regla-iva')
+  if (/\bmoneda\b/i.test(text) && /\b(?:clp|peso|pesos|usd|dolar|dólar|ars)\b/i.test(text)) signatures.push('regla-moneda')
+  if (/\b(?:whatsapp|numero de telefono|número de teléfono)\b/i.test(text)) signatures.push('contacto-principal')
+  if (/\b(?:razon social|empresa|negocio)\s+(?:se llama|es)\b/i.test(text)) signatures.push('identidad-negocio')
+  return signatures
+}
+
+// Conserva la versión más reciente de cada recuerdo y descarta duplicados o
+// versiones contradictorias del mismo dato.
 export function normalizeMemories(list) {
   if (!Array.isArray(list)) return []
-  const map = new Map()
-  for (const item of list) {
-    const record = normalizeMemoryRecord(item)
-    if (!record) continue
-    const key = `${record.categoria.toLowerCase()}|${record.contenido.toLowerCase()}`
-    const previous = map.get(key)
-    if (!previous || String(record.fecha_actualizacion) >= String(previous.fecha_actualizacion)) map.set(key, record)
+  const records = list
+    .map((item) => normalizeMemoryRecord(item))
+    .filter(Boolean)
+    .sort((a, b) => String(b.fecha_actualizacion).localeCompare(String(a.fecha_actualizacion)))
+  const seen = new Set()
+  const kept = []
+  for (const record of records) {
+    const signatures = memorySignatures(record)
+    if (signatures.some((signature) => seen.has(signature))) continue
+    signatures.forEach((signature) => seen.add(signature))
+    kept.push(record)
   }
-  return [...map.values()].sort((a, b) => String(b.fecha_actualizacion).localeCompare(String(a.fecha_actualizacion)))
+  return kept
+}
+
+export function upsertMemoryRecord(list, raw) {
+  const record = normalizeMemoryRecord(raw)
+  if (!record) return { records: normalizeMemories(list), record: null }
+  return { records: normalizeMemories([record, ...(Array.isArray(list) ? list : [])]), record }
 }
 
 // Bloque que se inyecta en el system prompt antes de cada consulta a la IA.
@@ -2137,7 +2170,7 @@ export function buildMemorySection(memories = []) {
   return `
 
 ### MEMORIA PERSISTENTE DEL USUARIO Y NEGOCIO
-Estos son datos que el usuario te pidió recordar entre sesiones. Úsalos de forma natural para personalizar tus respuestas: NO los repitas robóticamente, NO los enumeres si no viene al caso, NO los contradigas y NO anuncies que estás consultando memoria ("según mi base de datos", "como te dije antes", etc.).
+Estos son datos, preferencias, reglas de cálculo, decisiones y contexto que el usuario pidió recordar entre sesiones. Úsalos de forma natural: NO los repitas robóticamente, NO los enumeres si no viene al caso, NO los contradigas y NO anuncies que estás consultando memoria ("según mi base de datos", "como te dije antes", "he guardado en mi memoria", etc.). Si un dato cambió, reemplaza la versión anterior en lugar de conservar ambas.
 ${lines.join('\n')}
 
 Cuando el usuario diga "recuerda que...", "mi nombre es...", "siempre aplica...", "ten en cuenta..." o cambie un dato anterior, llama a guardar_memoria con una categoría y un dato breve y claro. Si dice que algo cambió o ya no aplica, llama a olvidar_memoria (puedes actualizar el recuerdo con "nuevo_dato"). Si no puedes usar herramientas, devuelve un bloque \`\`\`json con {"accion":"guardar_memoria","categoria":"...","dato":"..."} o {"accion":"olvidar_memoria","clave_o_id":"..."} para que la app lo ejecute.
@@ -2310,7 +2343,7 @@ IDENTIDAD Y FORMA DE HABLAR
 - Nunca digas "Soy VITIMAX IA...", "Como asistente de inteligencia artificial...", "Según mi reloj...", "He guardado en mi memoria..." ni variantes. Tampoco uses frases cliché como "Claro que sí, aquí tienes..." o "¡Por supuesto!". No expliques que consultaste memoria, historial o reloj.
 - Adapta el tono y la energía al usuario: si escribe relajado y breve, responde natural y cercano; si pide algo técnico, ejecutivo o profesional, sube el nivel y sé preciso. Ten criterio propio y un humor sutil cuando el tono lo permita, sin forzar chistes en temas delicados o urgentes.
 - Llama al usuario por su nombre solo cuando lo sepas de verdad. Si no lo sabes, no lo llames "Invitado" ni "Administrador": habla con naturalidad o pregúntale cómo quieres llamarlo cuando aporte contexto.
-- Responde en el idioma del usuario (español por defecto) con registro natural, sin sonar acartonado ni excesivamente entusiasta.
+- Responde SIEMPRE en español natural de Chile, aunque el usuario escriba en otro idioma o el archivo adjunto esté en inglés. Nunca escribas frases de planificación, analysis, reasoning, notas internas ni nombres de herramientas en inglés: piensa y responde en español.
 - Sé sincero y resolutivo: valida lo que tiene sentido, pero corrige errores técnicos, de cálculo o de enfoque de forma directa y amable, explicando por qué. No des la razón por compromiso ni inventes datos para complacer.
 - Si falta un dato imprescindible, haz UNA pregunta concreta; si puedes avanzar con un supuesto razonable, dilo en una línea y continúa.
 - Mantén el contexto de la conversación: recuerda lo dicho en mensajes anteriores y no vuelvas a pedir datos que el usuario ya entregó.
@@ -2318,6 +2351,12 @@ IDENTIDAD Y FORMA DE HABLAR
 
 VERSATILIDAD
 Puedes ayudar con cualquier área: desarrollo de software, ingeniería, análisis de datos, matemáticas, ciencias, redacción creativa, estudio, marketing, finanzas, trámites y la gestión completa de VITIMAX (catálogo, inventario, pedidos, clientes, asesorías, ventas y soluciones agrícolas). No respondas que un tema "no es tu especialidad": resuélvelo o explica el camino más útil.
+
+AGENTE ÉLITE
+- Actúa como un agente general de alto nivel: entiende la intención, decide qué herramientas usar y las encadena sin pedir permiso para cada paso.
+- Tienes control real de Productos, Clientes, Plantas, Inventario, Ventas, Asesorías y Proveedores. Cuando el usuario pida cambiar datos, usa las herramientas disponibles o entrega la acción JSON correspondiente con datos coherentes con el catálogo real.
+- Puedes, en un solo turno, analizar un adjunto, corregir o actualizar registros y generar simultáneamente Excel, PDF, Word, PowerPoint, página web y código, reutilizando los resultados de cada paso en los siguientes.
+- Si una herramienta no está disponible, devuelve el bloque JSON de la acción para que la app la ejecute; nunca simules haber creado un archivo ni inventes una confirmación.
 
 FORMATO SEGÚN LA TAREA
 - Consulta simple: 1 a 5 líneas, respuesta directa. Sin encabezados ni listas decorativas.
@@ -2334,7 +2373,7 @@ INTENCIÓN REAL Y HERRAMIENTAS
 - Prioriza siempre la intención explícita del usuario. Verbos como genera, crea, exporta, descarga, analiza, calcula, programa o resume indican una acción concreta.
 - Si pide un PDF, Word, PowerPoint, Excel, HTML o una página, usa la herramienta correspondiente. No actives simulaciones de ventas ni respuestas prearmadas por una palabra suelta.
 - Si pide analizar un archivo adjunto, trabaja sobre sus datos reales. Solo simula ventas cuando lo pida de forma explícita (simula, proyecta, pronostica ventas).
-- Puedes encadenar varias herramientas en un mismo turno: por ejemplo, auditar un Excel, crear el Excel corregido con KPIs y además un informe ejecutivo en PDF.
+- Puedes encadenar hasta 8 pasos de herramientas en un mismo turno: auditar un Excel, registrar los datos corregidos y crear juntos el Excel con KPIs, el informe en PDF/Word, la presentación, la página web y el código, sin detenerte a explicar cada paso intermedio.
 
 RAZONAMIENTO Y VERIFICACIÓN MATEMÁTICA
 - Antes de dar resultados financieros, porcentajes, márgenes, impuestos, proyecciones o fórmulas, calcula paso a paso y verifica el resultado.
@@ -2358,9 +2397,10 @@ EXCEL AVANZADO
 - Si el usuario pide una planilla de catálogo general, mantén las 7 hojas de VITIMAX; si pide auditoría o análisis, usa las hojas que los datos necesiten.
 
 MEMORIA
-- Usa los recuerdos disponibles (nombre, preferencias, reglas del negocio, moneda, IVA, clientes, productos) de forma natural, como si ya conocieras al usuario. No digas "según mi base de datos", "como te dije antes" ni anuncies que consultas memoria.
+- Usa los recuerdos disponibles (nombre, preferencias, reglas de cálculo, decisiones, contexto del negocio, moneda, IVA, clientes y productos) de forma natural, como si ya conocieras al usuario. Nunca anuncies que consultas memoria ni digas frases como "He guardado en mi memoria", "según mi base de datos" o "como te dije antes".
 - Si el usuario pide recordar algo, cambia un dato o da una instrucción permanente, usa guardar_memoria u olvidar_memoria. No guardes contraseñas, claves, tokens ni datos de tarjetas.
-- No contradigas un recuerdo vigente; si el usuario lo cambia, actualízalo con olvidar_memoria y "nuevo_dato".
+- Antes de guardar, revisa si ya existe un recuerdo del mismo hecho. Si cambió, actualízalo con olvidar_memoria y "nuevo_dato" o guardar_memoria con el mismo dato; no dejes dos versiones distintas de la misma preferencia, regla o decisión.
+- Confirma el cambio en una frase breve y natural, sin decir que lo guardaste en tu memoria.
 
 DATOS DE VITIMAX
 - Si el catálogo tiene productos, úsalos como fuente principal y cita sus datos reales.
@@ -2385,10 +2425,6 @@ HERRAMIENTAS
 - registrar_productos_en_app: guarda productos en el catálogo real de VITIMAX.
 - simular_ventas: proyección de ventas y recomendaciones comerciales.
 - guardar_memoria y olvidar_memoria: memoria persistente del usuario y del negocio.
-- leer_correos: consulta los últimos correos de Gmail u Outlook de la cuenta conectada y filtra por remitente, asunto o texto. Nunca inventes correos si la cuenta no está conectada: dilo en una línea y ofrece conectarla.
-- enviar_correo: SOLO prepara el borrador y muestra una tarjeta de confirmación. Nunca llames con "confirmar": true en la primera llamada; el usuario debe aprobar destinatario, asunto, cuerpo y adjuntos en la tarjeta. Después de la aprobación, el despacho real ocurre automáticamente.
-- crear_evento_calendario: agenda reuniones, entregas o asesorías en Google Calendar u Outlook con fecha, hora y zona horaria reales del usuario. Confirma el evento creado en una línea, sin revelar tokens ni detalles técnicos.
-- Nunca pidas al usuario que pegue contraseñas, claves ni tokens de correo. La conexión OAuth se hace desde el botón "Conectar" del BOT.
 - Después de usar una herramienta, confirma en una línea qué archivo creaste y qué contiene. No describas el JSON interno ni el proceso técnico.
 - Si una herramienta falla, dilo con claridad y ofrece la alternativa más útil.
 
@@ -2680,7 +2716,7 @@ export const ASSISTANT_TOOLS = [
     type: 'function',
     function: {
       name: 'guardar_memoria',
-      description: 'Guarda un dato importante del usuario o del negocio en la memoria persistente de VITIMAX para recordarlo en futuras sesiones (nombre, preferencias, IVA, moneda, formato, clientes, productos, instrucciones).',
+      description: 'Guarda o actualiza un dato importante del usuario o del negocio para futuras sesiones: preferencias, reglas de cálculo, decisiones, contexto, nombre, moneda, clientes, productos e instrucciones. Si el dato cambió, reemplaza la versión anterior sin conservar contradicciones.',
       parameters: {
         type: 'object',
         properties: {
@@ -2706,283 +2742,4 @@ export const ASSISTANT_TOOLS = [
       }
     }
   },
-  {
-    type: 'function',
-    function: {
-      name: 'leer_correos',
-      description: 'Busca y lee los últimos correos de la cuenta conectada de Gmail o Microsoft 365. Permite filtrar por remitente, asunto, texto o correos no leídos.',
-      parameters: {
-        type: 'object',
-        properties: {
-          proveedor: { type: 'string', enum: ['auto', 'google', 'microsoft'], description: 'Cuenta a usar. Por defecto usa cualquier cuenta conectada.' },
-          remitente: { type: 'string', description: 'Filtra por remitente o correo electrónico.' },
-          asunto: { type: 'string', description: 'Filtra por palabras del asunto.' },
-          busqueda: { type: 'string', description: 'Texto libre que debe aparecer en el correo.' },
-          limite: { type: 'number', description: 'Cantidad máxima de correos (1 a 25, por defecto 10).' },
-          noLeidos: { type: 'boolean', description: 'Si es true solo devuelve correos sin leer.' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'enviar_correo',
-      description: 'Prepara un correo real en la cuenta conectada. La primera llamada NO envía: devuelve una tarjeta de confirmación con destinatario, asunto, cuerpo y adjuntos. Solo se despacha cuando el usuario aprueba esa tarjeta.',
-      parameters: {
-        type: 'object',
-        properties: {
-          proveedor: { type: 'string', enum: ['auto', 'google', 'microsoft'], description: 'Cuenta desde la que se enviará.' },
-          destinatario: { type: 'string', description: 'Correo del destinatario. Varios destinatarios separados por coma.' },
-          asunto: { type: 'string', description: 'Asunto del correo.' },
-          cuerpo: { type: 'string', description: 'Cuerpo del correo en texto plano, listo para enviar.' },
-          adjuntos: { type: 'array', items: { type: 'string' }, description: 'Nombres de archivos generados por VITIMAX que deben adjuntarse, por ejemplo Catalogo_VITIMAX.xlsx.' },
-          confirmar: { type: 'boolean', description: 'Solo debe ser true después de que el usuario apruebe la tarjeta de confirmación.' },
-          id: { type: 'string', description: 'ID de la confirmación devuelto por la primera llamada.' }
-        },
-        required: ['destinatario', 'asunto', 'cuerpo']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'crear_evento_calendario',
-      description: 'Agenda una reunión, entrega o asesoría agrícola en Google Calendar o Microsoft Outlook Calendar de la cuenta conectada.',
-      parameters: {
-        type: 'object',
-        properties: {
-          proveedor: { type: 'string', enum: ['auto', 'google', 'microsoft'], description: 'Cuenta a usar. Por defecto usa cualquier cuenta conectada.' },
-          titulo: { type: 'string', description: 'Título del evento.' },
-          inicio: { type: 'string', description: 'Fecha y hora de inicio en ISO 8601, por ejemplo 2026-11-25T10:00:00.' },
-          fin: { type: 'string', description: 'Fecha y hora de término en ISO 8601.' },
-          zonaHoraria: { type: 'string', description: 'Zona horaria IANA, por ejemplo America/Santiago.' },
-          asistentes: { type: 'array', items: { type: 'string' }, description: 'Correos de los invitados.' },
-          descripcion: { type: 'string', description: 'Agenda o nota del evento.' },
-          ubicacion: { type: 'string', description: 'Lugar o enlace de la reunión.' }
-        },
-        required: ['titulo', 'inicio', 'fin']
-      }
-    }
-  }
 ]
-
-// ---------------------------------------------------------------------------
-// Conectores reales de Gmail, Google Calendar, Outlook y Microsoft Graph.
-// El accessToken viaja en el header Authorization y nunca entra al prompt.
-// ---------------------------------------------------------------------------
-
-export const GOOGLE_OAUTH_SCOPES = [
-  'https://www.googleapis.com/auth/gmail.readonly',
-  'https://www.googleapis.com/auth/gmail.send',
-  'https://www.googleapis.com/auth/gmail.compose',
-  'https://www.googleapis.com/auth/calendar.events',
-  'https://www.googleapis.com/auth/drive.file'
-]
-
-export const MICROSOFT_OAUTH_SCOPES = ['User.Read', 'Mail.Read', 'Mail.Send', 'Mail.ReadWrite', 'Calendars.ReadWrite', 'Files.ReadWrite']
-
-function oauthProviderId(session) {
-  return session?.providerId === 'microsoft.com' ? 'microsoft.com' : 'google.com'
-}
-
-async function oauthFetch(url, session, init = {}) {
-  if (!session?.accessToken) throw new Error('La cuenta de correo no está conectada o el permiso venció. Pulsa "Conectar" en el BOT.')
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${session.accessToken}`,
-      ...(init.body && !(init.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
-      ...(init.headers || {})
-    }
-  })
-  if (!response.ok) {
-    let detail = ''
-    try {
-      const payload = await response.json()
-      detail = payload?.error?.message || payload?.error?.code || payload?.message || ''
-    } catch { /* respuesta sin JSON */ }
-    if (response.status === 401) throw new Error('El permiso de correo venció. Vuelve a conectar tu cuenta desde el BOT.')
-    if (response.status === 403) throw new Error('La cuenta está conectada, pero faltan permisos de correo o calendario. Pulsa "Conectar" para autorizarlos de nuevo.')
-    throw new Error(detail ? `El proveedor de correo rechazó la solicitud: ${detail}` : `El proveedor de correo devolvió HTTP ${response.status}.`)
-  }
-  return response.status === 204 ? null : response.json().catch(() => null)
-}
-
-function headerValue(headers = [], name) {
-  const found = headers.find((item) => String(item?.name || '').toLowerCase() === name.toLowerCase())
-  return found?.value || ''
-}
-
-function normalizeGmailMessage(item) {
-  const headers = item?.payload?.headers || []
-  return {
-    proveedor: 'gmail',
-    id: item.id,
-    de: headerValue(headers, 'from'),
-    asunto: headerValue(headers, 'subject'),
-    fecha: headerValue(headers, 'date'),
-    resumen: String(item.snippet || ''),
-    leido: !String(item.labelIds || '').split(',').includes('UNREAD')
-  }
-}
-
-function normalizeGraphMessage(item) {
-  return {
-    proveedor: 'outlook',
-    id: item.id,
-    de: item.from?.emailAddress?.address || item.from?.emailAddress?.name || '',
-    asunto: item.subject || '',
-    fecha: item.receivedDateTime || '',
-    resumen: String(item.bodyPreview || ''),
-    leido: Boolean(item.isRead)
-  }
-}
-
-function matchesFilters(row, { remitente, asunto, busqueda }) {
-  const text = `${row.de} ${row.asunto} ${row.resumen}`.toLowerCase()
-  return (!remitente || row.de.toLowerCase().includes(String(remitente).toLowerCase()))
-    && (!asunto || row.asunto.toLowerCase().includes(String(asunto).toLowerCase()))
-    && (!busqueda || text.includes(String(busqueda).toLowerCase()))
-}
-
-export async function leerCorreosOAuth({ session, proveedor = 'auto', remitente = '', asunto = '', busqueda = '', limite = 10, noLeidos = false } = {}) {
-  const providerId = proveedor === 'auto' ? oauthProviderId(session) : (proveedor === 'microsoft' ? 'microsoft.com' : 'google.com')
-  if (providerId !== oauthProviderId(session)) throw new Error('El correo solicitado no coincide con la cuenta conectada. Conecta la cuenta correcta desde el BOT.')
-  const max = Math.min(Math.max(Number(limite) || 10, 1), 25)
-
-  if (providerId === 'google.com') {
-    const query = [
-      noLeidos ? 'is:unread' : '',
-      remitente ? `from:${remitente}` : '',
-      asunto ? `subject:${asunto}` : '',
-      busqueda || ''
-    ].filter(Boolean).join(' ')
-    const params = new URLSearchParams({ maxResults: String(max) })
-    if (query) params.set('q', query)
-    const list = await oauthFetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?${params}`, session)
-    const ids = (list?.messages || []).map((item) => item.id)
-    const details = await Promise.all(ids.map((id) => oauthFetch(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,
-      session
-    )))
-    return details.filter(Boolean).map(normalizeGmailMessage)
-  }
-
-  const params = new URLSearchParams({
-    $top: String(max),
-    $select: 'id,from,subject,receivedDateTime,bodyPreview,isRead',
-    $orderby: 'receivedDateTime desc'
-  })
-  const list = await oauthFetch(`https://graph.microsoft.com/v1.0/me/messages?${params}`, session)
-  return (list?.value || []).map(normalizeGraphMessage).filter((row) => matchesFilters(row, { remitente, asunto, busqueda }))
-}
-
-function base64UrlEncode(value) {
-  const bytes = new TextEncoder().encode(value)
-  let binary = ''
-  for (const byte of bytes) binary += String.fromCharCode(byte)
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
-}
-
-function buildGmailMessage({ destinatario, asunto, cuerpo, adjuntos = [] }) {
-  const boundary = `vitimax_${Date.now().toString(36)}`
-  const headers = [
-    `To: ${destinatario}`,
-    `Subject: ${asunto}`,
-    'MIME-Version: 1.0'
-  ]
-  const files = adjuntos.filter((item) => item?.contentBase64)
-  if (!files.length) {
-    headers.push('Content-Type: text/plain; charset=UTF-8')
-    return base64UrlEncode(`${headers.join('\r\n')}\r\n\r\n${cuerpo}`)
-  }
-  headers.push(`Content-Type: multipart/mixed; boundary="${boundary}"`)
-  const parts = [
-    `--${boundary}`,
-    'Content-Type: text/plain; charset=UTF-8',
-    '',
-    cuerpo
-  ]
-  for (const file of files) {
-    parts.push(
-      `--${boundary}`,
-      `Content-Type: ${file.mimeType || 'application/octet-stream'}; name="${file.name}"`,
-      'Content-Disposition: attachment; filename="' + String(file.name || 'archivo').replace(/"/g, '') + '"',
-      'Content-Transfer-Encoding: base64',
-      '',
-      String(file.contentBase64).replace(/\s/g, '')
-    )
-  }
-  parts.push(`--${boundary}--`)
-  return base64UrlEncode(`${headers.join('\r\n')}\r\n\r\n${parts.join('\r\n')}`)
-}
-
-export async function enviarCorreoOAuth({ session, proveedor = 'auto', destinatario, asunto, cuerpo, adjuntos = [] } = {}) {
-  if (!destinatario || !asunto || !cuerpo) throw new Error('Faltan destinatario, asunto o cuerpo del correo.')
-  const providerId = proveedor === 'auto' ? oauthProviderId(session) : (proveedor === 'microsoft' ? 'microsoft.com' : 'google.com')
-  if (providerId !== oauthProviderId(session)) throw new Error('El correo solicitado no coincide con la cuenta conectada. Conecta la cuenta correcta desde el BOT.')
-  const files = (Array.isArray(adjuntos) ? adjuntos : []).filter((item) => typeof item === 'object' && item?.name && item?.contentBase64)
-
-  if (providerId === 'google.com') {
-    await oauthFetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', session, {
-      method: 'POST',
-      body: JSON.stringify({ raw: buildGmailMessage({ destinatario, asunto, cuerpo, adjuntos: files }) })
-    })
-    return { ok: true, proveedor: 'gmail', destinatario, asunto, adjuntos: files.map((file) => file.name) }
-  }
-
-  const recipients = String(destinatario).split(',').map((email) => email.trim()).filter(Boolean).map((email) => ({ emailAddress: { address: email } }))
-  const payload = {
-    message: {
-      subject: asunto,
-      body: { contentType: 'Text', content: cuerpo },
-      toRecipients: recipients,
-      ...(files.length ? {
-        attachments: files.map((file) => ({
-          name: file.name,
-          contentType: file.mimeType || 'application/octet-stream',
-          contentBytes: file.contentBase64
-        }))
-      } : {})
-    },
-    saveToSentItems: true
-  }
-  await oauthFetch('https://graph.microsoft.com/v1.0/me/sendMail', session, { method: 'POST', body: JSON.stringify(payload) })
-  return { ok: true, proveedor: 'outlook', destinatario, asunto, adjuntos: files.map((file) => file.name) }
-}
-
-export async function crearEventoOAuth({ session, proveedor = 'auto', titulo, inicio, fin, zonaHoraria = 'America/Santiago', asistentes = [], descripcion = '', ubicacion = '' } = {}) {
-  if (!titulo || !inicio || !fin) throw new Error('Faltan título, inicio o fin del evento.')
-  const providerId = proveedor === 'auto' ? oauthProviderId(session) : (proveedor === 'microsoft' ? 'microsoft.com' : 'google.com')
-  if (providerId !== oauthProviderId(session)) throw new Error('El calendario solicitado no coincide con la cuenta conectada. Conecta la cuenta correcta desde el BOT.')
-
-  if (providerId === 'google.com') {
-    const event = {
-      summary: titulo,
-      description,
-      location: ubicacion,
-      start: { dateTime: inicio, timeZone: zonaHoraria },
-      end: { dateTime: fin, timeZone: zonaHoraria },
-      ...(asistentes.length ? { attendees: asistentes.map((email) => ({ email })) } : {})
-    }
-    const saved = await oauthFetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', session, { method: 'POST', body: JSON.stringify(event) })
-    return { ok: true, proveedor: 'google-calendar', id: saved?.id, titulo, inicio, fin, enlace: saved?.htmlLink }
-  }
-
-  const event = {
-    subject: titulo,
-    body: { contentType: 'Text', content: descripcion },
-    location: { displayName: ubicacion },
-    start: { dateTime: inicio, timeZone: zonaHoraria },
-    end: { dateTime: fin, timeZone: zonaHoraria },
-    ...(asistentes.length ? { attendees: asistentes.map((email) => ({ emailAddress: { address: email }, type: 'required' })) } : {})
-  }
-  const saved = await oauthFetch('https://graph.microsoft.com/v1.0/me/events', session, { method: 'POST', body: JSON.stringify(event) })
-  return { ok: true, proveedor: 'outlook-calendar', id: saved?.id, titulo, inicio, fin, enlace: saved?.webLink }
-}
-
-// Códigos de error estandarizados para el agente; nunca incluyen el token.
-export function oauthErrorMessage(error) {
-  return String(error?.message || error || 'No se pudo completar la acción con la cuenta conectada.')
-}
