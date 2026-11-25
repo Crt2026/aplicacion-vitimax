@@ -1031,7 +1031,9 @@ export function fixAsesoriaRecords(records = [], products = []) {
 const TOTALS_ROW = /^(gran\s+)?(total|totales|subtotal|suma|resumen|total\s+general|total\s+valorado|total\s+inventario|valor\s+total|valorizado|valor\s+inventario)\b/i
 
 // Nombre de fila/registro que corresponde a un total y no a un producto real.
-const JUNK_PRODUCT_NAME = /^(?:gran\s+)?(?:total(?:es)?|subtotal(?:es)?|suma|resumen|valor(?:izado)?)(?:\s+(?:general|valorado|inventario|productos|stock|clp|ejecutivo|clientes|ventas|asesorias|plantas|proveedores|pedidos|registros|filas|de|del|la|el))*\s*$/i
+// Cualquier nombre que empiece por "TOTAL" (o equivalente de total) es una
+// fila de resumen, no un producto: se elimina aunque tenga texto añadido.
+const JUNK_PRODUCT_NAME = /^\s*(?:gran\s+)?(?:total(?:es)?|subtotal(?:es)?|suma|resumen|valor(?:izado)?)\b/i
 
 /**
  * Detecta filas de totales que llegan desde Excel (por ejemplo
@@ -2271,19 +2273,89 @@ export function isRetryableAiError(error) {
 
 const formatClpLocal = (value) => `$${Math.round(Number(value) || 0).toLocaleString('es-CL')}`
 
-/** Respuesta determinista con datos reales cuando ningún modelo responde. */
-export function buildLocalDataSummary({ products = [], modules = {}, message = '' } = {}) {
+function localVariantIndex(query, variants, history = []) {
+  let hash = history.length * 31
+  for (let index = 0; index < query.length; index += 1) hash = (hash * 33 + query.charCodeAt(index)) % 100000
+  return hash % variants.length
+}
+
+/**
+ * Motor local inteligente: responde al mensaje exacto cuando no hay internet.
+ * Las estadísticas del catálogo solo aparecen si el usuario las pide.
+ */
+export function buildLocalAssistantAnswer({ products = [], modules = {}, message = '', history = [] } = {}) {
+  const query = String(message || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim()
+  const pick = (variants) => variants[localVariantIndex(query, variants, history)]
+
+  if (/^(?:hola|buenas|buen dia|que tal|q tal|hey|hi|hello)\b/.test(query)) {
+    return pick([
+      'Hola, ¿qué resolvemos hoy?',
+      'Buenas. Estoy aquí, ¿en qué te ayudo?',
+      'Hola. Dime por dónde empezamos.'
+    ])
+  }
+  if (/\b(?:lol|jaja|jajaja|jeje|xd|jks|risa)\b/.test(query)) {
+    return pick([
+      'Jaja, buena. ¿Seguimos con lo que estabas viendo o cambiamos de tema?',
+      'Jeje, me sumo al buen ánimo. ¿Qué sigue?',
+      'JAJA. Con una sonrisa se trabaja mejor. ¿En qué te ayudo ahora?'
+    ])
+  }
+  if (/\b(?:gracias|gracias por todo|mil gracias|agradecido)\b/.test(query)) {
+    return pick([
+      'Con gusto. Quedo atento si necesitas algo más.',
+      'De nada. Aquí sigo cuando lo necesites.',
+      'Pura vida. ¿Vamos con otra cosa?'
+    ])
+  }
+  if (/\b(?:como estas|como va|que hay|todo bien)\b/.test(query)) {
+    return pick([
+      'Bien por aquí, listo para ayudarte. ¿Tú cómo estás?',
+      'Todo bien. ¿Qué te trae por acá hoy?',
+      'Bien, gracias por preguntar. ¿En qué te puedo ayudar?'
+    ])
+  }
+  if (/\b(?:api|endpoint|json|rest|http)\b/.test(query)) {
+    return 'Una API es una forma ordenada de que dos programas se hablen: uno hace una solicitud (por ejemplo, GET o POST) y el otro devuelve una respuesta, normalmente en JSON. Piensa en ella como un mesero: toma tu pedido, lo lleva a la cocina y te trae el resultado. Si quieres, te explico con un ejemplo en JavaScript o en Python.'
+  }
+  if (/\b(?:tomate|tomates|sembrar|siembra|agricultura|agronom|cultivo|planta)\b/.test(query)) {
+    return 'Para sembrar tomate en Chile: elige variedad según destino (Limachino o Corazón de Buey para fresco; Roma para industria), asegura pH 6,0–6,8 y buen drenaje, haz almácigo 25–35 días y trasplanta con 4–6 hojas cuando el suelo supere 12–15 °C. Usa 25.000–35.000 plantas/ha [Ejemplo / Demostración], riego por goteo sin mojar el follaje, fertilización fraccionada con N, P y K según análisis de suelo, rotación de 3–4 años sin solanáceas y monitoreo de mosca blanca, tizón y pudrición apical. Si me dices tu zona y si es invernadero o campo, ajusto el calendario.'
+  }
+  if (/\b(?:codigo|código|programar|programacion|javascript|python|react|bug|funcion|función)\b/.test(query)) {
+    return 'Claro. Para avanzar rápido: describe qué debe hacer el código, qué entrada recibe y qué salida esperas; con eso puedo darte una función completa, explicarla por partes y señalar los errores comunes. Si ya tienes código, pégalo y lo revisamos línea por línea.'
+  }
+  if (/\b(?:estudiar|estudio|examen|aprender|teoria|teoría|resumen de estudio)\b/.test(query)) {
+    return 'Para estudiar mejor: divide el tema en bloques pequeños, haz una pregunta por bloque, repite en intervalos (hoy, mañana, en 3 días) y termina explicándolo en tus propias palabras sin mirar apuntes. Si me dices la materia y el tema, te armo un plan de estudio y un resumen claro.'
+  }
+  if (/\b(?:vitimax|catalogo|catálogo|inventario|productos|stock|reporte|informe|resumen|clientes|pedidos|ventas|proveedores|asesorias|plantas)\b/.test(query)) {
+    return buildLocalCatalogSummary(products, modules, query)
+  }
+  if (/\b(?:negocio|negocios|ventas|cliente|clientes|precio|cotizacion|cotización|marketing|emprender)\b/.test(query)) {
+    return 'Para un negocio agrícola, empieza por tres números: costo real por unidad, precio que el cliente acepta y margen resultante. Después separa clientes por frecuencia de compra y enfócate en quienes repiten. Si quieres, armamos juntos una cotización o un plan de seguimiento de clientes.'
+  }
+  if (/\b(?:consejo|consejos|recomendacion|recomendación|qué hago|que hago|dime algo|humor|chiste)\b/.test(query)) {
+    return pick([
+      'Mi consejo: decide primero qué es lo importante, y trata lo demás como ruido. Si quieres, lo aplicamos a tu caso concreto.',
+      'Un chiste corto: ¿Por qué el tomate nunca discute? Porque siempre quiere llegar a su punto. Si quieres otro, voy por otro.',
+      'Consejo práctico: escribe el problema en una frase. Si no puedes escribirlo en una frase, aún no está definido.'
+    ])
+  }
+  return pick([
+    'Te sigo. Cuéntame un poco más y te respondo con criterio, sin rodeos.',
+    'Buena pregunta. Dame el contexto (para qué lo necesitas y qué ya sabes) y lo resolvemos.',
+    'Entendido. ¿Quieres que te lo explique simple, con un ejemplo, o que lo llevemos a un plan concreto?'
+  ])
+}
+
+function buildLocalCatalogSummary(products = [], modules = {}, query = '') {
   const list = filterJunkProducts(products)
   const units = list.reduce((sum, item) => sum + (Number(item.stock) || 0), 0)
   const value = list.reduce((sum, item) => sum + (Number(item.price) || 0) * (Number(item.stock) || 0), 0)
   const low = list.filter((item) => (Number(item.stock) || 0) <= 5).length
-  const query = String(message || '').toLowerCase()
   const parts = []
   if (/iva|impuesto/.test(query)) parts.push('El IVA en Chile es 19%.')
-  if (/producto|catálogo|catalogo|inventario|stock|cuántos|cuantos|resumen|datos/.test(query) || !parts.length) {
-    parts.push(`El catálogo real tiene ${list.length} producto(s), ${units} unidades en stock y un valor de ${formatClpLocal(value)}.`)
-    if (low) parts.push(`${low} producto(s) tienen stock bajo (5 o menos).`)
-  }
+  parts.push(`El catálogo real tiene ${list.length} producto(s), ${units} unidades en stock y un valor de ${formatClpLocal(value)}.`)
+  if (low) parts.push(`${low} producto(s) tienen stock bajo (5 o menos).`)
   const moduleKeys = [
     ['clientes', 'clientes registrados'], ['ventas', 'ventas registradas'],
     ['plantas', 'plantas registradas'], ['proveedores', 'proveedores registrados'],
@@ -2297,7 +2369,12 @@ export function buildLocalDataSummary({ products = [], modules = {}, message = '
   return parts.join(' ')
 }
 
-const GREETING_RE = /^\s*(?:hola|buenas(?:\s+(?:días|tardes|noches))?|buen\s+día|qué\s+tal|como\s+estás|como\s+estas|hey|hi|hello)\s*[!?.,¡¿\s]*$/i
+/** Compatibilidad: antes solo resumía datos; ahora responde al mensaje real. */
+export function buildLocalDataSummary(args = {}) {
+  return buildLocalAssistantAnswer(args)
+}
+
+const GREETING_RE = /^\s*(?:hola|buenas(?:\s+(?:días|tardes|noches))?|buen\s+día|qué\s+tal|q\s+tal|como\s+estás|como\s+estas|hey|hi|hello|lol|jaja(?:ja)?|jeje|xd)\s*[!?.,¡¿\s]*$/i
 const CONTEXT_WORDS_RE = /\b(?:excel|pdf|word|powerpoint|ppt|archivo|planilla|hoja|documento|web|página|pagina|código|codigo|adjunto|pendiente|totales|fila|columna)\b/i
 const FOLLOW_UP_RE = /^\s*(?:y\s|pero\s|además\s|también\s|agrega|agregar|agrégale|añade|añadir|cambia|cambiar|cámbialo|corrige|con\s|sin\s|ponle|quita|sube|baja|ajusta|revisa|explica|detalla|sí\s|si\s|no\s|ok\s|vale\s|gracias)/i
 const STOP_CONTEXT_WORDS = new Set(['los', 'las', 'por', 'para', 'con', 'una', 'uno', 'del', 'que', 'más', 'mas', 'muy', 'pero', 'como', 'cuando', 'donde', 'este', 'esta'])
@@ -2548,7 +2625,7 @@ ${SPANISH_ONLY_RULE}`
 // en unos cientos de tokens: evita agotar el límite por minuto de los modelos
 // gratuitos y permite que la cascada de respaldo responda más rápido.
 export const COMPACT_AI_SYSTEM_PROMPT = SPANISH_ONLY_RULE + `
-Asistente senior de VITIMAX (agricultura, datos, documentos y código). Responde en español chileno, directo y sin rodeos; nunca escribas <think>, razonamientos, nombres de herramientas internos ni enlaces sandbox:/.
+Asistente general y multipropósito de VITIMAX: conversa libremente de cualquier tema (saludos, humor, código, estudios, negocios, consejos, agricultura). Responde SIEMPRE al mensaje exacto del usuario con naturalidad, cercanía y humor cuando corresponda. NUNCA sueltes estadísticas del catálogo, memorias ni resúmenes de VITIMAX salvo que el usuario pregunte por VITIMAX o pida un reporte/datos. Español chileno, directo y sin rodeos; nunca escribas <think>, razonamientos, nombres de herramientas internos ni enlaces sandbox:/.
 Usa el reloj inyectado para plazos y fechas de documentos sin recitarlo; aplica la memoria persistente sin anunciarla. No inventes datos reales: etiqueta los ficticios como [Ejemplo / Demostración], ignora filas de totales, verifica IVA 19%, Precio × Stock y que todas las cifras del turno coincidan.
 Consultas agronómicas (por ejemplo "quiero sembrar tomate"): entrega una recomendación completa y accionable con época y zona, variedad, suelo y pH, preparación, siembra o trasplante, densidad, riego, fertilización, control integrado de plagas y enfermedades, monitoreo, cosecha y precauciones; si falta información local, indícalo y usa [Ejemplo / Demostración] solo para valores orientativos.
 AGENTE ÉLITE: elige y encadena herramientas (tool_choice "auto") hasta 8 pasos sobre Productos, Clientes, Plantas, Inventario, Ventas, Asesorías y Proveedores; no simules crear archivos. Si no hay herramientas, devuelve un bloque \`\`\`json con {"accion":"crear_excel"|"crear_pdf"|"crear_word"|"crear_ppt"|"crear_pagina_web"|"crear_codigo"|"guardar_memoria"|"olvidar_memoria", ...}. Nunca muestres ese JSON al usuario: confirma en una línea el archivo creado.

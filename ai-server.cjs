@@ -104,7 +104,7 @@ ${SPANISH_ONLY_RULE}`
 // Prompt operativo compacto: conserva el contrato senior (documentado arriba)
 // pero gasta unos cientos de tokens por llamada, no miles.
 const compactSystemInstruction = SPANISH_ONLY_RULE + `
-Asistente senior de VITIMAX (agricultura, datos, documentos y código). Español chileno directo; nunca <think>, razonamientos, nombres internos ni enlaces sandbox:/.
+Asistente general y multipropósito de VITIMAX: conversa libremente de cualquier tema (saludos, humor, código, estudios, negocios, consejos, agricultura). Responde SIEMPRE al mensaje exacto del usuario con naturalidad, cercanía y humor cuando corresponda. NUNCA sueltes estadísticas del catálogo, memorias ni resúmenes de VITIMAX salvo que el usuario pregunte por VITIMAX o pida un reporte/datos. Español chileno directo; nunca <think>, razonamientos, nombres internos ni enlaces sandbox:/.
 Usa el reloj inyectado para plazos y documentos sin recitarlo; aplica la memoria sin anunciarla. No inventes datos reales: etiqueta los ficticios [Ejemplo / Demostración], ignora totales, verifica IVA 19% y Precio × Stock con cifras coherentes en todo el turno.
 Consultas agronómicas (por ejemplo "quiero sembrar tomate"): da recomendación completa con época y zona, variedad, suelo y pH, preparación, siembra o trasplante, densidad, riego, fertilización, control integrado de plagas y enfermedades, monitoreo, cosecha y precauciones; si falta información local, indícalo y etiqueta los valores orientativos [Ejemplo / Demostración].
 AGENTE ÉLITE: encadena herramientas hasta 8 pasos sobre Productos, Clientes, Plantas, Inventario, Ventas, Asesorías y Proveedores; no simules archivos. Sin herramientas, devuelve un bloque \`\`\`json con {"accion":"crear_excel"|"crear_pdf"|"crear_word"|"crear_ppt"|"crear_pagina_web"|"crear_codigo"|"guardar_memoria"|"olvidar_memoria", ...} y confirma en una línea el archivo creado.
@@ -497,7 +497,7 @@ function attachmentParts(attachment) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-const GREETING_RE = /^\s*(?:hola|buenas(?:\s+(?:días|tardes|noches))?|buen\s+día|qué\s+tal|como\s+estás|como\s+estas|hey|hi|hello)\s*[!?.,¡¿\s]*$/i
+const GREETING_RE = /^\s*(?:hola|buenas(?:\s+(?:días|tardes|noches))?|buen\s+día|qué\s+tal|q\s+tal|como\s+estás|como\s+estas|hey|hi|hello|lol|jaja(?:ja)?|jeje|xd)\s*[!?.,¡¿\s]*$/i
 const CONTEXT_WORDS_RE = /\b(?:excel|pdf|word|powerpoint|ppt|archivo|planilla|hoja|documento|web|página|pagina|código|codigo|adjunto|pendiente|totales|fila|columna)\b/i
 const FOLLOW_UP_RE = /^\s*(?:y\s|pero\s|además\s|también\s|agrega|agregar|agrégale|añade|añadir|cambia|cambiar|cámbialo|corrige|con\s|sin\s|ponle|quita|sube|baja|ajusta|revisa|explica|detalla|sí\s|si\s|no\s|ok\s|vale\s|gracias)/i
 const STOP_CONTEXT_WORDS = new Set(['los', 'las', 'por', 'para', 'con', 'una', 'uno', 'del', 'que', 'más', 'mas', 'muy', 'pero', 'como', 'cuando', 'donde', 'este', 'esta'])
@@ -544,26 +544,69 @@ function isRetryableAiError(error) {
   return /\b(?:404|408|429|502|503|504)\b|no longer supported|not found|rate.?limit|too many requests|saturad|timeout|tardó|aborted|conexi|offline|fetch failed|network/i.test(text)
 }
 
-// Último recurso con datos reales: el proxy no crea archivos, pero sí entrega
-// un resumen verificable para que la app pueda generarlos en el dispositivo.
+// Último recurso cuando no hay internet: conversación natural primero, datos
+// reales solo si el usuario pregunta por VITIMAX o pide un reporte.
 function serverLocalAnswer(products = [], message = '') {
+  const query = String(message || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim()
+  const pick = (variants) => {
+    let hash = query.length * 31
+    for (let index = 0; index < query.length; index += 1) hash = (hash * 33 + query.charCodeAt(index)) % 100000
+    return variants[hash % variants.length]
+  }
+  if (/^(?:hola|buenas|buen dia|que tal|q tal|hey|hi|hello)\b/.test(query)) {
+    return pick(['Hola, ¿qué resolvemos hoy?', 'Buenas. Estoy aquí, ¿en qué te ayudo?', 'Hola. Dime por dónde empezamos.'])
+  }
+  if (/\b(?:lol|jaja|jajaja|jeje|xd|jks)\b/.test(query)) {
+    return pick(['Jaja, buena. ¿Seguimos con lo que estabas viendo o cambiamos de tema?', 'Jeje, me sumo al buen ánimo. ¿Qué sigue?', 'JAJA. ¿En qué te ayudo ahora?'])
+  }
+  if (/\b(?:gracias|agradecido)\b/.test(query)) {
+    return pick(['Con gusto. Quedo atento si necesitas algo más.', 'De nada. Aquí sigo cuando lo necesites.', 'Pura vida. ¿Vamos con otra cosa?'])
+  }
+  if (/\b(?:como estas|como va|que hay|todo bien)\b/.test(query)) {
+    return 'Bien por aquí, listo para ayudarte. ¿Qué te trae por acá hoy?'
+  }
+  if (/\b(?:api|endpoint|json|rest|http)\b/.test(query)) {
+    return 'Una API es una forma ordenada de que dos programas se hablen: uno hace una solicitud (GET o POST) y el otro devuelve una respuesta, normalmente en JSON. Es como un mesero: toma tu pedido, lo lleva a la cocina y te trae el resultado.'
+  }
+  if (/\b(?:tomate|tomates|sembrar|siembra|agricultura|agronom|cultivo)\b/.test(query)) {
+    return 'Para sembrar tomate: elige variedad según destino, suelo con pH 6,0–6,8 y buen drenaje, almácigo de 25–35 días y trasplante con 4–6 hojas sobre 12–15 °C. Riego por goteo, fertilización según análisis, rotación de 3–4 años y monitoreo de plagas. Dime tu zona y ajusto el calendario.'
+  }
+  if (/\b(?:codigo|programar|programacion|javascript|python|react|bug|funcion)\b/.test(query)) {
+    return 'Claro. Describe qué debe hacer el código, qué entrada recibe y qué salida esperas; con eso doy una función completa, la explico por partes y señalo errores comunes. Si ya tienes código, pégalo y lo revisamos.'
+  }
+  if (/\b(?:estudiar|estudio|examen|aprender|teoria)\b/.test(query)) {
+    return 'Estudia en bloques pequeños, haz una pregunta por bloque y repite en intervalos. Después explica el tema en tus palabras sin mirar apuntes. Dime la materia y te armo un plan.'
+  }
   const list = (Array.isArray(products) ? products : []).filter((item) => {
     const name = String(item?.name ?? item?.nombre ?? item?.producto ?? '')
-    return name.trim() && !/^(?:total|totales|Total Valorado Inventario)\b/i.test(name.trim())
+    return name.trim() && !/^\s*(?:gran\s+)?(?:total(?:es)?|subtotal(?:es)?|suma|resumen|valor(?:izado)?)\b/i.test(name.trim())
   })
   const units = list.reduce((sum, item) => sum + (Number(item.stock) || 0), 0)
   const value = list.reduce((sum, item) => sum + (Number(item.price) || 0) * (Number(item.stock) || 0), 0)
-  const query = String(message || '').toLowerCase()
-  const parts = []
-  if (/iva|impuesto/.test(query)) parts.push('El IVA en Chile es 19%.')
-  parts.push(`El catálogo real tiene ${list.length} productos, ${units} unidades en stock y un valor de $${Math.round(value).toLocaleString('es-CL')}.`)
-  return `${parts.join(' ')} Puedo generar el archivo solicitado con estos datos en tu dispositivo.`
+  if (/\b(?:vitimax|catalogo|inventario|productos|stock|reporte|informe|resumen|clientes|pedidos|ventas|proveedores|asesorias|plantas|iva|impuesto)\b/.test(query)) {
+    const iva = /\b(?:iva|impuesto)\b/.test(query) ? ' El IVA en Chile es 19%.' : ''
+    return `El catálogo real tiene ${list.length} producto(s), ${units} unidades en stock y un valor de $${Math.round(value).toLocaleString('es-CL')}.${iva}`
+  }
+  if (/\b(?:negocio|negocios|ventas|precio|cotizacion|marketing|emprender)\b/.test(query)) {
+    return 'Para un negocio agrícola, empieza por tres números: costo real por unidad, precio aceptado por el cliente y margen. Luego agrupa clientes por frecuencia de compra y enfócate en quienes repiten.'
+  }
+  if (/\b(?:consejo|recomendacion|humor|chiste|dime algo)\b/.test(query)) {
+    return pick(['Mi consejo: decide primero qué es importante y trata lo demás como ruido.', 'Un chiste corto: ¿Por qué el tomate nunca discute? Porque siempre quiere llegar a su punto.', 'Escribe el problema en una frase; si no puedes, aún no está definido.'])
+  }
+  return pick([
+    'Te sigo. Cuéntame un poco más y te respondo con criterio, sin rodeos.',
+    'Buena pregunta. Dame el contexto y lo resolvemos.',
+    'Entendido. ¿Quieres que te lo explique simple, con un ejemplo, o que lo llevemos a un plan concreto?'
+  ])
 }
 
 async function askOpenRouter({ catalog, message, history, attachment, signal, system, memories, temporal, products = [], maxTokens = 6000 }) {
   const content = []
   const attachmentItems = attachmentParts(attachment)
-  const textBlocks = [`CATÁLOGO REAL DE VITIMAX:\n${catalog}`, `CONSULTA DEL USUARIO:\n${message}`]
+  const textBlocks = [
+    `CONSULTA DEL USUARIO (responde exactamente esto):\n${message}`,
+    `CONTEXTO DISPONIBLE (úsalo solo si el usuario pregunta por VITIMAX o pide datos/reportes; nunca lo recites en saludos, humor, código, estudios ni temas generales):\nCATÁLOGO REAL DE VITIMAX:\n${catalog}`
+  ]
   for (const item of attachmentItems) {
     if (item.kind === 'text') textBlocks.push(item.text)
   }
@@ -621,7 +664,7 @@ async function askOpenRouter({ catalog, message, history, attachment, signal, sy
 }
 
 async function askGemini({ catalog, message, history, attachment, signal, system, memories, temporal, maxTokens = 6000 }) {
-  const parts = [{ text: `CATÁLOGO REAL DE VITIMAX:\n${catalog}\n\nCONSULTA DEL USUARIO:\n${message}` }]
+  const parts = [{ text: `CONSULTA DEL USUARIO (responde exactamente esto):\n${message}\n\nCONTEXTO DISPONIBLE (úsalo solo si el usuario pregunta por VITIMAX o pide datos/reportes):\nCATÁLOGO REAL DE VITIMAX:\n${catalog}` }]
   for (const item of attachmentParts(attachment)) {
     if (item.kind === 'text') parts.push({ text: item.text })
     if (item.kind === 'image') parts.push({ inline_data: { mime_type: item.mimeType, data: item.data } })

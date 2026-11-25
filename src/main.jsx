@@ -2536,7 +2536,7 @@ function App({ user, onSignOut, guest = false }) {
         {
           role: 'user',
           content: [
-            { type: 'text', text: `CATÁLOGO ACTUAL (${workingProducts.length} productos):\n${catalogForAi()}\n\nMÓDULOS Y REGISTROS:\n${recordsForAi()}\n\nSOLICITUD DEL USUARIO:\n${message}` },
+            { type: 'text', text: `SOLICITUD DEL USUARIO (responde exactamente esto):\n${message}\n\nCONTEXTO DISPONIBLE (úsalo solo si el usuario pregunta por VITIMAX o pide datos/reportes; nunca lo recites en saludos, humor, código, estudios ni temas generales):\nCATÁLOGO (${workingProducts.length} productos): ${catalogForAi()}\nMÓDULOS Y REGISTROS: ${recordsForAi()}` },
             ...attachmentContentParts(fileAttachment)
           ]
         }
@@ -2777,12 +2777,13 @@ function App({ user, onSignOut, guest = false }) {
         // Último recurso útil: responder con datos reales y archivos generados
         // en el dispositivo, sin dejar al usuario bloqueado por un 429.
         const localData = buildLocalDataSummary({ products: workingProducts, modules: records, message: text })
+        const wantsFile = /\b(?:crea|crear|genera|generar|excel|pdf|word|powerpoint|ppt|web|código|codigo|csv)\b/i.test(text)
         const fileNote = localCreated.length
           ? ` Generé ${localCreated.length} archivo(s) con esos datos; están listos para descargar.`
-          : ' Puedo generar el Excel, PDF, Word, PowerPoint o la web con esos datos en este dispositivo.'
-        const answer = directKey || modes.length
-          ? `${localData}${fileNote}`
-          : localFallback
+          : wantsFile
+            ? ' Puedo hacerlo en este dispositivo con los datos disponibles.'
+            : ''
+        const answer = `${localData}${fileNote}`
         finish(answer, localCreated)
         if (!isRetryableAiError(error)) setNotice(aiErrorMessage(error, 'La IA no respondió.'))
       }

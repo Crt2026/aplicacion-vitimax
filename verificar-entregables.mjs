@@ -11,6 +11,7 @@ import {
   aiModelCascade,
   buildConversationSection,
   buildDemoProducts,
+  buildLocalAssistantAnswer,
   buildLocalDataSummary,
   buildMemorySection,
   buildWelcomeMessage,
@@ -196,9 +197,34 @@ assert.match(localSummary, /\$30\.000/)
 assert.match(localSummary, /IVA en Chile es 19%/)
 assert.match(localSummary, /1 clientes registrados/)
 assert.ok(!localSummary.includes('Total Valorado'), 'Las filas de totales no son datos reales')
+
+const localCatalog = [{ name: 'Producto real', price: 10000, stock: 3 }]
+const localGreeting = buildLocalAssistantAnswer({ products: localCatalog, message: 'hola' })
+const localLaugh = buildLocalAssistantAnswer({ products: localCatalog, message: 'lol' })
+const localThanks = buildLocalAssistantAnswer({ products: localCatalog, message: 'gracias' })
+const localApi = buildLocalAssistantAnswer({ products: localCatalog, message: 'explícame qué es una API' })
+const localTomato = buildLocalAssistantAnswer({ products: localCatalog, message: 'quiero sembrar tomate' })
+for (const answer of [localGreeting, localLaugh, localThanks, localApi, localTomato]) {
+  assert.ok(!answer.includes('catálogo real tiene'), 'El modo local no debe repetir el catálogo en temas generales')
+}
+assert.match(localGreeting, /hola/i)
+assert.match(localLaugh, /jaja|jeje/i)
+assert.match(localThanks, /gusto|nada|pura vida/i)
+assert.match(localApi, /JSON|mesero/i)
+assert.match(localTomato, /pH|tomate/i)
+assert.ok(COMPACT_AI_SYSTEM_PROMPT.includes('NUNCA sueltes estadísticas'), 'El prompt debe prohibir soltar el catálogo en temas generales')
+assert.ok(COMPACT_AI_SYSTEM_PROMPT.includes('conversa libremente de cualquier tema'))
+assert.equal(isJunkProductName('TOTAL VALORIZADO INVENTARIO'), true)
+assert.equal(isJunkProductName('Total general 2026'), true)
+assert.equal(isJunkProductName('Subtotal de ventas'), true)
+assert.equal(isJunkProductName('Vitimax Total'), false, 'Un producto legítimo no debe eliminarse')
+assert.match(mainCode, /SOLICITUD DEL USUARIO \(responde exactamente esto\)/)
+assert.match(serverCode, /CONSULTA DEL USUARIO \(responde exactamente esto\)/)
+assert.match(serverCode, /hola\|buenas\|buen dia\|que tal/, 'El proxy debe responder saludos en modo local')
 assert.match(mainCode, /model:\s*model\s*\|\|/)
 assert.match(mainCode, /error\.status === 429 \? 1500/)
 assert.match(mainCode, /buildLocalDataSummary/)
+assert.match(mainCode, /const wantsFile = /, 'El respaldo local no debe ofrecer archivos en saludos o temas generales')
 assert.match(serverCode, /error\.status === 429 \? 1500/)
 assert.match(serverCode, /openrouter\/free/)
 assert.match(serverCode, /serverLocalAnswer/)
