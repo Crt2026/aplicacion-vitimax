@@ -2176,7 +2176,134 @@ Continúa esta conversación con naturalidad. Es contexto ya compartido: no lo r
 ${elapsed ? `${elapsed}\n` : ''}${lines.join('\n')}`
 }
 
-export const DIRECT_AI_SYSTEM_PROMPT = `Eres el colaborador senior de VITIMAX: inteligente, cercano y con criterio. No eres un asistente que repite fórmulas: trabajas junto al usuario como un colega que entiende su contexto, va al grano y resuelve.
+// Regla literal que va al inicio y al final de todos los system prompt.
+export const SPANISH_ONLY_RULE = 'IDIOMA OBLIGATORIO: Responde SIEMPRE en español natural y profesional (Chile). Está estrictamente prohibido escribir pensamientos internos, notas técnicas, nombres de herramientas o explicaciones en inglés en tus respuestas al usuario.'
+
+function extractAssistantContent(value) {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    return value.map((part) => {
+      if (typeof part === 'string') return part
+      if (part && typeof part === 'object' && typeof part.text === 'string') return part.text
+      return ''
+    }).filter(Boolean).join('\n')
+  }
+  // Nunca se leen campos reasoning / reasoning_content: solo texto visible.
+  if (value && typeof value === 'object' && typeof value.text === 'string') return value.text
+  return ''
+}
+
+const REASONING_START_PATTERNS = [
+  /^\s*(?:analysis|reasoning|thinking|thoughts?|plan|notas? internas?|pensamiento(?:s)? internos?)\s*[:：]/i,
+  /^\s*(?:the user is asking|looking at (?:the )?context|let me (?:create|start|use|check|prepare|build|write|make|review|try)|i (?:need to|should|must|will|have to|can|am going to)|i'll|we (?:need to|should|must|will)|now i (?:need|have|should)|for (?:the|this|excel|pdf|the catalog|the file)|since (?:the|this|only)|based on (?:the )?context|according to (?:the )?context|the (?:context|catalog|user|app|file) (?:is|has|shows|says)|so i|first,? i|next,? i|my plan|to do this)\b/i
+]
+
+const ENGLISH_HINT_RE = /\b(?:the|and|is|are|to|of|for|with|this|that|i|we|my|have|has|need|should|will|can|from|user|context|catalog|file|app|so|now|let|based|according|since|only|also|then|but|if|it|its|as|at|on|in|by|files|both|create|use|check)\b/gi
+const SPANISH_HINT_RE = /\b(?:el|la|los|las|de|del|que|y|en|con|por|para|es|son|al|un|una|se|su|sus|te|tu|necesito|debo|voy|puedo|archivo|archivos|catálogo|catalogo|producto|productos|cliente|clientes|venta|ventas|informe|excel|pdf|word|resumen|total|precio|stock|fecha|generé|generar|creé|crear|lista|datos)\b/gi
+
+function startsWithReasoning(text) {
+  return REASONING_START_PATTERNS.some((pattern) => pattern.test(text))
+}
+
+function isReasoningLine(line) {
+  const trimmed = String(line || '').trim()
+  if (!trimmed) return false
+  if (startsWithReasoning(trimmed)) return true
+  const english = (trimmed.match(ENGLISH_HINT_RE) || []).length
+  const spanish = (trimmed.match(SPANISH_HINT_RE) || []).length
+  return english >= 4 && english > spanish * 2
+}
+
+export function sanitizeAssistantText(value) {
+  const source = extractAssistantContent(value)
+  if (!source) return ''
+  const segments = source.split(/(```[\s\S]*?```)/g)
+  const cleaned = segments.map((segment, index) => {
+    // Los bloques de código (JSON de acciones incluido) se conservan intactos.
+    if (index % 2 === 1) return segment
+    let text = segment
+      .replace(/<\s*think(?:\s[^>]*)?\s*>[\s\S]*?(?:<\s*\/\s*think\s*>|$)/gi, '')
+      .replace(/<\s*\/\s*think\s*>/gi, '')
+      .replace(/<\|\s*(?:thinking|analysis|reasoning)\s*\|>/gi, '')
+    text = text.split(/(\n{2,})/).map((part) => {
+      if (/^\n{2,}$/.test(part)) return part
+      return startsWithReasoning(part.trim()) ? '' : part
+    }).join('')
+    text = text.split('\n').filter((line) => !isReasoningLine(line)).join('\n')
+    return text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n')
+  })
+  return cleaned.join('').trim()
+}
+
+export function assistantTextFromResponse(response = {}) {
+  const source = response && typeof response === 'object' ? response : {}
+  const message = source.message && typeof source.message === 'object' ? source.message : source
+  const delta = source.delta && typeof source.delta === 'object' ? source.delta : null
+  const content = message.content !== undefined ? message.content : delta?.content
+  return sanitizeAssistantText(content)
+}
+
+export function assistantTextFromOpenRouter(payload) {
+  return assistantTextFromResponse({ message: payload?.choices?.[0]?.message || {} })
+}
+
+export function assistantTextFromStreamChunk(chunk) {
+  let payload = chunk
+  if (typeof chunk === 'string') {
+    const data = chunk.split(/\r?\n/).map((line) => line.trim()).find((line) => line.startsWith('data:'))
+    try { payload = JSON.parse(data ? data.slice(5).trim() : chunk) } catch { return '' }
+  }
+  return assistantTextFromResponse({ delta: payload?.choices?.[0]?.delta || {} })
+}
+
+export async function parseOpenRouterStreamResponse(response) {
+  if (!response?.body || typeof response.body.getReader !== 'function') {
+    const payload = await response?.json?.().catch(() => ({})) || {}
+    return { content: assistantTextFromOpenRouter(payload), toolCalls: [], model: payload.model || '' }
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let rawContent = ''
+  let model = ''
+  const toolCalls = []
+  let stop = false
+  while (!stop) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('data:')) continue
+      const data = trimmed.slice(5).trim()
+      if (data === '[DONE]') { stop = true; break }
+      let payload
+      try { payload = JSON.parse(data) } catch { continue }
+      if (payload?.model) model = payload.model
+      const delta = payload?.choices?.[0]?.delta || {}
+      rawContent += assistantTextFromResponse({ delta })
+      for (const tool of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
+        const index = Number.isInteger(tool.index) ? tool.index : 0
+        const current = toolCalls[index] || { id: '', type: 'function', function: { name: '', arguments: '' } }
+        if (tool.id) current.id = tool.id
+        if (tool.type) current.type = tool.type
+        if (tool.function?.name) current.function.name += tool.function.name
+        if (tool.function?.arguments) current.function.arguments += tool.function.arguments
+        toolCalls[index] = current
+      }
+    }
+  }
+  const calls = toolCalls.filter((call) => call && call.function?.name)
+  const content = sanitizeAssistantText(rawContent)
+  if (!content && !calls.length) throw new Error('La IA devolvió una respuesta vacía.')
+  return { content, toolCalls: calls, model }
+}
+
+export const DIRECT_AI_SYSTEM_PROMPT = `${SPANISH_ONLY_RULE}
+
+Eres el colaborador senior de VITIMAX: inteligente, cercano y con criterio. No eres un asistente que repite fórmulas: trabajas junto al usuario como un colega que entiende su contexto, va al grano y resuelve.
 
 IDENTIDAD Y FORMA DE HABLAR
 - Empieza por la respuesta, el cálculo o la acción; no fuerces saludos ni despedidas. Si el usuario te saluda o vuelve después de horas, responde con naturalidad y usa la franja del reloj sin anunciarla.
@@ -2272,9 +2399,12 @@ TIEMPO Y CONTINUIDAD
 - Cuando el usuario vuelve horas después o al día siguiente, retoma la conversación con naturalidad y saluda usando la franja exacta del reloj (Buenos días / Buenas tardes / Buenas noches) sin anunciar que consultaste la hora. En respuestas normales, la primera oración sigue siendo la respuesta, no un saludo ni un dato del reloj.
 
 CONTEXTO
-Recibes el catálogo, los módulos y registros de VITIMAX, el historial COMPLETO de la conversación con la marca de tiempo de cada mensaje y los recuerdos persistentes dentro de este system prompt, además de los archivos adjuntos. Úsalos con criterio, sin repetirlos innecesariamente y sin anunciar que los estás leyendo. Si el usuario se refiere a algo dicho antes, retómalo sin pedirlo de nuevo.`
+Recibes el catálogo, los módulos y registros de VITIMAX, el historial COMPLETO de la conversación con la marca de tiempo de cada mensaje y los recuerdos persistentes dentro de este system prompt, además de los archivos adjuntos. Úsalos con criterio, sin repetirlos innecesariamente y sin anunciar que los estás leyendo. Si el usuario se refiere a algo dicho antes, retómalo sin pedirlo de nuevo.
 
-export const EXCEL_SYSTEM_PROMPT = `Eres el generador de Excel de VITIMAX. Creas planillas reales, completas y listas para usar, con fórmulas activas y formato profesional.
+${SPANISH_ONLY_RULE}`
+
+export const EXCEL_SYSTEM_PROMPT = `${SPANISH_ONLY_RULE}
+Eres el generador de Excel de VITIMAX. Creas planillas reales, completas y listas para usar, con fórmulas activas y formato profesional.
 Debes llamar a la herramienta crear_excel (o devolver SOLO un objeto JSON si la herramienta no está disponible) con esta forma:
 {
   "filename": "reporte-vitimax.xlsx",
@@ -2300,15 +2430,20 @@ Reglas obligatorias:
 - No uses "-" como valor: deja "" si falta un dato.
 - En la columna Origen o Notas indica "Catálogo VITIMAX" para datos reales y "Generado por IA (ejemplo)" para datos inventados.
 - Incluye en "productos" los productos que deban quedar guardados en la app. Si el usuario pide crear el catálogo desde cero, inclúyelos.
-- No agregues explicaciones fuera del JSON ni de la llamada a la herramienta.`
+- No agregues explicaciones fuera del JSON ni de la llamada a la herramienta.
 
-export const SALES_SYSTEM_PROMPT = `Eres el analista comercial de VITIMAX. Recibes una simulación de ventas en JSON y debes entregar recomendaciones concretas en español.
+${SPANISH_ONLY_RULE}`
+
+export const SALES_SYSTEM_PROMPT = `${SPANISH_ONLY_RULE}
+Eres el analista comercial de VITIMAX. Recibes una simulación de ventas en JSON y debes entregar recomendaciones concretas en español.
 Reglas:
 - Explica primero el panorama en 3 a 5 líneas.
 - Luego entrega recomendaciones numeradas y accionables: stock, precios, promociones, combos, clientes, canales y seguimiento.
 - Distingue claramente que es una proyección de ejemplo y no una promesa de ventas.
 - No inventes datos que no estén en la simulación; si falta información, dilo.
-- Termina con 3 próximos pasos medibles.`
+- Termina con 3 próximos pasos medibles.
+
+${SPANISH_ONLY_RULE}`
 
 // ---------------------------------------------------------------------------
 // Herramientas (function calling de OpenRouter)

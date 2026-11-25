@@ -36,7 +36,11 @@ const rawOrigins = (process.env.AI_ALLOWED_ORIGINS || '*')
   .filter(Boolean)
 const allowAllOrigins = rawOrigins.length === 0 || rawOrigins.includes('*')
 
-const systemInstruction = `Eres el colaborador senior de VITIMAX: inteligente, cercano y con criterio. Trabajas junto al usuario como un colega: entiendes el contexto, vas al grano y resuelves.
+const SPANISH_ONLY_RULE = 'IDIOMA OBLIGATORIO: Responde SIEMPRE en español natural y profesional (Chile). Está estrictamente prohibido escribir pensamientos internos, notas técnicas, nombres de herramientas o explicaciones en inglés en tus respuestas al usuario.'
+
+const systemInstruction = `${SPANISH_ONLY_RULE}
+
+Eres el colaborador senior de VITIMAX: inteligente, cercano y con criterio. Trabajas junto al usuario como un colega: entiendes el contexto, vas al grano y resuelves.
 
 IDENTIDAD Y FORMA DE HABLAR
 - Empieza por la respuesta, el cálculo o la acción; no fuerces saludos ni despedidas. Si el usuario te saluda o vuelve después de horas, responde con naturalidad y usa la franja del reloj sin anunciarla.
@@ -133,9 +137,52 @@ REGLAS DE TRABAJO:
 - Nunca escribas enlaces internos como [texto](sandbox:/archivo) ni fórmulas LaTeX con "$". Escribe "$2~a~3~L/ha$" como "2 a 3 L/ha" y "\$0" como "$0": la app muestra el texto limpio y una tarjeta de descarga.
 - En documentos usa tablas Markdown con "|" cuando haya datos comparables; el motor las convierte en tablas reales con bordes proporcionales.
 - Para catálogos, el motor calcula los totales reales (suma de productos y valor de inventario Precio × Stock) desde la app: no escribas filas de totales manuales.
-- Usa listas y pasos cuando ayuden. Ten en cuenta el historial de la conversación.`
+- Usa listas y pasos cuando ayuden. Ten en cuenta el historial de la conversación.
+
+${SPANISH_ONLY_RULE}`
 
 const rateBuckets = new Map()
+
+const REASONING_START_PATTERNS = [
+  /^\s*(?:analysis|reasoning|thinking|thoughts?|plan|notas? internas?|pensamiento(?:s)? internos?)\s*[:：]/i,
+  /^\s*(?:the user is asking|looking at (?:the )?context|let me (?:create|start|use|check|prepare|build|write|make|review|try)|i (?:need to|should|must|will|have to|can|am going to)|i'll|we (?:need to|should|must|will)|now i (?:need|have|should)|for (?:the|this|excel|pdf|the catalog|the file)|since (?:the|this|only)|based on (?:the )?context|according to (?:the )?context|the (?:context|catalog|user|app|file) (?:is|has|shows|says)|so i|first,? i|next,? i|my plan|to do this)\b/i
+]
+const ENGLISH_HINT_RE = /\b(?:the|and|is|are|to|of|for|with|this|that|i|we|my|have|has|need|should|will|can|from|user|context|catalog|file|app|so|now|let|based|according|since|only|also|then|but|if|it|its|as|at|on|in|by|files|both|create|use|check)\b/gi
+const SPANISH_HINT_RE = /\b(?:el|la|los|las|de|del|que|y|en|con|por|para|es|son|al|un|una|se|su|sus|te|tu|necesito|debo|voy|puedo|archivo|archivos|catálogo|catalogo|producto|productos|cliente|clientes|venta|ventas|informe|excel|pdf|word|resumen|total|precio|stock|fecha|generé|generar|creé|crear|lista|datos)\b/gi
+
+// Quita razonamiento interno del texto que llega al usuario. Nunca se leen
+// campos reasoning / reasoning_content: solo el contenido visible.
+function sanitizeAssistantText(value, allowJson = true) {
+  let source = typeof value === 'string' ? value : ''
+  if (!source && value && typeof value === 'object' && typeof value.text === 'string') source = value.text
+  if (!source) return ''
+  const segments = allowJson ? source.split(/(```[\s\S]*?```)/g) : [source]
+  const cleaned = segments.map((segment, index) => {
+    if (allowJson && index % 2 === 1) return segment
+    let text = segment
+      .replace(/<\s*think(?:\s[^>]*)?\s*>[\s\S]*?(?:<\s*\/\s*think\s*>|$)/gi, '')
+      .replace(/<\s*\/\s*think\s*>/gi, '')
+      .replace(/<\|(?:\s*thinking|\s*analysis|\s*reasoning)\s*\|>/gi, '')
+    text = text.split(/(\n{2,})/).map((part) => {
+      if (/^\n{2,}$/.test(part)) return part
+      const trimmed = part.trim()
+      if (!trimmed) return part
+      if (REASONING_START_PATTERNS.some((pattern) => pattern.test(trimmed))) return ''
+      const english = (trimmed.match(ENGLISH_HINT_RE) || []).length
+      const spanish = (trimmed.match(SPANISH_HINT_RE) || []).length
+      return english >= 4 && english > spanish * 2 ? '' : part
+    }).join('')
+    return text.split('\n').filter((line) => {
+      const trimmed = line.trim()
+      if (!trimmed) return true
+      if (REASONING_START_PATTERNS.some((pattern) => pattern.test(trimmed))) return false
+      const english = (trimmed.match(ENGLISH_HINT_RE) || []).length
+      const spanish = (trimmed.match(SPANISH_HINT_RE) || []).length
+      return !(english >= 4 && english > spanish * 2)
+    }).join('\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n')
+  })
+  return cleaned.join('').trim()
+}
 
 function isRateLimited(ip) {
   const now = Date.now()
@@ -550,7 +597,9 @@ async function askOpenRouter({ catalog, message, history, attachment, signal, sy
     error.status = result.status
     throw error
   }
-  return { text: payload.choices?.[0]?.message?.content?.trim(), model: payload.model || model }
+  // Solo se lee content: nunca reasoning ni reasoning_content.
+  const aiMessage = payload.choices?.[0]?.message || {}
+  return { text: sanitizeAssistantText(aiMessage.content), model: payload.model || model }
 }
 
 async function askGemini({ catalog, message, history, attachment, signal, system, memories, temporal, maxTokens = 1500 }) {
@@ -583,7 +632,7 @@ async function askGemini({ catalog, message, history, attachment, signal, system
     error.status = result.status
     throw error
   }
-  return { text: payload.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim(), model }
+  return { text: sanitizeAssistantText(payload.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join(''), false), model }
 }
 
 const server = http.createServer(async (request, response) => {

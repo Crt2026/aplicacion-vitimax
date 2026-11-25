@@ -19,7 +19,11 @@ const allowedAttachmentTypes = new Set([
   'application/json'
 ])
 
-const systemInstruction = `Eres el BOT IA oficial de VITIMAX. Ayudas a clientes y administradores con catálogo, inventario, ventas, Excel, PDF, Word, PowerPoint, publicaciones, creación de páginas web, análisis de archivos y cualquier consulta general.
+const SPANISH_ONLY_RULE = 'IDIOMA OBLIGATORIO: Responde SIEMPRE en español natural y profesional (Chile). Está estrictamente prohibido escribir pensamientos internos, notas técnicas, nombres de herramientas o explicaciones en inglés en tus respuestas al usuario.'
+
+const systemInstruction = `${SPANISH_ONLY_RULE}
+
+Eres el BOT IA oficial de VITIMAX. Ayudas a clientes y administradores con catálogo, inventario, ventas, Excel, PDF, Word, PowerPoint, publicaciones, creación de páginas web, análisis de archivos y cualquier consulta general.
 Reglas obligatorias:
 - Si el catálogo tiene productos, úsalos como fuente principal y respeta sus datos reales.
 - Si el catálogo está VACÍO y el usuario pide un catálogo, productos de ejemplo, plantas, tierra, abonos, fertilizantes, precios, stock o dosis, GENERA datos completos y realistas (ID, categoría, precio en CLP, stock, formato, descripción, dosis, recomendaciones). No te niegues y no entregues un archivo vacío.
@@ -31,7 +35,39 @@ Reglas obligatorias:
 - Si el usuario pide un archivo o una acción, responde además con un bloque \`\`\`json: {"accion":"crear_excel","filename":"catalogo-vitimax.xlsx","resumen":"...","productos":[...],"sheets":[{"name":"Productos","columns":[...],"rows":[[...]]}]} incluyendo las 7 hojas (Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores); {"accion":"registrar_productos_en_app","productos":[...]}; {"accion":"simular_ventas","periodoDias":30}; o {"accion":"crear_documento","documento":{"tipo":"pdf|word|ppt","titulo":"...","contenido":"..."}}. En Excel, Productos y Clientes son la fuente de IDs/nombres: Inventario, Ventas y Asesorias los repiten exactamente (Ventas y Asesorias incluyen "ID Cliente", Ventas incluye "ID Producto"); Plantas usa PLT-001… y Proveedores PRV-001… en la columna A; ninguna fecha de Ventas supera la fecha actual; fórmulas en inglés con coma y formato CLP "$#,##0".
 - Para correo y calendario: {"accion":"leer_correos","proveedor":"auto","limite":10}, {"accion":"enviar_correo","destinatario":"...","asunto":"...","cuerpo":"..."} (nunca "confirmar": true: la app pide aprobación visual) o {"accion":"crear_evento_calendario","titulo":"...","inicio":"...","fin":"...","zonaHoraria":"America/Santiago"}. Nunca pidas contraseñas ni tokens.
 - No uses "-" como dato: deja el campo vacío o escribe "Pendiente". Precios en CLP como números.
-- Responde en español, de forma clara, práctica y accionable.`
+- Responde en español, de forma clara, práctica y accionable.
+
+${SPANISH_ONLY_RULE}`
+
+const REASONING_START_PATTERNS = [
+  /^\s*(?:analysis|reasoning|thinking|thoughts?|plan|notas? internas?|pensamiento(?:s)? internos?)\s*[:：]/i,
+  /^\s*(?:the user is asking|looking at (?:the )?context|let me (?:create|start|use|check|prepare|build|write|make|review|try)|i (?:need to|should|must|will|have to|can|am going to)|i'll|we (?:need to|should|must|will)|now i (?:need|have|should)|for (?:the|this|excel|pdf|the catalog|the file)|since (?:the|this|only)|based on (?:the )?context|according to (?:the )?context|the (?:context|catalog|user|app|file) (?:is|has|shows|says)|so i|first,? i|next,? i|my plan|to do this)\b/i
+]
+const ENGLISH_HINT_RE = /\b(?:the|and|is|are|to|of|for|with|this|that|i|we|my|have|has|need|should|will|can|from|user|context|catalog|file|app|so|now|let|based|according|since|only|also|then|but|if|it|its|as|at|on|in|by|files|both|create|use|check)\b/gi
+const SPANISH_HINT_RE = /\b(?:el|la|los|las|de|del|que|y|en|con|por|para|es|son|al|un|una|se|su|sus|te|tu|necesito|debo|voy|puedo|archivo|archivos|catálogo|catalogo|producto|productos|cliente|clientes|venta|ventas|informe|excel|pdf|word|resumen|total|precio|stock|fecha|generé|generar|creé|crear|lista|datos)\b/gi
+
+// Nunca se leen campos reasoning / reasoning_content: solo texto visible.
+function sanitizeAssistantText(value) {
+  const source = typeof value === 'string' ? value : ''
+  if (!source) return ''
+  const segments = source.split(/(```[\s\S]*?```)/g)
+  const cleaned = segments.map((segment, index) => {
+    if (index % 2 === 1) return segment
+    let text = segment
+      .replace(/<\s*think(?:\s[^>]*)?\s*>[\s\S]*?(?:<\s*\/\s*think\s*>|$)/gi, '')
+      .replace(/<\s*\/\s*think\s*>/gi, '')
+      .replace(/<\|(?:\s*thinking|\s*analysis|\s*reasoning)\s*\|>/gi, '')
+    return text.split('\n').filter((line) => {
+      const trimmed = line.trim()
+      if (!trimmed) return true
+      if (REASONING_START_PATTERNS.some((pattern) => pattern.test(trimmed))) return false
+      const english = (trimmed.match(ENGLISH_HINT_RE) || []).length
+      const spanish = (trimmed.match(SPANISH_HINT_RE) || []).length
+      return !(english >= 4 && english > spanish * 2)
+    }).join('\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n')
+  })
+  return cleaned.join('').trim()
+}
 
 const TEMPORAL_MARKER = 'RELOJ Y CONTEXTO TEMPORAL EN VIVO'
 
@@ -139,7 +175,7 @@ exports.vitimaxAssistant = onCall(
       throw new HttpsError('unavailable', 'Google Gemini no pudo responder. Inténtalo nuevamente.')
     }
     const result = await response.json()
-    const text = result.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim()
+    const text = sanitizeAssistantText(result.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join(''))
     if (typeof text !== 'string' || !text.trim()) {
       throw new HttpsError('unavailable', 'Google Gemini devolvió una respuesta vacía.')
     }

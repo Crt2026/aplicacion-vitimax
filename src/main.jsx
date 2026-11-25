@@ -39,6 +39,9 @@ import {
 import {
   ASSISTANT_TOOLS,
   DIRECT_AI_SYSTEM_PROMPT,
+  SPANISH_ONLY_RULE,
+  assistantTextFromOpenRouter,
+  assistantTextFromResponse,
   MEMORY_CATEGORIES,
   MEMORY_STORAGE_KEY,
   analyzeWorkbook,
@@ -69,9 +72,11 @@ import {
   leerCorreosOAuth,
   oauthErrorMessage,
   parseJsonBlock,
+  parseOpenRouterStreamResponse,
   parseWorkbookImport,
   productToRow,
   resolveDisplayName,
+  sanitizeAssistantText,
   simulateSales,
   summarizeSimulation
 } from './ai-data.js'
@@ -212,7 +217,7 @@ function restoreChatMessages(saved) {
   return saved
     .filter((item) => item && typeof item === 'object' && typeof item.text === 'string')
     .map((item) => {
-      const clean = { ...item, text: item.text, pending: false }
+      const clean = { ...item, text: item.role === 'assistant' ? sanitizeAssistantText(item.text) : item.text, pending: false }
       const files = Array.isArray(item.files)
         ? item.files
           .filter((file) => file && typeof file === 'object')
@@ -904,13 +909,14 @@ function affordableTokensFromError(payload) {
   return values.length ? Math.min(...values) : 0
 }
 
-async function askOpenRouterChatOnce({ messages, apiKey, tools, toolChoice, maxTokens = 1500, temperature = 0.7, responseFormat }) {
+async function askOpenRouterChatOnce({ messages, apiKey, tools, toolChoice, maxTokens = 1500, temperature = 0.7, responseFormat, stream = false }) {
   const body = {
     models: DIRECT_AI_MODELS,
     messages,
     temperature,
     max_tokens: maxTokens
   }
+  if (stream) body.stream = true
   if (tools?.length) {
     body.tools = tools
     body.tool_choice = toolChoice || 'auto'
@@ -926,14 +932,15 @@ async function askOpenRouterChatOnce({ messages, apiKey, tools, toolChoice, maxT
     },
     body: JSON.stringify(body)
   }, 240_000)
+  const readPayload = (res) => (res.ok && stream ? Promise.resolve(null) : res.json().catch(() => ({})))
   let response = await send()
-  let payload = await response.json().catch(() => ({}))
+  let payload = await readPayload(response)
   // Algunos modelos gratuitos no aceptan function calling: reintentamos sin herramientas.
   if (!response.ok && body.tools && /tool|function|unsupported|not support|invalid.*parameter/i.test(String(payload?.error?.message || ''))) {
     delete body.tools
     delete body.tool_choice
     response = await send()
-    payload = await response.json().catch(() => ({}))
+    payload = await readPayload(response)
   }
   // Si el modelo no acepta PDF como archivo, se reintenta avisando que el PDF no se pudo adjuntar.
   if (!response.ok && JSON.stringify(body.messages).includes('"type":"file"') && /file|pdf|content|unsupported|invalid/i.test(String(payload?.error?.message || ''))) {
@@ -946,7 +953,7 @@ async function askOpenRouterChatOnce({ messages, apiKey, tools, toolChoice, maxT
       }
       : item)
     response = await send()
-    payload = await response.json().catch(() => ({}))
+    payload = await readPayload(response)
   }
   // Crédito insuficiente para el máximo pedido: bajar max_tokens y reintentar.
   let lowered = 0
@@ -959,12 +966,14 @@ async function askOpenRouterChatOnce({ messages, apiKey, tools, toolChoice, maxT
     body.max_tokens = next
     lowered += 1
     response = await send()
-    payload = await response.json().catch(() => ({}))
+    payload = await readPayload(response)
   }
   if (!response.ok) throw new Error(payload?.error?.message || `La IA rechazó la solicitud (${response.status}).`)
-  const message = payload.choices?.[0]?.message || {}
-  const content = String(message.content || message.reasoning || '').trim()
-  const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : []
+  // Tanto el modo streaming como el completo pasan por el mismo saneamiento.
+  // Nunca se lee message.reasoning ni delta.reasoning: solo el texto visible.
+  if (stream) return parseOpenRouterStreamResponse(response)
+  const content = assistantTextFromOpenRouter(payload)
+  const toolCalls = Array.isArray(payload?.choices?.[0]?.message?.tool_calls) ? payload.choices[0].message.tool_calls : []
   if (!content && !toolCalls.length) throw new Error('La IA devolvió una respuesta vacía.')
   return { content, toolCalls, model: payload.model || '' }
 }
@@ -1063,7 +1072,9 @@ async function importWorkbookWithAi(rawText, fileName, settings) {
   return null
 }
 
-const GENERATION_SYSTEM_PROMPT = `Eres el generador de entregables de VITIMAX. Produces archivos reales, completos y listos para usar.
+const GENERATION_SYSTEM_PROMPT = `${SPANISH_ONLY_RULE}
+
+Eres el generador de entregables de VITIMAX. Produces archivos reales, completos y listos para usar.
 Reglas:
 - Escribe siempre en español neutro.
 - Si el catálogo tiene productos, úsalos como fuente principal y respeta sus datos reales.
@@ -1071,7 +1082,9 @@ Reglas:
 - Nunca presentes un dato generado como información oficial de VITIMAX.
 - Devuelve únicamente el contenido pedido, sin explicaciones antes ni después.
 - PROHIBIDO incluir frases meta como "no tengo acceso", "parece que", "como modelo", "aquí tienes", "no puedo", disculpas, aclaraciones o comentarios sobre el proceso. Si falta información, escribe "Pendiente" dentro del propio contenido.
-- El archivo debe contener solo el entregable final: nada de conversación, notas ni advertencias fuera del contenido solicitado.`
+- El archivo debe contener solo el entregable final: nada de conversación, notas ni advertencias fuera del contenido solicitado.
+
+${SPANISH_ONLY_RULE}`
 
 const PAGE_SYSTEM_PROMPT = `${GENERATION_SYSTEM_PROMPT}
 - Para páginas web devuelve SOLO un documento HTML5 completo y autónomo (DOCTYPE, head, style y body).
@@ -2413,7 +2426,8 @@ function App({ user, onSignOut, guest = false, oauthRefresh = 0, onConnectOAuth 
     const history = messages
       .filter((item) => !item.pending && item.text !== '…' && typeof item.text === 'string' && item.text.trim())
       .flatMap((item) => {
-        const rows = [{ role: item.role === 'tool' ? 'assistant' : item.role, content: item.text, ...(item.at ? { at: item.at } : {}) }]
+        const visibleText = item.role === 'assistant' ? sanitizeAssistantText(item.text) : item.text
+        const rows = [{ role: item.role === 'tool' ? 'assistant' : item.role, content: visibleText, ...(item.at ? { at: item.at } : {}) }]
         if (Array.isArray(item.tools)) {
           for (const tool of item.tools.slice(-6)) {
             const detail = typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result || {})
@@ -2515,7 +2529,7 @@ function App({ user, onSignOut, guest = false, oauthRefresh = 0, onConnectOAuth 
       const files = created.map(toFileExtra).filter(Boolean)
       if (files.length) artifactsRef.current = files
       const regNote = registered?.length ? `\n\n✅ ${registered.length} productos generados por IA quedaron guardados en el catálogo de VITIMAX.` : ''
-      const textOut = `${String(messageText || 'Listo.').trim()}${regNote}`
+      const textOut = `${sanitizeAssistantText(messageText) || 'Listo.'}${regNote}`
       const extra = {}
       if (files.length) {
         extra.files = files
@@ -2928,7 +2942,7 @@ function App({ user, onSignOut, guest = false, oauthRefresh = 0, onConnectOAuth 
       }
       return null
     }
-    const stripActionJson = (value) => String(value || '').replace(/```(?:json)?\s*\{[\s\S]*?\}\s*```/gi, '').trim()
+    const stripActionJson = (value) => sanitizeAssistantText(String(value || '').replace(/```(?:json)?\s*\{[\s\S]*?\}\s*```/gi, ''))
     void (async () => {
       try {
         if (!modes.length) {

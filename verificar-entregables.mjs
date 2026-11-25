@@ -17,7 +17,11 @@ import {
   mergeWorkbookSheets,
   normalizeImportedRecords,
   resolveDisplayName,
-  SHEET_NAMES
+  SHEET_NAMES,
+  assistantTextFromOpenRouter,
+  assistantTextFromStreamChunk,
+  sanitizeAssistantText,
+  SPANISH_ONLY_RULE
 } from './src/ai-data.js'
 import { sanitizeText } from './src/text-utils.js'
 import {
@@ -66,6 +70,23 @@ assert.equal(sanitizeText('$50kg/ha$'), '50 kg/ha')
 assert.equal(sanitizeText('\\$0'), '$0')
 assert.equal(sanitizeText('**negrita** y `#`'), 'negrita y')
 console.log('Sanitización de texto: OK')
+
+// La respuesta visible nunca debe incluir razonamiento interno en inglés.
+const fullResponse = {
+  choices: [{ message: {
+    content: 'Listo, generé el Excel con 10 productos.',
+    reasoning: 'The user is asking for an Excel file. I need to create sheets.',
+    reasoning_content: 'Let me check the catalog first.'
+  } }]
+}
+assert.equal(assistantTextFromOpenRouter(fullResponse), 'Listo, generé el Excel con 10 productos.')
+const streamChunk = 'data: {"choices":[{"delta":{"reasoning":"I should prepare the PDF","content":"Aquí tienes el PDF."}}]}\r\n\r\n'
+assert.equal(assistantTextFromStreamChunk(streamChunk), 'Aquí tienes el PDF.')
+assert.equal(sanitizeAssistantText('<think>Let me create the workbook</think>\nEl archivo está listo.'), 'El archivo está listo.')
+assert.ok(SPANISH_ONLY_RULE.includes('IDIOMA OBLIGATORIO'))
+assert.ok(DIRECT_AI_SYSTEM_PROMPT.startsWith(SPANISH_ONLY_RULE))
+assert.ok(DIRECT_AI_SYSTEM_PROMPT.trimEnd().endsWith(SPANISH_ONLY_RULE))
+console.log('Filtro de razonamiento e idioma obligatorio: OK')
 
 // Memoria + historial inyectados en el system prompt.
 const memoryPrompt = buildMemorySection([{ categoria: 'Negocio', contenido: 'El IVA es 19%' }])
