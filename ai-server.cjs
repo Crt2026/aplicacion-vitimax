@@ -97,7 +97,7 @@ DATOS DE VITIMAX
 
 ACCIONES EN LA APP (bloques JSON):
 Cuando el usuario pida un archivo o una acción, responde con un bloque \`\`\`json y el resto del texto que quieras mostrar:
-- Excel / catálogo / planilla: {"accion":"crear_excel","filename":"reporte-vitimax.xlsx","resumen":"...","productos":[{...}],"kpis":[{"nombre":"Ventas totales","formula":"=SUM(Ventas!E2:E50)","unidad":"CLP","interpretacion":"..."}],"sheets":[{"name":"Productos","columns":[...],"rows":[[...]]}]}. Para catálogo general incluye las 7 hojas; para auditoría usa las hojas necesarias con "Resumen Ejecutivo" primero y fórmulas reales que empiecen con "=".
+- Excel / catálogo / planilla: {"accion":"crear_excel","filename":"reporte-vitimax.xlsx","resumen":"...","productos":[{...}],"kpis":[{"nombre":"Ventas totales","formula":"=SUM(Ventas!G2:G50)","unidad":"CLP","interpretacion":"..."}],"sheets":[{"name":"Productos","columns":[...],"rows":[[...]]}]}. Para catálogo general incluye las 7 hojas; para auditoría usa las hojas necesarias con "Resumen Ejecutivo" primero y fórmulas reales que empiecen con "=". Productos y Clientes son la fuente de IDs/nombres: Inventario, Ventas y Asesorias deben repetirlos exactamente (Ventas y Asesorias incluyen "ID Cliente", Ventas incluye "ID Producto"); Plantas usa PLT-001, PLT-002… y Proveedores PRV-001, PRV-002… en la columna A; ninguna fecha de Ventas supera la fecha actual.
 - PDF: {"accion":"crear_pdf","titulo":"...","subtitulo":"...","contenido":"# Título\\n## Sección\\n- Punto\\n\\n| Columna | Valor |\\n| --- | --- |\\n| Dato | 10 |","filename":"documento.pdf"}. No incluyas "Fecha:" ni la fecha de hoy: la cabecera la agrega la app una sola vez. Texto plano: sin LaTeX, sin "$...$", sin "~", "**" ni "#" dentro de celdas. Precios como "$15.000", dosis como "2 a 3 L/ha"; no inventes totales.
 - Word: {"accion":"crear_word","titulo":"...","subtitulo":"...","contenido":"# Título\\n## Sección\\n- Punto","filename":"documento.docx"}. Mismas reglas de texto plano y totales reales.
 - PowerPoint: {"accion":"crear_ppt","titulo":"...","subtitulo":"...","contenido":"Diapositiva 1\\n- Punto\\n---\\nDiapositiva 2\\n- Punto","filename":"presentacion.pptx"} o, si prefieres, "diapositivas":[{"titulo":"...","puntos":["..."]}]. Formato 16:9, máximo 5 viñetas y 5 filas de tabla por diapositiva, tablas con columnas Nombre, Categoría, Formato, Precio y Descripción, y cierre "Próximos Pasos" con 3 o 4 recomendaciones accionables sin repetir nombres de productos. Sin LaTeX.
@@ -106,10 +106,14 @@ Cuando el usuario pida un archivo o una acción, responde con un bloque \`\`\`js
 - Documento genérico: {"accion":"crear_documento","documento":{"tipo":"pdf|word|ppt","titulo":"...","contenido":"# Título\\n## Sección\\n- Punto"}}
 - Guardar productos en el catálogo: {"accion":"registrar_productos_en_app","productos":[{...}],"reemplazar":false}
 - Simular ventas: {"accion":"simular_ventas","periodoDias":30,"crecimientoMensual":0}
-- Excel: la primera hoja es "Resumen Ejecutivo" con tarjetas de KPIs, fórmulas reales (=SUM, =AVERAGE, =COUNTIF, =IF), formato CLP "$#,##0", columnas autoajustadas, encabezados congelados y autofiltros. Cero Markdown en celdas.
+- Excel: la primera hoja es "Resumen Ejecutivo" con tarjetas de KPIs, fórmulas reales en inglés y con coma (=SUM, =AVERAGE, =COUNTIF, =SUMPRODUCT, =COUNTA, =IF; nunca =SUMA ni =PROMEDIO), formato CLP "$#,##0", fechas dd-mm-yyyy, columnas autoajustadas, encabezados congelados y autofiltros. Cero Markdown en celdas.
 - PDF y Word: banner corporativo verde bosque #1E4D2B, tarjetas con sumas reales verificadas y tablas proporcionales. La fecha se imprime una sola vez en la cabecera; no la repitas en el cuerpo. Sanitización absoluta: sin "\\$", sin LaTeX como "$50kg/ha$" y sin marcas crudas "#" ni "**".
 - Guardar un recuerdo persistente: {"accion":"guardar_memoria","categoria":"Negocio|Preferencias|Instrucciones|Datos personales|Clientes|Productos|Finanzas|Otros","dato":"..."}
 - Olvidar o actualizar un recuerdo: {"accion":"olvidar_memoria","clave_o_id":"...","nuevo_dato":"..."}
+- Leer correos: {"accion":"leer_correos","proveedor":"auto","limite":10,"remitente":"","asunto":"","busqueda":"","noLeidos":false}. Si la cuenta no está conectada, dilo en una línea y ofrece el botón "Conectar".
+- Preparar correo: {"accion":"enviar_correo","destinatario":"...","asunto":"...","cuerpo":"...","adjuntos":[]}. Nunca incluyas "confirmar": true: la app muestra una tarjeta y el usuario aprueba el envío.
+- Agendar reunión o asesoría: {"accion":"crear_evento_calendario","titulo":"...","inicio":"2026-11-25T10:00:00","fin":"2026-11-25T11:00:00","zonaHoraria":"America/Santiago","asistentes":[]}.
+- Nunca pidas contraseñas, claves ni tokens de correo: la conexión se hace desde el botón "Conectar" del BOT.
 
 MEMORIA PERSISTENTE:
 - Usa los recuerdos disponibles de forma natural, como si ya conocieras al usuario. No digas "según mi base de datos", "como te dije antes" ni anuncies que consultas memoria.
@@ -152,7 +156,7 @@ function corsHeaders(origin) {
   if (allowAllOrigins) {
     return {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'Content-Type, X-Vitimax-Token',
+      'Access-Control-Allow-Headers': 'Content-Type, X-Vitimax-Token, X-Vitimax-OAuth-Token, X-Vitimax-OAuth-Provider, Authorization',
       'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
       'Access-Control-Max-Age': '86400'
     }
@@ -187,6 +191,77 @@ function readBody(request) {
     request.on('end', () => resolve(body))
     request.on('error', reject)
   })
+}
+
+function oauthSessionFromRequest(request) {
+  const accessToken = String(request.headers['x-vitimax-oauth-token'] || '').trim()
+  const requested = String(request.headers['x-vitimax-oauth-provider'] || 'auto').trim()
+  if (!accessToken) return null
+  const providerId = requested === 'microsoft' || requested === 'microsoft.com'
+    ? 'microsoft.com'
+    : requested === 'google' || requested === 'google.com'
+      ? 'google.com'
+      : 'google.com'
+  return { providerId, accessToken }
+}
+
+function oauthProviderMatches(session, requested) {
+  const want = requested === 'microsoft' || requested === 'microsoft.com'
+    ? 'microsoft.com'
+    : requested === 'google' || requested === 'google.com'
+      ? 'google.com'
+      : session.providerId
+  return want === session.providerId
+}
+
+async function oauthFetchNode(url, session, init = {}) {
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${session.accessToken}`,
+      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(init.headers || {})
+    }
+  })
+  if (!response.ok) {
+    let detail = ''
+    try {
+      const payload = await response.json()
+      detail = payload?.error?.message || payload?.error?.code || payload?.message || ''
+    } catch { /* sin JSON */ }
+    if (response.status === 401) throw Object.assign(new Error('El permiso de correo venció. Vuelve a conectar tu cuenta.'), { status: 401 })
+    if (response.status === 403) throw Object.assign(new Error('Faltan permisos de correo o calendario. Autoriza de nuevo desde el BOT.'), { status: 403 })
+    throw new Error(detail || `El proveedor de correo devolvió HTTP ${response.status}.`)
+  }
+  return response.status === 204 ? null : response.json().catch(() => null)
+}
+
+function gmailHeader(headers = [], name) {
+  return headers.find((item) => String(item?.name || '').toLowerCase() === name.toLowerCase())?.value || ''
+}
+
+function buildGmailRaw({ destinatario, asunto, cuerpo, adjuntos = [] }) {
+  const boundary = `vitimax_${Date.now().toString(36)}`
+  const headers = [`To: ${destinatario}`, `Subject: ${asunto}`, 'MIME-Version: 1.0']
+  const files = adjuntos.filter((item) => item?.name && item?.contentBase64)
+  if (!files.length) {
+    headers.push('Content-Type: text/plain; charset=UTF-8')
+    return Buffer.from(`${headers.join('\r\n')}\r\n\r\n${cuerpo}`, 'utf8').toString('base64url')
+  }
+  headers.push(`Content-Type: multipart/mixed; boundary="${boundary}"`)
+  const lines = [`--${boundary}`, 'Content-Type: text/plain; charset=UTF-8', '', cuerpo]
+  for (const file of files) {
+    lines.push(
+      `--${boundary}`,
+      `Content-Type: ${file.mimeType || 'application/octet-stream'}; name="${file.name}"`,
+      `Content-Disposition: attachment; filename="${String(file.name).replace(/"/g, '')}"`,
+      'Content-Transfer-Encoding: base64',
+      '',
+      String(file.contentBase64).replace(/\s/g, '')
+    )
+  }
+  lines.push(`--${boundary}--`)
+  return Buffer.from(`${headers.join('\r\n')}\r\n\r\n${lines.join('\r\n')}`, 'utf8').toString('base64url')
 }
 
 function sanitizeHistory(history) {
@@ -526,6 +601,111 @@ const server = http.createServer(async (request, response) => {
       keyConfigured: Boolean(apiKey),
       rateLimitPerMinute: rateLimitMax
     })
+  }
+
+  const oauthPath = String(request.url || '').split('?')[0]
+  if (request.method === 'POST' && oauthPath.startsWith('/api/oauth/')) {
+    const session = oauthSessionFromRequest(request)
+    if (!session) return sendJson(request, response, 401, { error: 'Falta el token OAuth de la cuenta conectada.' })
+    try {
+      const body = JSON.parse(await readBody(request))
+      if (!oauthProviderMatches(session, body.proveedor)) {
+        return sendJson(request, response, 400, { error: 'ElProveedor solicitado no coincide con la cuenta conectada.' })
+      }
+      const limite = Math.min(Math.max(Number(body.limite) || 10, 1), 25)
+
+      if (oauthPath === '/api/oauth/messages') {
+        if (session.providerId === 'google.com') {
+          const query = [body.noLeidos ? 'is:unread' : '', body.remitente ? `from:${body.remitente}` : '', body.asunto ? `subject:${body.asunto}` : '', body.busqueda || ''].filter(Boolean).join(' ')
+          const params = new URLSearchParams({ maxResults: String(limite) })
+          if (query) params.set('q', query)
+          const list = await oauthFetchNode(`https://gmail.googleapis.com/gmail/v1/users/me/messages?${params}`, session)
+          const ids = (list?.messages || []).map((item) => item.id)
+          const details = await Promise.all(ids.map((id) => oauthFetchNode(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`, session)))
+          const correos = details.filter(Boolean).map((item) => ({
+            proveedor: 'gmail', id: item.id,
+            de: gmailHeader(item.payload?.headers, 'from'),
+            asunto: gmailHeader(item.payload?.headers, 'subject'),
+            fecha: gmailHeader(item.payload?.headers, 'date'),
+            resumen: String(item.snippet || ''),
+            leido: !String(item.labelIds || '').split(',').includes('UNREAD')
+          }))
+          return sendJson(request, response, 200, { ok: true, correos })
+        }
+        const params = new URLSearchParams({ $top: String(limite), $select: 'id,from,subject,receivedDateTime,bodyPreview,isRead', $orderby: 'receivedDateTime desc' })
+        const list = await oauthFetchNode(`https://graph.microsoft.com/v1.0/me/messages?${params}`, session)
+        const texto = `${body.remitente || ''} ${body.asunto || ''} ${body.busqueda || ''}`.toLowerCase().trim()
+        const correos = (list?.value || [])
+          .map((item) => ({
+            proveedor: 'outlook', id: item.id,
+            de: item.from?.emailAddress?.address || '', asunto: item.subject || '',
+            fecha: item.receivedDateTime || '', resumen: String(item.bodyPreview || ''), leido: Boolean(item.isRead)
+          }))
+          .filter((row) => !texto || `${row.de} ${row.asunto} ${row.resumen}`.toLowerCase().includes(texto))
+        return sendJson(request, response, 200, { ok: true, correos })
+      }
+
+      if (oauthPath === '/api/oauth/send') {
+        const destinatario = String(body.destinatario || '').trim()
+        const asunto = String(body.asunto || '').trim()
+        const cuerpo = String(body.cuerpo || '').trim()
+        if (!destinatario || !asunto || !cuerpo) return sendJson(request, response, 400, { error: 'Faltan destinatario, asunto o cuerpo del correo.' })
+        const adjuntos = (Array.isArray(body.adjuntos) ? body.adjuntos : []).filter((item) => item?.name && item?.contentBase64)
+        if (session.providerId === 'google.com') {
+          await oauthFetchNode('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', session, {
+            method: 'POST',
+            body: JSON.stringify({ raw: buildGmailRaw({ destinatario, asunto, cuerpo, adjuntos }) })
+          })
+        } else {
+          await oauthFetchNode('https://graph.microsoft.com/v1.0/me/sendMail', session, {
+            method: 'POST',
+            body: JSON.stringify({
+              message: {
+                subject: asunto,
+                body: { contentType: 'Text', content: cuerpo },
+                toRecipients: String(destinatario).split(',').map((email) => email.trim()).filter(Boolean).map((email) => ({ emailAddress: { address: email } })),
+                ...(adjuntos.length ? { attachments: adjuntos.map((file) => ({ name: file.name, contentType: file.mimeType || 'application/octet-stream', contentBytes: file.contentBase64 })) } : {})
+              },
+              saveToSentItems: true
+            })
+          })
+        }
+        return sendJson(request, response, 200, { ok: true, destinatario, asunto, adjuntos: adjuntos.map((file) => file.name) })
+      }
+
+      if (oauthPath === '/api/oauth/calendar') {
+        if (!body.titulo || !body.inicio || !body.fin) return sendJson(request, response, 400, { error: 'Faltan título, inicio o fin del evento.' })
+        const zona = String(body.zonaHoraria || 'America/Santiago')
+        const asistentes = Array.isArray(body.asistentes) ? body.asistentes : []
+        if (session.providerId === 'google.com') {
+          const saved = await oauthFetchNode('https://www.googleapis.com/calendar/v3/calendars/primary/events', session, {
+            method: 'POST',
+            body: JSON.stringify({
+              summary: body.titulo, description: body.descripcion || '', location: body.ubicacion || '',
+              start: { dateTime: body.inicio, timeZone: zona }, end: { dateTime: body.fin, timeZone: zona },
+              ...(asistentes.length ? { attendees: asistentes.map((email) => ({ email })) } : {})
+            })
+          })
+          return sendJson(request, response, 200, { ok: true, proveedor: 'google-calendar', id: saved?.id, titulo: body.titulo, enlace: saved?.htmlLink })
+        }
+        const saved = await oauthFetchNode('https://graph.microsoft.com/v1.0/me/events', session, {
+          method: 'POST',
+          body: JSON.stringify({
+            subject: body.titulo,
+            body: { contentType: 'Text', content: body.descripcion || '' },
+            location: { displayName: body.ubicacion || '' },
+            start: { dateTime: body.inicio, timeZone: zona }, end: { dateTime: body.fin, timeZone: zona },
+            ...(asistentes.length ? { attendees: asistentes.map((email) => ({ emailAddress: { address: email }, type: 'required' })) } : {})
+          })
+        })
+        return sendJson(request, response, 200, { ok: true, proveedor: 'outlook-calendar', id: saved?.id, titulo: body.titulo, enlace: saved?.webLink })
+      }
+
+      return sendJson(request, response, 404, { error: 'Ruta OAuth no encontrada.' })
+    } catch (error) {
+      const status = Number(error?.status) >= 400 ? Number(error.status) : 400
+      return sendJson(request, response, status, { error: error?.message || 'No se pudo completar la acción con la cuenta conectada.' })
+    }
   }
 
   if (request.method !== 'POST' || request.url !== '/api/assistant') {

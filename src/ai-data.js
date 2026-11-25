@@ -89,8 +89,8 @@ const SHEET_COLUMNS = {
   Clientes: ['ID', 'Nombre', 'Teléfono', 'Correo', 'Localidad', 'Notas'],
   Plantas: ['ID', 'Planta / Cultivo', 'Nombre científico', 'Tipo', 'Clima', 'Suelo recomendado', 'Riego', 'Temporada', 'Notas'],
   Inventario: ['ID', 'Producto', 'Categoría', 'Stock actual', 'Stock mínimo', 'Estado', 'Precio CLP', 'Valor inventario CLP'],
-  Ventas: ['ID', 'Fecha', 'Cliente', 'Producto', 'Cantidad', 'Precio unitario CLP', 'Total CLP', 'Estado', 'Canal'],
-  Asesorias: ['ID', 'Cliente', 'Cultivo', 'Consulta', 'Estado', 'Prioridad', 'Recomendación'],
+  Ventas: ['ID', 'Fecha', 'Cliente', 'Producto', 'Cantidad', 'Precio unitario CLP', 'Total CLP', 'Estado', 'Canal', 'ID Cliente', 'ID Producto'],
+  Asesorias: ['ID', 'Cliente', 'Cultivo', 'Consulta', 'Estado', 'Prioridad', 'Recomendación', 'ID Cliente'],
   Proveedores: ['ID', 'Proveedor', 'Contacto', 'Teléfono', 'Correo', 'Ciudad', 'Productos', 'Condiciones']
 }
 
@@ -866,7 +866,8 @@ export function defaultSheetRows(name, products = [], records = {}, options = {}
       rows: recordRows(sales, SHEET_COLUMNS.Ventas, (item) => [
         cleanCell(item.id), cleanCell(item.fecha || item.createdAt?.slice?.(0, 10)), cleanCell(item.cliente),
         cleanCell(item.producto), toNumber(item.cantidad), toNumber(item.precioUnitario ?? item.precio),
-        toNumber(item.total), cleanCell(item.estado || 'Pendiente'), cleanCell(item.canal || 'Directo')
+        toNumber(item.total), cleanCell(item.estado || 'Pendiente'), cleanCell(item.canal || 'Directo'),
+        cleanCell(item.idCliente || item.clienteId || ''), cleanCell(item.idProducto || item.productoId || '')
       ])
     }
   }
@@ -889,7 +890,8 @@ export function defaultSheetRows(name, products = [], records = {}, options = {}
       columns: SHEET_COLUMNS.Asesorias,
       rows: recordRows(advisories, SHEET_COLUMNS.Asesorias, (item) => [
         cleanCell(item.id), cleanCell(item.cliente), cleanCell(item.cultivo), cleanCell(item.consulta),
-        cleanCell(item.estado), cleanCell(item.prioridad), cleanCell(item.recomendacion)
+        cleanCell(item.estado), cleanCell(item.prioridad), cleanCell(item.recomendacion),
+        cleanCell(item.idCliente || item.clienteId || '')
       ])
     }
   }
@@ -1268,26 +1270,265 @@ function ensureSummarySheet(sheets, products = []) {
   return [summary, ...sheets]
 }
 
+// ---------------------------------------------------------------------------
+// Coherencia referencial: Productos y Clientes son la única fuente de
+// IDs/nombres. Inventario, Ventas y Asesorías se reescriben desde esas hojas
+// para que nunca aparezcan IDs de un esquema con nombres de otro.
+// ---------------------------------------------------------------------------
+
+function workbookSheetKey(value) {
+  return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
+function workbookCanonicalName(value) {
+  return SHEET_NAMES.find((name) => workbookSheetKey(name) === workbookSheetKey(value)) || null
+}
+
+function columnIndex(columns, pattern, fallback = -1) {
+  const found = (columns || []).findIndex((column) => pattern.test(normalizeHeader(column)))
+  return found >= 0 ? found : fallback
+}
+
+function sequentialId(prefix, index) {
+  return `${prefix}-${String(index + 1).padStart(3, '0')}`
+}
+
+function ensureColumn(sheet, header) {
+  const columns = Array.isArray(sheet.columns) ? sheet.columns : []
+  if (!columns.some((column) => normalizeHeader(column) === normalizeHeader(header))) columns.push(header)
+  sheet.columns = columns
+  return columns.findIndex((column) => normalizeHeader(column) === normalizeHeader(header))
+}
+
+// Ninguna venta generada puede quedar en el futuro respecto al reloj local.
+function clampSaleDate(value) {
+  const raw = cleanCell(value)
+  if (!raw) return ''
+  const today = getTemporalContext().fechaISO
+  let iso = ''
+  if (raw instanceof Date) iso = raw.toISOString().slice(0, 10)
+  else {
+    const head = String(raw).slice(0, 10)
+    if (/^\d{4}-\d{2}-\d{2}$/.test(head)) iso = head
+    else {
+      const parsed = new Date(raw)
+      if (!Number.isNaN(parsed.getTime())) iso = parsed.toISOString().slice(0, 10)
+    }
+  }
+  if (!iso) return raw
+  return iso > today ? today : iso
+}
+
+function catalogFromSheet(sheet, prefix) {
+  const columns = Array.isArray(sheet?.columns) ? sheet.columns : []
+  const rows = Array.isArray(sheet?.rows) ? sheet.rows : []
+  const indices = {
+    id: columnIndex(columns, /^id$|identificador|codigo/, 0),
+    name: columnIndex(columns, /nombre|cliente|producto|razon social|proveedor/i, 1),
+    category: columnIndex(columns, /categoria/i, -1),
+    price: columnIndex(columns, /precio/i, -1),
+    stock: columnIndex(columns, /stock|existencia/i, -1)
+  }
+  const entries = []
+  const byId = new Map()
+  const byName = new Map()
+  const usedIds = new Set()
+  rows.forEach((raw, position) => {
+    const row = Array.isArray(raw) ? [...raw] : []
+    const name = cleanCell(row[indices.name])
+    if (!name || isJunkProductName(name)) return
+    let id = cleanCell(row[indices.id])
+    // Los IDs cortos tipo P01/C01 mezclados con nombres VITIMAX rompen la
+    // coherencia: se regeneran con el prefijo canónico de la hoja.
+    if (/^[pc]-?\d{1,2}$/i.test(id)) id = ''
+    if (!id || usedIds.has(id)) {
+      id = sequentialId(prefix, entries.length)
+      while (usedIds.has(id)) id = sequentialId(prefix, entries.length + usedIds.size)
+    }
+    usedIds.add(id)
+    row[indices.id] = id
+    row[indices.name] = name
+    raw.splice(0, raw.length, ...row)
+    const entry = { id, name, row, position, indices }
+    entries.push(entry)
+    byId.set(normalizeHeader(id), entry)
+    byName.set(normalizeHeader(name), entry)
+  })
+  sheet.rows = rows
+  return { sheet, rows, columns, entries, indices, byId, byName }
+}
+
+function ensureCatalogFromReferences(sheet, prefix, references) {
+  if (!Array.isArray(sheet.rows)) sheet.rows = []
+  if (sheet.rows.some((row) => cleanCell(row[0]) || cleanCell(row[1]))) return catalogFromSheet(sheet, prefix)
+  const names = []
+  for (const { sheet: reference, indices } of references) {
+    for (const row of Array.isArray(reference?.rows) ? reference.rows : []) {
+      for (const index of indices) {
+        const name = cleanCell(row[index])
+        if (!name || isJunkProductName(name) || /^\d{4}-\d{2}-\d{2}/.test(name)) continue
+        if (!names.some((item) => normalizeHeader(item) === normalizeHeader(name))) names.push(name)
+      }
+    }
+  }
+  const columns = Array.isArray(sheet.columns) && sheet.columns.length ? sheet.columns : ['ID', 'Nombre']
+  sheet.columns = columns
+  sheet.rows = names.map((name, index) => {
+    const row = Array(columns.length).fill('')
+    row[0] = sequentialId(prefix, index)
+    row[1] = name
+    return row
+  })
+  return catalogFromSheet(sheet, prefix)
+}
+
+function resolveCatalogEntry(catalog, value, fallbackIndex = 0) {
+  const key = normalizeHeader(value)
+  const found = (key && (catalog.byName.get(key) || catalog.byId.get(key))) || null
+  if (found) return found
+  return catalog.entries[fallbackIndex] || catalog.entries[0] || null
+}
+
+function normalizeSequentialSheet(sheet, prefix) {
+  if (!Array.isArray(sheet.columns)) sheet.columns = []
+  if (!sheet.columns.length || normalizeHeader(sheet.columns[0]) !== 'id') sheet.columns = ['ID', ...sheet.columns]
+  const valueCount = Math.max(sheet.columns.length - 1, 0)
+  sheet.rows = (Array.isArray(sheet.rows) ? sheet.rows : []).map((raw, index) => {
+    const row = Array.isArray(raw) ? [...raw] : []
+    const first = cleanCell(row[0])
+    const firstIsId = Boolean(first) && /^(?:(?:plt|pla|plant|prv|prov|id)(?:[-\s]*\d+)?(?:[-\s]|$)|p-?\d+$|[0-9a-f]{8}-)/i.test(first)
+    const values = firstIsId ? row.slice(1, 1 + valueCount) : row.slice(0, valueCount)
+    while (values.length < valueCount) values.push('')
+    return [sequentialId(prefix, index), ...values]
+  }).filter((row) => row.slice(1).some((cell) => cleanCell(cell)))
+}
+
+function rebuildInventorySheet(sheet, products) {
+  const idIndex = columnIndex(sheet.columns, /^id$/, 0)
+  const nameIndex = columnIndex(sheet.columns, /producto|nombre/i, 1)
+  const categoryIndex = columnIndex(sheet.columns, /categoria/i, 2)
+  const stockIndex = columnIndex(sheet.columns, /stock actual|stock|existencia/i, 3)
+  const minimumIndex = columnIndex(sheet.columns, /stock minimo|minimo/i, 4)
+  const statusIndex = columnIndex(sheet.columns, /estado/i, 5)
+  const priceIndex = columnIndex(sheet.columns, /precio/i, 6)
+  const valueIndex = columnIndex(sheet.columns, /valor/i, 7)
+  const existing = new Map()
+  for (const row of Array.isArray(sheet.rows) ? sheet.rows : []) {
+    const entry = resolveCatalogEntry(products, cleanCell(row[idIndex]), -1)
+      || resolveCatalogEntry(products, cleanCell(row[nameIndex]), -1)
+    if (entry) existing.set(entry.id, row)
+  }
+  sheet.rows = products.entries.map((entry) => {
+    const row = Array(sheet.columns.length).fill('')
+    const previous = existing.get(entry.id) || []
+    const product = entry.row
+    const price = cleanCell(previous[priceIndex]) !== '' ? previous[priceIndex] : (entry.indices.price >= 0 ? toNumber(product[entry.indices.price]) : '')
+    const stock = cleanCell(previous[stockIndex]) !== '' ? previous[stockIndex] : (entry.indices.stock >= 0 ? toNumber(product[entry.indices.stock]) : '')
+    const minimum = cleanCell(previous[minimumIndex]) !== '' ? previous[minimumIndex] : 5
+    const status = cleanCell(previous[statusIndex])
+      || (Number(stock) <= 0 ? 'Sin stock' : Number(stock) <= Number(minimum) ? 'Stock bajo' : 'Disponible')
+    row[idIndex] = entry.id
+    row[nameIndex] = entry.name
+    row[categoryIndex] = entry.indices.category >= 0 ? cleanCell(product[entry.indices.category]) : ''
+    row[stockIndex] = stock
+    row[minimumIndex] = minimum
+    row[statusIndex] = status
+    row[priceIndex] = price
+    row[valueIndex] = cleanCell(previous[valueIndex]) || (Number.isFinite(Number(price)) && Number.isFinite(Number(stock)) ? Number(price) * Number(stock) : '')
+    return row
+  })
+}
+
+function enforceWorkbookCoherence(sheets) {
+  const byName = new Map()
+  for (const sheet of sheets) {
+    const canonical = workbookCanonicalName(sheet?.name)
+    if (!canonical) continue
+    sheet.name = canonical
+    byName.set(canonical, sheet)
+  }
+  if (!byName.size) return sheets
+
+  const productSheet = byName.get('Productos') || { name: 'Productos', columns: [...PRODUCT_COLUMNS], rows: [] }
+  const clientSheet = byName.get('Clientes') || { name: 'Clientes', columns: [...SHEET_COLUMNS.Clientes], rows: [] }
+  if (!byName.has('Productos')) sheets.push(productSheet)
+  if (!byName.has('Clientes')) sheets.push(clientSheet)
+
+  const inventorySheet = byName.get('Inventario')
+  const salesSheet = byName.get('Ventas')
+  const advisorySheet = byName.get('Asesorias')
+  const inventoryProductIndex = columnIndex(inventorySheet?.columns || [], /producto|nombre/i, 1)
+  const salesProductIndex = columnIndex(salesSheet?.columns || [], /producto/i, 3)
+  const salesClientIndex = columnIndex(salesSheet?.columns || [], /cliente/i, 2)
+  const advisoryClientIndex = columnIndex(advisorySheet?.columns || [], /cliente/i, 1)
+  const products = ensureCatalogFromReferences(productSheet, 'PRO', [
+    inventorySheet && { sheet: inventorySheet, indices: [inventoryProductIndex] },
+    salesSheet && { sheet: salesSheet, indices: [salesProductIndex] }
+  ].filter(Boolean))
+  const clients = ensureCatalogFromReferences(clientSheet, 'CLI', [
+    salesSheet && { sheet: salesSheet, indices: [salesClientIndex] },
+    advisorySheet && { sheet: advisorySheet, indices: [advisoryClientIndex] }
+  ].filter(Boolean))
+
+  if (byName.has('Plantas')) normalizeSequentialSheet(byName.get('Plantas'), 'PLT')
+  if (byName.has('Proveedores')) normalizeSequentialSheet(byName.get('Proveedores'), 'PRV')
+  if (inventorySheet) rebuildInventorySheet(inventorySheet, products)
+
+  if (salesSheet) {
+    const clientIdIndex = ensureColumn(salesSheet, 'ID Cliente')
+    const productIdIndex = ensureColumn(salesSheet, 'ID Producto')
+    const dateIndex = columnIndex(salesSheet.columns, /fecha|date/i, 1)
+    const clientIndex = columnIndex(salesSheet.columns, /cliente/i, 2)
+    const productIndex = columnIndex(salesSheet.columns, /producto/i, 3)
+    salesSheet.rows = (Array.isArray(salesSheet.rows) ? salesSheet.rows : []).map((row) => {
+      const next = Array.isArray(row) ? [...row] : []
+      while (next.length < salesSheet.columns.length) next.push('')
+      const client = resolveCatalogEntry(clients, next[clientIndex])
+      const product = resolveCatalogEntry(products, next[productIndex])
+      if (client) { next[clientIndex] = client.name; next[clientIdIndex] = client.id }
+      if (product) { next[productIndex] = product.name; next[productIdIndex] = product.id }
+      next[dateIndex] = clampSaleDate(next[dateIndex])
+      return next
+    })
+  }
+
+  if (advisorySheet) {
+    const clientIdIndex = ensureColumn(advisorySheet, 'ID Cliente')
+    const clientIndex = columnIndex(advisorySheet.columns, /cliente/i, 1)
+    advisorySheet.rows = (Array.isArray(advisorySheet.rows) ? advisorySheet.rows : []).map((row) => {
+      const next = Array.isArray(row) ? [...row] : []
+      while (next.length < advisorySheet.columns.length) next.push('')
+      const client = resolveCatalogEntry(clients, next[clientIndex])
+      if (client) { next[clientIndex] = client.name; next[clientIdIndex] = client.id }
+      return next
+    })
+  }
+
+  return sheets
+}
+
 export function mergeWorkbookSheets(aiSheets, products = [], records = {}, options = {}) {
   const provided = new Map()
   if (Array.isArray(aiSheets)) {
     aiSheets.forEach((raw) => {
       const sheet = normalizeAiSheet(raw)
       if (!sheet || !sheet.name) return
-      provided.set(sheet.name.toLowerCase().replace(/\s+/g, ''), sheet)
+      const canonical = workbookCanonicalName(sheet.name)
+      if (canonical) sheet.name = canonical
+      provided.set(workbookSheetKey(sheet.name), sheet)
     })
   }
-  const canonicalKeys = new Set(SHEET_NAMES.map((name) => name.toLowerCase().replace(/\s+/g, '')))
+  const canonicalKeys = new Set(SHEET_NAMES.map(workbookSheetKey))
   const extras = [...provided.entries()].filter(([key]) => !canonicalKeys.has(key))
   const hasCanonical = [...provided.keys()].some((key) => canonicalKeys.has(key))
   // Si la IA entregó solo hojas propias (auditoría, KPIs, datos limpios), se
   // respeta ese libro tal cual y no se rellenan las 7 hojas de VITIMAX.
   if (provided.size && !hasCanonical) {
-    return ensureSummarySheet([...provided.values()], products)
+    return enforceWorkbookCoherence(ensureSummarySheet([...provided.values()], products))
   }
   const allowDemo = options.allowDemo ?? !products.length
   const merged = SHEET_NAMES.map((name) => {
-    const ai = provided.get(name.toLowerCase().replace(/\s+/g, ''))
+    const ai = provided.get(workbookSheetKey(name))
     if (ai && (ai.columns.length || ai.rows.length)) {
       const fallback = defaultSheetRows(name, products, records, { ...options, allowDemo })
       const columns = ai.columns.length ? ai.columns : fallback.columns
@@ -1301,11 +1542,11 @@ export function mergeWorkbookSheets(aiSheets, products = [], records = {}, optio
   // Las hojas de resumen/KPIs van primero; el resto de hojas propias al final.
   const summaryExtras = extras.filter(([, sheet]) => /resumen|kpi|dashboard|indicador/i.test(sheet.name))
   const otherExtras = extras.filter(([, sheet]) => !/resumen|kpi|dashboard|indicador/i.test(sheet.name))
-  return ensureSummarySheet([
+  return enforceWorkbookCoherence(ensureSummarySheet([
     ...summaryExtras.map(([, sheet]) => sheet),
     ...merged,
     ...otherExtras.map(([, sheet]) => sheet)
-  ], products)
+  ], products))
 }
 
 function safeSheetName(name, index) {
@@ -1347,6 +1588,23 @@ function excelColumnLetter(index) {
   return letters || 'A'
 }
 
+// OpenXML guarda las funciones en inglés, aunque la interfaz esté en español.
+// Normalizamos cualquier fórmula que llegue con nombres locales o ";" antes de
+// entregarla a ExcelJS. ExcelJS recibe la fórmula SIN el "=" inicial.
+const EXCEL_FUNCTION_TRANSLATIONS = [
+  [/CONTAR\.SI\.CONJUNTO/gi, 'SUMIFS'], [/CONTAR\.SI/gi, 'COUNTIF'],
+  [/SUMA\.SI/gi, 'SUMIF'], [/PROMEDIO\.SI/gi, 'AVERAGEIF'],
+  [/CONTARA/gi, 'COUNTA'], [/CONTAR/gi, 'COUNT'], [/SUMA/gi, 'SUM'],
+  [/PROMEDIO/gi, 'AVERAGE'], [/REDONDEAR/gi, 'ROUND'], [/SI\.ERROR/gi, 'IFERROR'],
+  [/(^|[^A-Z])SI(?=[($])/gi, '$1IF']
+]
+
+export function translateExcelFormula(formula) {
+  let text = String(formula || '').trim().replace(/^=/, '')
+  for (const [pattern, replacement] of EXCEL_FUNCTION_TRANSLATIONS) text = text.replace(pattern, replacement)
+  return text.replace(/;/g, ',')
+}
+
 function excelCellValue(value, header) {
   if (value === null || value === undefined) return null
   if (value instanceof Date) return value
@@ -1355,8 +1613,9 @@ function excelCellValue(value, header) {
   if (!text) return null
   // Una cadena que empieza con "=" es una fórmula real, no texto.
   // ExcelJS necesita un "result" para serializar la fórmula; Excel la
-  // recalcula al abrir el libro (fullCalcOnLoad).
-  if (text.startsWith('=')) return { formula: text.slice(1), result: 0 }
+  // recalcula al abrir el libro (fullCalcOnLoad). El "=" se elimina aquí:
+  // cell.value = { formula: 'SUM(Productos!D2:D11)', result: 0 }.
+  if (text.startsWith('=')) return { formula: translateExcelFormula(text), result: 0 }
   if (PERCENT_HEADER.test(header) && /%\s*$/.test(text)) {
     const percent = toNumber(text)
     if (Number.isFinite(percent)) return percent / 100
@@ -1393,9 +1652,9 @@ function excelColumnMeta(columns, rows) {
       return /[.,]\d{1,2}$/.test(text) && !/[.,]\d{3}$/.test(text)
     })
     let numFmt = null
-    if (numeric && PERCENT_HEADER.test(header)) numFmt = '0.0%'
-    else if (numeric && MONEY_HEADER.test(header)) numFmt = decimals ? '"$"#,##0.00' : '"$"#,##0'
-    else if (numeric && DATE_HEADER.test(header)) numFmt = 'dd/mm/yyyy'
+    if (numeric && PERCENT_HEADER.test(header)) numFmt = '0,0%'
+    else if (numeric && MONEY_HEADER.test(header)) numFmt = decimals ? '$#,##0.00' : '$#,##0'
+    else if (numeric && DATE_HEADER.test(header)) numFmt = 'dd-mm-yyyy'
     else if (numeric) numFmt = decimals ? '#,##0.00' : '#,##0'
     return { numeric, numFmt }
   })
@@ -1468,8 +1727,9 @@ export async function createExcelBlob(sheets, options = {}) {
   workbook.calcProperties.fullCalcOnLoad = true
   const used = new Set()
   const rawList = Array.isArray(sheets) && sheets.length ? sheets : [{ name: 'Hoja 1', columns: [], rows: [] }]
-  // El resumen ejecutivo se recalcula desde Productos/Inventario reales.
-  const list = reconcileSummarySheets(rawList)
+  // Coherencia referencial final (por si el libro viene de otra ruta) y resumen
+  // ejecutivo recalculado desde Productos/Inventario reales.
+  const list = reconcileSummarySheets(enforceWorkbookCoherence(rawList))
   list.forEach((sheet, index) => {
     let name = safeSheetName(sheet.name, index)
     let suffix = 1
@@ -1511,7 +1771,7 @@ export async function createExcelBlob(sheets, options = {}) {
         // En el resumen, cada métrica usa su formato: CLP para dinero, entero para unidades.
         if (isSummarySheet && columnIndex > 1 && (typeof cell.value === 'number' || cell.formula)) {
           cell.numFmt = /valor|precio|monto|ingreso|costo|total/i.test(String(row[0] || ''))
-            ? '"$"#,##0'
+            ? '$#,##0'
             : '#,##0'
         }
         if (isTotals) {
@@ -1964,7 +2224,7 @@ ANÁLISIS DE DATOS ADJUNTOS
 - Si una fila está incompleta, consérvala con sus campos vacíos y reporta el hallazgo; no inventes nombres, precios, correos ni categorías para "rellenar". Si propones un valor, márcalo explícitamente como sugerencia.
 
 EXCEL AVANZADO
-- Para análisis, auditoría o reportes, la primera hoja debe ser "Resumen Ejecutivo" con KPIs y fórmulas reales que referencien las hojas de datos (por ejemplo =SUM(Ventas!E2:E50), =AVERAGE(Productos!D2:D40), =COUNTIF(Inventario!F2:F40,"Quiebre")).
+- Para análisis, auditoría o reportes, la primera hoja debe ser "Resumen Ejecutivo" con KPIs y fórmulas reales que referencien las hojas de datos (por ejemplo =SUM(Ventas!G2:G50) para el total en CLP, =AVERAGE(Productos!D2:D40), =COUNTIF(Inventario!F2:F40,"Stock bajo")). Las funciones de OpenXML van en inglés (=SUM, =AVERAGE, =COUNTIF, =SUMPRODUCT, =COUNTA, =IF), con coma como separador: nunca =SUMA, =PROMEDIO ni ";" .
 - Agrega columnas calculadas cuando aporten valor: IVA 19%, margen bruto, valor total de inventario, ingresos, utilidad y alertas de stock.
 - En las columnas de alerta usa textos claros como "Quiebre crítico", "Stock bajo" u "Óptimo": la app aplica formato condicional suave (rojo para alertas, verde para estados óptimos) y congela la fila de encabezados automáticamente.
 - Usa la propiedad "kpis" de crear_excel para el resumen ejecutivo y escribe las fórmulas empezando con "=". No escapes las fórmulas con apóstrofes.
@@ -1985,6 +2245,7 @@ DATOS DE VITIMAX
 
 HERRAMIENTAS
 - crear_excel: libro .xlsx real con hojas, columnas, filas y fórmulas activas. Para un catálogo general usa las 7 hojas: Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores. No agregues filas de totales ("Total", "Total Valorado Inventario", "Subtotal", "Resumen") dentro de las hojas de datos: los totales van solo en la hoja Resumen, calculados desde Productos e Inventario. En Asesorias, la columna Cultivo debe decir el cultivo real (Vid, Tomate, Palto, Cítricos, Hortalizas…), nunca el nombre del producto, y la columna Recomendación debe indicar el producto VITIMAX sugerido (nunca vacía).
+- Coherencia del libro (obligatoria): Productos y Clientes son la única fuente de IDs y nombres. Inventario debe repetir exactamente el mismo ID y Nombre de cada producto; Ventas y Asesorías deben repetir exactamente el mismo ID y Nombre de cliente y de producto (columnas "ID Cliente", "ID Producto"). Nunca mezcles IDs P01..P15 con nombres "VITIMAX ... DEMO": si usas nombres VITIMAX, usa los IDs reales de la hoja Productos. Clientes nunca queda vacío si hay Ventas o Asesorías. Plantas lleva en la columna A un ID correlativo PLT-001, PLT-002… antes de Nombre común, Nombre científico, Tipo, Clima, Suelo, Riego, Temporada y Notas. Proveedores lleva en la columna A un ID correlativo PRV-001, PRV-002… antes de Proveedor, Contacto, Teléfono, Correo, Ciudad, Productos y Condiciones. Ninguna fecha de Ventas puede ser posterior a la fecha actual del bloque de reloj.
 - crear_pdf, crear_word, crear_ppt: documentos reales en PDF, Word y PowerPoint. Usa "# " para títulos, "## " para secciones, "- " para viñetas, tablas Markdown con "|" y --- para separar diapositivas. Máximo 5 viñetas por diapositiva. No repitas la fecha de hoy en el contenido ni en el subtítulo: la app la imprime una sola vez en la cabecera. Escribe texto plano: nunca uses LaTeX, "$...$", "~", "**", "__" ni "#" dentro de las celdas. Precios como "$15.000" y dosis como "2 a 3 L/ha". No inventes totales: la app los calcula desde el catálogo real.
 - crear_pagina_web: página web HTML5 completa con una sola carga de Tailwind CSS (https://cdn.tailwindcss.com) e iconos Lucide. PROHIBIDO truncar el código o dejar comentarios/placeholders como "<!-- Agregar más productos aquí -->": incluye TODOS los registros reales del catálogo, sin omitir ninguno. Para catálogos usa hero verde #1E4D2B con acentos lima #D8F55F y dorado, barra de búsqueda en vivo por nombre/descripción, botones de filtro por categoría, badge de stock disponible y botón "Cotizar por WhatsApp" funcional en cada tarjeta, con el año y la fecha exactos del bloque "RELOJ Y CONTEXTO TEMPORAL EN VIVO" en el pie de página. Nada de tablas HTML antiguas. La app permite verla en vivo antes de descargar.
 - crear_codigo: entrega código completo y ejecutable en cualquier lenguaje (Python, JavaScript, SQL, HTML, PHP, etc.). Indica el lenguaje y el nombre de archivo con la extensión correcta; el código se muestra en el chat para copiar y también se descarga como archivo real. Nunca cortes un bloque ni dejes placeholders.
@@ -1997,6 +2258,10 @@ HERRAMIENTAS
 - registrar_productos_en_app: guarda productos en el catálogo real de VITIMAX.
 - simular_ventas: proyección de ventas y recomendaciones comerciales.
 - guardar_memoria y olvidar_memoria: memoria persistente del usuario y del negocio.
+- leer_correos: consulta los últimos correos de Gmail u Outlook de la cuenta conectada y filtra por remitente, asunto o texto. Nunca inventes correos si la cuenta no está conectada: dilo en una línea y ofrece conectarla.
+- enviar_correo: SOLO prepara el borrador y muestra una tarjeta de confirmación. Nunca llames con "confirmar": true en la primera llamada; el usuario debe aprobar destinatario, asunto, cuerpo y adjuntos en la tarjeta. Después de la aprobación, el despacho real ocurre automáticamente.
+- crear_evento_calendario: agenda reuniones, entregas o asesorías en Google Calendar u Outlook con fecha, hora y zona horaria reales del usuario. Confirma el evento creado en una línea, sin revelar tokens ni detalles técnicos.
+- Nunca pidas al usuario que pegue contraseñas, claves ni tokens de correo. La conexión OAuth se hace desde el botón "Conectar" del BOT.
 - Después de usar una herramienta, confirma en una línea qué archivo creaste y qué contiene. No describas el JSON interno ni el proceso técnico.
 - Si una herramienta falla, dilo con claridad y ofrece la alternativa más útil.
 
@@ -2016,10 +2281,10 @@ Debes llamar a la herramienta crear_excel (o devolver SOLO un objeto JSON si la 
   "resumen": "Descripción breve del contenido",
   "productos": [ { "name": "...", "category": "...", "price": 9990, "stock": 20, "format": "...", "description": "...", "usage": "...", "recommendations": "...", "features": "..." } ],
   "kpis": [
-    { "nombre": "Ventas totales", "formula": "=SUM(Ventas!E2:E50)", "unidad": "CLP", "interpretacion": "Ingresos del periodo" }
+    { "nombre": "Ventas totales", "formula": "=SUM(Ventas!G2:G50)", "unidad": "CLP", "interpretacion": "Ingresos del periodo" }
   ],
   "sheets": [
-    { "name": "Productos", "columns": ["ID","Nombre","Categoría","Precio CLP","Costo","IVA 19%","Margen bruto","Stock","Valor inventario","Alerta"], "rows": [["P-01","...",9990,6000,"=D2*0.19","=D2-E2-F2",20,"=D2*H2","=IF(H2<=0,\"Quiebre crítico\",IF(H2<=5,\"Stock bajo\",\"Óptimo\"))"]] }
+    { "name": "Productos", "columns": ["ID","Nombre","Categoría","Precio CLP","Costo","IVA 19%","Margen bruto","Stock","Valor inventario","Alerta"], "rows": [["PRO-001","VITIMAX VerdeRaíz","Bioestimulantes",9990,6000,"=D2*0.19","=D2-E2-F2",20,"=D2*H2","=IF(H2<=0,\"Quiebre crítico\",IF(H2<=5,\"Stock bajo\",\"Óptimo\"))"]] }
   ]
 }
 Reglas obligatorias:
@@ -2086,7 +2351,7 @@ export const ASSISTANT_TOOLS = [
               type: 'object',
               properties: {
                 nombre: { type: 'string', description: 'Nombre del KPI' },
-                formula: { type: 'string', description: 'Fórmula Excel que empieza con "=", por ejemplo =SUM(Ventas!E2:E50)' },
+                formula: { type: 'string', description: 'Fórmula Excel que empieza con "=", en inglés y con coma, por ejemplo =SUM(Ventas!G2:G50)' },
                 valor: { type: 'string', description: 'Valor literal si no aplica una fórmula' },
                 unidad: { type: 'string', description: 'CLP, %, unidades, días…' },
                 interpretacion: { type: 'string', description: 'Lectura breve del indicador' }
@@ -2096,7 +2361,7 @@ export const ASSISTANT_TOOLS = [
           },
           sheets: {
             type: 'array',
-            description: 'Hojas del libro. Para catálogo general usa las 7 hojas: Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores. Para auditorías usa las hojas necesarias y agrega "Resumen Ejecutivo" primero. Las celdas con fórmulas deben empezar con "=".',
+            description: 'Hojas del libro. Para catálogo general usa las 7 hojas: Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores. Productos y Clientes son la fuente de IDs/nombres: Inventario, Ventas y Asesorias deben repetirlos exactamente (Ventas y Asesorias incluyen "ID Cliente"; Ventas incluye "ID Producto"). Plantas usa IDs PLT-001, PLT-002… en la columna A; Proveedores usa PRV-001, PRV-002… Ninguna fecha de Ventas supera la fecha actual. Para auditorías usa las hojas necesarias y agrega "Resumen Ejecutivo" primero. Las celdas con fórmulas deben empezar con "=" y usar funciones inglesas con coma.',
             items: {
               type: 'object',
               properties: {
@@ -2305,5 +2570,284 @@ export const ASSISTANT_TOOLS = [
         required: ['clave_o_id']
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'leer_correos',
+      description: 'Busca y lee los últimos correos de la cuenta conectada de Gmail o Microsoft 365. Permite filtrar por remitente, asunto, texto o correos no leídos.',
+      parameters: {
+        type: 'object',
+        properties: {
+          proveedor: { type: 'string', enum: ['auto', 'google', 'microsoft'], description: 'Cuenta a usar. Por defecto usa cualquier cuenta conectada.' },
+          remitente: { type: 'string', description: 'Filtra por remitente o correo electrónico.' },
+          asunto: { type: 'string', description: 'Filtra por palabras del asunto.' },
+          busqueda: { type: 'string', description: 'Texto libre que debe aparecer en el correo.' },
+          limite: { type: 'number', description: 'Cantidad máxima de correos (1 a 25, por defecto 10).' },
+          noLeidos: { type: 'boolean', description: 'Si es true solo devuelve correos sin leer.' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'enviar_correo',
+      description: 'Prepara un correo real en la cuenta conectada. La primera llamada NO envía: devuelve una tarjeta de confirmación con destinatario, asunto, cuerpo y adjuntos. Solo se despacha cuando el usuario aprueba esa tarjeta.',
+      parameters: {
+        type: 'object',
+        properties: {
+          proveedor: { type: 'string', enum: ['auto', 'google', 'microsoft'], description: 'Cuenta desde la que se enviará.' },
+          destinatario: { type: 'string', description: 'Correo del destinatario. Varios destinatarios separados por coma.' },
+          asunto: { type: 'string', description: 'Asunto del correo.' },
+          cuerpo: { type: 'string', description: 'Cuerpo del correo en texto plano, listo para enviar.' },
+          adjuntos: { type: 'array', items: { type: 'string' }, description: 'Nombres de archivos generados por VITIMAX que deben adjuntarse, por ejemplo Catalogo_VITIMAX.xlsx.' },
+          confirmar: { type: 'boolean', description: 'Solo debe ser true después de que el usuario apruebe la tarjeta de confirmación.' },
+          id: { type: 'string', description: 'ID de la confirmación devuelto por la primera llamada.' }
+        },
+        required: ['destinatario', 'asunto', 'cuerpo']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'crear_evento_calendario',
+      description: 'Agenda una reunión, entrega o asesoría agrícola en Google Calendar o Microsoft Outlook Calendar de la cuenta conectada.',
+      parameters: {
+        type: 'object',
+        properties: {
+          proveedor: { type: 'string', enum: ['auto', 'google', 'microsoft'], description: 'Cuenta a usar. Por defecto usa cualquier cuenta conectada.' },
+          titulo: { type: 'string', description: 'Título del evento.' },
+          inicio: { type: 'string', description: 'Fecha y hora de inicio en ISO 8601, por ejemplo 2026-11-25T10:00:00.' },
+          fin: { type: 'string', description: 'Fecha y hora de término en ISO 8601.' },
+          zonaHoraria: { type: 'string', description: 'Zona horaria IANA, por ejemplo America/Santiago.' },
+          asistentes: { type: 'array', items: { type: 'string' }, description: 'Correos de los invitados.' },
+          descripcion: { type: 'string', description: 'Agenda o nota del evento.' },
+          ubicacion: { type: 'string', description: 'Lugar o enlace de la reunión.' }
+        },
+        required: ['titulo', 'inicio', 'fin']
+      }
+    }
   }
 ]
+
+// ---------------------------------------------------------------------------
+// Conectores reales de Gmail, Google Calendar, Outlook y Microsoft Graph.
+// El accessToken viaja en el header Authorization y nunca entra al prompt.
+// ---------------------------------------------------------------------------
+
+export const GOOGLE_OAUTH_SCOPES = [
+  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.send',
+  'https://www.googleapis.com/auth/gmail.compose',
+  'https://www.googleapis.com/auth/calendar.events',
+  'https://www.googleapis.com/auth/drive.file'
+]
+
+export const MICROSOFT_OAUTH_SCOPES = ['User.Read', 'Mail.Read', 'Mail.Send', 'Mail.ReadWrite', 'Calendars.ReadWrite', 'Files.ReadWrite']
+
+function oauthProviderId(session) {
+  return session?.providerId === 'microsoft.com' ? 'microsoft.com' : 'google.com'
+}
+
+async function oauthFetch(url, session, init = {}) {
+  if (!session?.accessToken) throw new Error('La cuenta de correo no está conectada o el permiso venció. Pulsa "Conectar" en el BOT.')
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${session.accessToken}`,
+      ...(init.body && !(init.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
+      ...(init.headers || {})
+    }
+  })
+  if (!response.ok) {
+    let detail = ''
+    try {
+      const payload = await response.json()
+      detail = payload?.error?.message || payload?.error?.code || payload?.message || ''
+    } catch { /* respuesta sin JSON */ }
+    if (response.status === 401) throw new Error('El permiso de correo venció. Vuelve a conectar tu cuenta desde el BOT.')
+    if (response.status === 403) throw new Error('La cuenta está conectada, pero faltan permisos de correo o calendario. Pulsa "Conectar" para autorizarlos de nuevo.')
+    throw new Error(detail ? `El proveedor de correo rechazó la solicitud: ${detail}` : `El proveedor de correo devolvió HTTP ${response.status}.`)
+  }
+  return response.status === 204 ? null : response.json().catch(() => null)
+}
+
+function headerValue(headers = [], name) {
+  const found = headers.find((item) => String(item?.name || '').toLowerCase() === name.toLowerCase())
+  return found?.value || ''
+}
+
+function normalizeGmailMessage(item) {
+  const headers = item?.payload?.headers || []
+  return {
+    proveedor: 'gmail',
+    id: item.id,
+    de: headerValue(headers, 'from'),
+    asunto: headerValue(headers, 'subject'),
+    fecha: headerValue(headers, 'date'),
+    resumen: String(item.snippet || ''),
+    leido: !String(item.labelIds || '').split(',').includes('UNREAD')
+  }
+}
+
+function normalizeGraphMessage(item) {
+  return {
+    proveedor: 'outlook',
+    id: item.id,
+    de: item.from?.emailAddress?.address || item.from?.emailAddress?.name || '',
+    asunto: item.subject || '',
+    fecha: item.receivedDateTime || '',
+    resumen: String(item.bodyPreview || ''),
+    leido: Boolean(item.isRead)
+  }
+}
+
+function matchesFilters(row, { remitente, asunto, busqueda }) {
+  const text = `${row.de} ${row.asunto} ${row.resumen}`.toLowerCase()
+  return (!remitente || row.de.toLowerCase().includes(String(remitente).toLowerCase()))
+    && (!asunto || row.asunto.toLowerCase().includes(String(asunto).toLowerCase()))
+    && (!busqueda || text.includes(String(busqueda).toLowerCase()))
+}
+
+export async function leerCorreosOAuth({ session, proveedor = 'auto', remitente = '', asunto = '', busqueda = '', limite = 10, noLeidos = false } = {}) {
+  const providerId = proveedor === 'auto' ? oauthProviderId(session) : (proveedor === 'microsoft' ? 'microsoft.com' : 'google.com')
+  if (providerId !== oauthProviderId(session)) throw new Error('El correo solicitado no coincide con la cuenta conectada. Conecta la cuenta correcta desde el BOT.')
+  const max = Math.min(Math.max(Number(limite) || 10, 1), 25)
+
+  if (providerId === 'google.com') {
+    const query = [
+      noLeidos ? 'is:unread' : '',
+      remitente ? `from:${remitente}` : '',
+      asunto ? `subject:${asunto}` : '',
+      busqueda || ''
+    ].filter(Boolean).join(' ')
+    const params = new URLSearchParams({ maxResults: String(max) })
+    if (query) params.set('q', query)
+    const list = await oauthFetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?${params}`, session)
+    const ids = (list?.messages || []).map((item) => item.id)
+    const details = await Promise.all(ids.map((id) => oauthFetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,
+      session
+    )))
+    return details.filter(Boolean).map(normalizeGmailMessage)
+  }
+
+  const params = new URLSearchParams({
+    $top: String(max),
+    $select: 'id,from,subject,receivedDateTime,bodyPreview,isRead',
+    $orderby: 'receivedDateTime desc'
+  })
+  const list = await oauthFetch(`https://graph.microsoft.com/v1.0/me/messages?${params}`, session)
+  return (list?.value || []).map(normalizeGraphMessage).filter((row) => matchesFilters(row, { remitente, asunto, busqueda }))
+}
+
+function base64UrlEncode(value) {
+  const bytes = new TextEncoder().encode(value)
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+}
+
+function buildGmailMessage({ destinatario, asunto, cuerpo, adjuntos = [] }) {
+  const boundary = `vitimax_${Date.now().toString(36)}`
+  const headers = [
+    `To: ${destinatario}`,
+    `Subject: ${asunto}`,
+    'MIME-Version: 1.0'
+  ]
+  const files = adjuntos.filter((item) => item?.contentBase64)
+  if (!files.length) {
+    headers.push('Content-Type: text/plain; charset=UTF-8')
+    return base64UrlEncode(`${headers.join('\r\n')}\r\n\r\n${cuerpo}`)
+  }
+  headers.push(`Content-Type: multipart/mixed; boundary="${boundary}"`)
+  const parts = [
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=UTF-8',
+    '',
+    cuerpo
+  ]
+  for (const file of files) {
+    parts.push(
+      `--${boundary}`,
+      `Content-Type: ${file.mimeType || 'application/octet-stream'}; name="${file.name}"`,
+      'Content-Disposition: attachment; filename="' + String(file.name || 'archivo').replace(/"/g, '') + '"',
+      'Content-Transfer-Encoding: base64',
+      '',
+      String(file.contentBase64).replace(/\s/g, '')
+    )
+  }
+  parts.push(`--${boundary}--`)
+  return base64UrlEncode(`${headers.join('\r\n')}\r\n\r\n${parts.join('\r\n')}`)
+}
+
+export async function enviarCorreoOAuth({ session, proveedor = 'auto', destinatario, asunto, cuerpo, adjuntos = [] } = {}) {
+  if (!destinatario || !asunto || !cuerpo) throw new Error('Faltan destinatario, asunto o cuerpo del correo.')
+  const providerId = proveedor === 'auto' ? oauthProviderId(session) : (proveedor === 'microsoft' ? 'microsoft.com' : 'google.com')
+  if (providerId !== oauthProviderId(session)) throw new Error('El correo solicitado no coincide con la cuenta conectada. Conecta la cuenta correcta desde el BOT.')
+  const files = (Array.isArray(adjuntos) ? adjuntos : []).filter((item) => typeof item === 'object' && item?.name && item?.contentBase64)
+
+  if (providerId === 'google.com') {
+    await oauthFetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', session, {
+      method: 'POST',
+      body: JSON.stringify({ raw: buildGmailMessage({ destinatario, asunto, cuerpo, adjuntos: files }) })
+    })
+    return { ok: true, proveedor: 'gmail', destinatario, asunto, adjuntos: files.map((file) => file.name) }
+  }
+
+  const recipients = String(destinatario).split(',').map((email) => email.trim()).filter(Boolean).map((email) => ({ emailAddress: { address: email } }))
+  const payload = {
+    message: {
+      subject: asunto,
+      body: { contentType: 'Text', content: cuerpo },
+      toRecipients: recipients,
+      ...(files.length ? {
+        attachments: files.map((file) => ({
+          name: file.name,
+          contentType: file.mimeType || 'application/octet-stream',
+          contentBytes: file.contentBase64
+        }))
+      } : {})
+    },
+    saveToSentItems: true
+  }
+  await oauthFetch('https://graph.microsoft.com/v1.0/me/sendMail', session, { method: 'POST', body: JSON.stringify(payload) })
+  return { ok: true, proveedor: 'outlook', destinatario, asunto, adjuntos: files.map((file) => file.name) }
+}
+
+export async function crearEventoOAuth({ session, proveedor = 'auto', titulo, inicio, fin, zonaHoraria = 'America/Santiago', asistentes = [], descripcion = '', ubicacion = '' } = {}) {
+  if (!titulo || !inicio || !fin) throw new Error('Faltan título, inicio o fin del evento.')
+  const providerId = proveedor === 'auto' ? oauthProviderId(session) : (proveedor === 'microsoft' ? 'microsoft.com' : 'google.com')
+  if (providerId !== oauthProviderId(session)) throw new Error('El calendario solicitado no coincide con la cuenta conectada. Conecta la cuenta correcta desde el BOT.')
+
+  if (providerId === 'google.com') {
+    const event = {
+      summary: titulo,
+      description,
+      location: ubicacion,
+      start: { dateTime: inicio, timeZone: zonaHoraria },
+      end: { dateTime: fin, timeZone: zonaHoraria },
+      ...(asistentes.length ? { attendees: asistentes.map((email) => ({ email })) } : {})
+    }
+    const saved = await oauthFetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', session, { method: 'POST', body: JSON.stringify(event) })
+    return { ok: true, proveedor: 'google-calendar', id: saved?.id, titulo, inicio, fin, enlace: saved?.htmlLink }
+  }
+
+  const event = {
+    subject: titulo,
+    body: { contentType: 'Text', content: descripcion },
+    location: { displayName: ubicacion },
+    start: { dateTime: inicio, timeZone: zonaHoraria },
+    end: { dateTime: fin, timeZone: zonaHoraria },
+    ...(asistentes.length ? { attendees: asistentes.map((email) => ({ emailAddress: { address: email }, type: 'required' })) } : {})
+  }
+  const saved = await oauthFetch('https://graph.microsoft.com/v1.0/me/events', session, { method: 'POST', body: JSON.stringify(event) })
+  return { ok: true, proveedor: 'outlook-calendar', id: saved?.id, titulo, inicio, fin, enlace: saved?.webLink }
+}
+
+// Códigos de error estandarizados para el agente; nunca incluyen el token.
+export function oauthErrorMessage(error) {
+  return String(error?.message || error || 'No se pudo completar la acción con la cuenta conectada.')
+}

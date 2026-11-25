@@ -193,7 +193,7 @@ button,.btn,.nav-item,.icon-btn,.user-chip{touch-action:manipulation}
 /* ===== Ajuste de altura del panel del BOT IA ===== */
 .assistant-panel{max-height:calc(100dvh - 96px);display:flex;flex-direction:column}
 .assistant-panel .assistant-body{flex:1 1 auto;min-height:110px}
-.assistant-panel .assistant-head,.assistant-panel .quick-prompts,.assistant-panel>.assistant-attachment,.assistant-panel>.assistant-attach-error,.assistant-panel>.assistant-input,.assistant-panel>small{flex:0 0 auto}
+.assistant-panel .assistant-head,.assistant-panel .quick-prompts,.assistant-panel>.assistant-attachment,.assistant-panel>.assistant-attach-error,.assistant-panel>.assistant-input,.assistant-panel>.assistant-oauth,.assistant-panel>.assistant-email-confirm,.assistant-panel>small{flex:0 0 auto}
 
 
 /* ===== Perfil 2.0 · diseño móvil Android / iPhone ===== */
@@ -763,6 +763,30 @@ h1,h2,h3,h4,p,small,strong,span,label,td,th{overflow-wrap:break-word}
 .assistant-memory-item>button{flex:0 0 auto;width:28px;height:28px;border-radius:7px;display:grid;place-items:center;color:#b24b44;background:#fff2f0;border:0;cursor:pointer}
 .assistant-memory-empty{margin:4px 0;padding:14px 12px;border:1px dashed #d9e7dc;border-radius:10px;background:#f8fbf8;font-size:11px;line-height:1.5;color:#6c8877;text-align:center}
 .assistant-memory-note{display:block;font-size:9.5px;line-height:1.4;color:var(--muted);text-align:center;padding-bottom:2px}
+
+/* Conexiones reales de Gmail / Office 365 y confirmación de envío */
+.assistant-oauth{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 14px;border-bottom:1px solid #edf3ee;background:#fbfdfb}
+.assistant-oauth-status{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
+.assistant-oauth-status span{display:inline-flex;align-items:center;gap:4px;font-size:9.5px;font-weight:700;color:#7b9083;background:#eef3ef;border-radius:99px;padding:4px 8px}
+.assistant-oauth-status span.connected{color:#2f7a4f;background:#e6f5e9}
+.assistant-oauth-status span.expired{color:#b24b44;background:#fff2f0}
+.assistant-oauth>button{flex:0 0 auto;border:1px solid #cfe3d4;background:#fff;color:#2f7a4f;border-radius:8px;padding:6px 10px;font-size:10px;font-weight:700;cursor:pointer}
+.assistant-oauth>button:hover{background:#eaf5ec}
+.assistant-oauth>button:disabled{opacity:.55;cursor:progress}
+.assistant-email-confirm{margin:0 14px 10px;padding:11px 12px;border:1px solid #cfe3d4;border-radius:11px;background:#f5fbf6;max-height:38vh;overflow-y:auto}
+.assistant-email-confirm-head{display:flex;align-items:center;gap:6px;color:#2f7a4f;font-size:12px;margin-bottom:8px}
+.assistant-email-confirm dl{margin:0;display:grid;gap:4px}
+.assistant-email-confirm dl div{display:grid;grid-template-columns:62px 1fr;gap:8px;font-size:10.5px;line-height:1.4}
+.assistant-email-confirm dt{font-weight:800;color:#6c8877}
+.assistant-email-confirm dd{margin:0;color:var(--ink);overflow-wrap:anywhere}
+.assistant-email-confirm p{margin:8px 0;font-size:11px;line-height:1.5;color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere}
+.assistant-email-confirm-actions{display:flex;gap:8px}
+.assistant-email-confirm-actions .btn{padding:8px 12px;font-size:10.5px}
+.assistant-email-confirm small{display:block;margin-top:7px;font-size:9px;color:var(--muted)}
+.settings-oauth-status{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 10px}
+.settings-oauth-status span{display:inline-flex;align-items:center;gap:6px;border-radius:99px;padding:6px 10px;background:#eef3ef;color:#7b9083;font-size:11px;font-weight:700}
+.settings-oauth-status span.connected{background:#e6f5e9;color:#2f7a4f}
+.settings-oauth-status span.expired{background:#fff2f0;color:#b24b44}
 @media(max-width:650px){
   .assistant-memory-btn{padding:0 7px;gap:4px;font-size:9.5px;white-space:nowrap}
   .assistant-memory-form{grid-template-columns:1fr auto}

@@ -16,7 +16,8 @@ import {
   getTemporalContext,
   mergeWorkbookSheets,
   normalizeImportedRecords,
-  resolveDisplayName
+  resolveDisplayName,
+  SHEET_NAMES
 } from './src/ai-data.js'
 import { sanitizeText } from './src/text-utils.js'
 import {
@@ -171,11 +172,93 @@ assert.match(DIRECT_AI_SYSTEM_PROMPT, /humor sutil/)
 assert.match(DIRECT_AI_SYSTEM_PROMPT, /no escribas "Fecha:"/i)
 console.log('Saludo exacto, tono humano y reloj silencioso: OK')
 
-// Excel multi-hoja con KPIs y fórmulas reales.
+// Integración real de Gmail / Office: scopes, herramientas, tarjeta y token en header.
+const googleScopes = [
+  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.send',
+  'https://www.googleapis.com/auth/gmail.compose',
+  'https://www.googleapis.com/auth/calendar.events',
+  'https://www.googleapis.com/auth/drive.file'
+]
+const microsoftScopes = ['User.Read', 'Mail.Read', 'Mail.Send', 'Mail.ReadWrite', 'Calendars.ReadWrite', 'Files.ReadWrite']
+for (const scope of [...googleScopes, ...microsoftScopes]) {
+  assert.ok(mainCode.includes(scope), `Falta el scope OAuth ${scope} en la app`)
+  assert.ok(aiDataCode.includes(scope), `Falta el scope OAuth ${scope} en el agente`)
+}
+for (const tool of ['leer_correos', 'enviar_correo', 'crear_evento_calendario']) {
+  assert.ok(aiDataCode.includes(`name: '${tool}'`), `Falta la herramienta ${tool}`)
+  assert.ok(mainCode.includes(`name === '${tool}'`), `Falta el ejecutor de ${tool}`)
+}
+assert.ok(mainCode.includes('requiere_confirmacion'), 'Falta la tarjeta de confirmación antes de enviar')
+assert.ok(mainCode.includes('assistant-email-confirm'), 'Falta la UI de confirmación de correo')
+assert.ok(mainCode.includes('Gmail conectado') && mainCode.includes('Office 365 conectado'), 'Faltan los indicadores de conexión')
+assert.ok(mainCode.includes('Conectar / Autorizar permisos'), 'Falta el botón de autorización de permisos')
+assert.ok(serverCode.includes('/api/oauth/messages') && serverCode.includes('/api/oauth/send') && serverCode.includes('/api/oauth/calendar'))
+assert.ok(serverCode.includes('X-Vitimax-OAuth-Token'), 'El proxy no acepta el token OAuth por header')
+assert.ok(mainCode.includes('X-Vitimax-OAuth-Token'), 'La app no envía el token OAuth por header')
+assert.ok(!/body: JSON\.stringify\(\{[^}]*accessToken/.test(mainCode), 'El token OAuth no debe ir en el body de la IA')
+assert.match(stylesCode, /\.assistant-oauth\{/)
+console.log('OAuth Google/Microsoft, herramientas de correo y confirmación visual: OK')
+
+// Excel multi-hoja con KPIs, fórmulas reales y coherencia referencial.
 const sheets = mergeWorkbookSheets([], products, {}, { allowDemo: true })
 const excelBlob = await createExcelBlob(sheets, { products })
 const excelBytes = await saveBlob(excelBlob, '01-resumen-ejecutivo.xlsx')
-console.log(`Excel: ${excelBytes} bytes · ${sheets.length} hojas`)
+assert.equal(sheets[0].name, 'Resumen Ejecutivo', 'La primera hoja debe ser el resumen')
+const ExcelJS = (await import('exceljs')).default
+const savedWorkbook = new ExcelJS.Workbook()
+await savedWorkbook.xlsx.readFile(path.join(out, '01-resumen-ejecutivo.xlsx'))
+const savedNames = savedWorkbook.worksheets.map((sheet) => sheet.name)
+for (const name of ['Resumen Ejecutivo', ...SHEET_NAMES]) {
+  assert.ok(savedNames.includes(name), `Falta la hoja ${name} en el XLSX generado`)
+}
+const dataRowsOf = (worksheet) => {
+  const rows = []
+  worksheet.eachRow((row, number) => { if (number > 1) rows.push(row.values.slice(1).map((cell) => cell ?? '')) })
+  return rows
+}
+const productRows = dataRowsOf(savedWorkbook.getWorksheet('Productos'))
+const clientRows = dataRowsOf(savedWorkbook.getWorksheet('Clientes'))
+const inventoryRows = dataRowsOf(savedWorkbook.getWorksheet('Inventario'))
+const salesRows = dataRowsOf(savedWorkbook.getWorksheet('Ventas'))
+const advisoryRows = dataRowsOf(savedWorkbook.getWorksheet('Asesorias'))
+const plantRows = dataRowsOf(savedWorkbook.getWorksheet('Plantas'))
+const supplierRows = dataRowsOf(savedWorkbook.getWorksheet('Proveedores'))
+const productIds = new Set(productRows.map((row) => String(row[0])))
+const productNames = new Set(productRows.map((row) => String(row[1])))
+const clientIds = new Set(clientRows.map((row) => String(row[0])))
+const clientNames = new Set(clientRows.map((row) => String(row[1])))
+assert.ok(productRows.length > 0 && clientRows.length > 0, 'Productos y Clientes no pueden quedar vacíos')
+for (const row of inventoryRows) {
+  assert.ok(productIds.has(String(row[0])), `Inventario usa un ID ajeno a Productos: ${row[0]}`)
+  assert.ok(productNames.has(String(row[1])), `Inventario usa un nombre ajeno a Productos: ${row[1]}`)
+}
+plantRows.forEach((row, index) => assert.equal(String(row[0]), `PLT-${String(index + 1).padStart(3, '0')}`, 'ID de Plantas correlativo en columna A'))
+supplierRows.forEach((row, index) => assert.equal(String(row[0]), `PRV-${String(index + 1).padStart(3, '0')}`, 'ID de Proveedores correlativo en columna A'))
+const todayIso = getTemporalContext().fechaISO
+for (const row of salesRows) {
+  const rawDate = row[1]
+  const isoDate = rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate).slice(0, 10)
+  assert.ok(isoDate <= todayIso, `Venta con fecha futura: ${isoDate} > ${todayIso}`)
+  assert.ok(clientNames.has(String(row[2])), `Venta con cliente ajeno a Clientes: ${row[2]}`)
+  assert.ok(productNames.has(String(row[3])), `Venta con producto ajeno a Productos: ${row[3]}`)
+  assert.ok(clientIds.has(String(row[9])), `Venta sin ID Cliente válido: ${row[9]}`)
+  assert.ok(productIds.has(String(row[10])), `Venta sin ID Producto válido: ${row[10]}`)
+}
+for (const row of advisoryRows) {
+  assert.ok(clientNames.has(String(row[1])), `Asesoría con cliente ajeno a Clientes: ${row[1]}`)
+  assert.ok(clientIds.has(String(row[7])), `Asesoría sin ID Cliente válido: ${row[7]}`)
+}
+const summaryFormulas = []
+savedWorkbook.getWorksheet('Resumen Ejecutivo').eachRow((row) => row.eachCell((cell) => {
+  if (cell.formula) summaryFormulas.push(String(cell.formula))
+}))
+assert.ok(summaryFormulas.length >= 5, 'El resumen debe tener fórmulas activas')
+assert.ok(summaryFormulas.every((formula) => /^(SUM|AVERAGE|COUNTIF|COUNTA|SUMPRODUCT|IF|IFERROR)\b/.test(formula)), `Fórmula no inglesa: ${summaryFormulas.join(', ')}`)
+assert.ok(!summaryFormulas.some((formula) => /SUMA|PROMEDIO|CONTAR\.SI|;/.test(formula)), 'Las fórmulas no pueden usar español ni ";"')
+assert.equal(savedWorkbook.getWorksheet('Productos').getCell('D2').numFmt, '$#,##0', 'Formato CLP incorrecto')
+assert.equal(savedWorkbook.getWorksheet('Ventas').getCell('B2').numFmt, 'dd-mm-yyyy', 'Formato de fecha incorrecto')
+console.log(`Excel: ${excelBytes} bytes · ${savedNames.length} hojas · coherencia y fórmulas verificadas`)
 
 // PDF con contenido sucio y fecha repetida para verificar limpieza.
 const reportDate = 'Lunes, 23 de noviembre de 2026'

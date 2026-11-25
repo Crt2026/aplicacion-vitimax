@@ -47,7 +47,9 @@ import {
   buildMemorySection,
   buildTemporalSection,
   buildWelcomeMessage,
+  crearEventoOAuth,
   createExcelBlob,
+  enviarCorreoOAuth,
   extractPdfText,
   filterJunkProducts,
   formatSpanishDate,
@@ -64,6 +66,8 @@ import {
   normalizeMemoryRecord,
   normalizeProduct,
   normalizeProducts,
+  leerCorreosOAuth,
+  oauthErrorMessage,
   parseJsonBlock,
   parseWorkbookImport,
   productToRow,
@@ -602,6 +606,95 @@ function providerCustomParameters(provider) {
     : { prompt: 'select_account' }
 }
 
+// Permisos reales de correo, calendario y archivos. Se piden al iniciar sesión
+// y se pueden volver a solicitar desde el BOT sin cerrar la sesión de VITIMAX.
+const GOOGLE_OAUTH_SCOPES = [
+  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.send',
+  'https://www.googleapis.com/auth/gmail.compose',
+  'https://www.googleapis.com/auth/calendar.events',
+  'https://www.googleapis.com/auth/drive.file'
+]
+const MICROSOFT_OAUTH_SCOPES = ['User.Read', 'Mail.Read', 'Mail.Send', 'Mail.ReadWrite', 'Calendars.ReadWrite', 'Files.ReadWrite']
+const OAUTH_SESSION_KEY = 'vitimax-oauth-session-v1'
+const OAUTH_TOKEN_TTL_MS = 50 * 60 * 1000
+const oauthSessions = new Map()
+
+function oauthStorageKey(providerId) {
+  return `${OAUTH_SESSION_KEY}:${providerId}`
+}
+
+function rememberOAuthCredential(providerId, credential) {
+  const token = credential?.accessToken || credential?.oauthAccessToken || credential?.token
+  if (!providerId || typeof token !== 'string' || !token) return null
+  const session = {
+    providerId,
+    accessToken: token,
+    obtainedAt: Date.now(),
+    expiresAt: Date.now() + OAUTH_TOKEN_TTL_MS
+  }
+  oauthSessions.set(providerId, session)
+  try { sessionStorage.setItem(oauthStorageKey(providerId), JSON.stringify(session)) } catch { /* sesión efímera */ }
+  return session
+}
+
+function readOAuthSessions() {
+  const sessions = {}
+  for (const providerId of ['google.com', 'microsoft.com']) {
+    let session = oauthSessions.get(providerId)
+    if (!session) {
+      try { session = JSON.parse(sessionStorage.getItem(oauthStorageKey(providerId)) || 'null') } catch { session = null }
+    }
+    if (session && typeof session.accessToken === 'string' && session.accessToken) sessions[providerId] = session
+  }
+  return sessions
+}
+
+function clearOAuthSessions() {
+  for (const providerId of ['google.com', 'microsoft.com']) {
+    oauthSessions.delete(providerId)
+    try { sessionStorage.removeItem(oauthStorageKey(providerId)) } catch { /* sesión efímera */ }
+  }
+}
+
+function oauthCredentialsStatus(sessions = readOAuthSessions()) {
+  const rows = [
+    { providerId: 'google.com', label: 'Gmail', shortLabel: 'Gmail conectado' },
+    { providerId: 'microsoft.com', label: 'Office 365', shortLabel: 'Office 365 conectado' }
+  ].map((row) => {
+    const session = sessions[row.providerId]
+    const expired = !session || !session.expiresAt || session.expiresAt <= Date.now()
+    return { ...row, connected: Boolean(session && !expired), expired: Boolean(session && expired) }
+  })
+  const active = rows.find((row) => row.connected) || null
+  return { rows, active, connected: rows.filter((row) => row.connected), anyExpired: rows.some((row) => row.expired) }
+}
+
+function activeOAuthSession(preferredProviderId = '') {
+  const sessions = readOAuthSessions()
+  const ids = [preferredProviderId, 'google.com', 'microsoft.com'].filter(Boolean)
+  for (const providerId of ids) {
+    const session = sessions[providerId]
+    if (session && (!session.expiresAt || session.expiresAt > Date.now())) return session
+  }
+  return null
+}
+
+function configureOAuthProvider(provider, withExtraScopes = true) {
+  provider?.setCustomParameters?.(providerCustomParameters(provider))
+  if (!withExtraScopes || !provider?.addScope) return provider
+  const scopes = provider.providerId === 'microsoft.com' ? MICROSOFT_OAUTH_SCOPES : GOOGLE_OAUTH_SCOPES
+  for (const scope of scopes) {
+    try { provider.addScope(scope) } catch { /* el proveedor ya tiene el scope */ }
+  }
+  return provider
+}
+
+function isOAuthScopeError(error) {
+  const message = `${error?.code || ''} ${error?.message || ''}`
+  return /invalid[_-]?scope|unauthorized[_-]?client|auth\/invalid-scope|auth\/unauthorized-client/i.test(message)
+}
+
 function providerErrorMessage(provider, error) {
   const code = error?.code || ''
   if (provider?.providerId === 'microsoft.com') return microsoftErrorMessage(code)
@@ -999,15 +1092,27 @@ const DOCUMENT_SYSTEM_PROMPT = `${GENERATION_SYSTEM_PROMPT}
 - El documento debe empezar directamente con el título y contener solo información útil para el lector final.`
 
 async function signInWithNativeProvider(providerId) {
-  const result = providerId === 'google.com'
-    ? await FirebaseAuthentication.signInWithGoogle()
-    : await FirebaseAuthentication.signInWithMicrosoft()
+  let result
+  try {
+    result = providerId === 'google.com'
+      ? await FirebaseAuthentication.signInWithGoogle({ scopes: GOOGLE_OAUTH_SCOPES })
+      : await FirebaseAuthentication.signInWithMicrosoft({ scopes: MICROSOFT_OAUTH_SCOPES })
+  } catch (error) {
+    if (!isOAuthScopeError(error)) throw error
+    // Algunos registros de Azure no aceptan todos los scopes Graph todavía.
+    // El login sigue funcionando y el BOT ofrece volver a autorizarlos.
+    result = providerId === 'google.com'
+      ? await FirebaseAuthentication.signInWithGoogle()
+      : await FirebaseAuthentication.signInWithMicrosoft()
+  }
   if (!result.credential) throw new Error('El proveedor no devolvió credenciales.')
   const credential = providerId === 'google.com'
     ? GoogleAuthProvider.credential(result.credential.idToken, result.credential.accessToken)
     : new OAuthProvider(providerId).credential(result.credential.idToken, result.credential.accessToken)
   try {
-    return await signInWithCredential(firebaseAuth, credential)
+    const signedIn = await signInWithCredential(firebaseAuth, credential)
+    rememberOAuthCredential(providerId, result.credential)
+    return signedIn
   } catch (error) {
     // Si la sesión de Firebase no se pudo crear, cerramos también la sesión nativa
     // para que el próximo intento empiece limpio.
@@ -1022,6 +1127,7 @@ function AuthGate() {
   const [authLoading, setAuthLoading] = useState(Boolean(firebaseAuth))
   const [authError, setAuthError] = useState('')
   const [sessionNotice, setSessionNotice] = useState('')
+  const [oauthRefresh, setOauthRefresh] = useState(0)
   useEffect(() => {
     if (!firebaseAuth) return undefined
     const loadingTimeout = setTimeout(() => {
@@ -1035,13 +1141,36 @@ function AuthGate() {
       (nextUser) => { setUser(nextUser); setAuthLoading(false) },
       (error) => { setAuthError(authErrorMessage(error.code)); setAuthLoading(false) }
     )
-    getRedirectResult(firebaseAuth).catch((error) => { setAuthError(authErrorMessage(error.code)); setAuthLoading(false) })
+    getRedirectResult(firebaseAuth)
+      .then((result) => {
+        if (!result?.credential) return
+        const providerId = result.credential.providerId
+          || result.user?.providerData?.find((item) => ['google.com', 'microsoft.com'].includes(item.providerId))?.providerId
+        if (providerId) rememberOAuthCredential(providerId, result.credential)
+      })
+      .catch((error) => { setAuthError(authErrorMessage(error.code)); setAuthLoading(false) })
     return () => { clearTimeout(loadingTimeout); unsubscribe() }
   }, [])
+  async function handleConnectOAuth(providerId) {
+    const provider = providerId === 'microsoft.com' ? new OAuthProvider('microsoft.com') : new GoogleAuthProvider()
+    try {
+      configureOAuthProvider(provider, true)
+      const result = await openProviderSignIn(provider)
+      if (result?.credential) rememberOAuthCredential(providerId || result.credential.providerId || 'google.com', result.credential)
+      setOauthRefresh((value) => value + 1)
+      return readOAuthSessions()
+    } catch (error) {
+      if (!isOAuthScopeError(error)) throw error
+      throw new Error(providerId === 'microsoft.com'
+        ? 'Azure no aceptó todos los permisos de Office 365 todavía. Revisa los scopes Mail.Read, Mail.Send, Calendars.ReadWrite y Files.ReadWrite en el App Registration.'
+        : 'Google no aceptó todos los permisos de Gmail y Calendar. Revisa la pantalla de consentimiento de Google Cloud.')
+    }
+  }
   async function handleSignOut() {
     setAuthError('')
     setSessionNotice('Sesión cerrada correctamente. Puedes volver a iniciar sesión cuando quieras.')
     try { sessionStorage.removeItem('vitimax-guest') } catch { /* sessionStorage puede no estar disponible */ }
+    clearOAuthSessions()
     setGuest(false)
     try {
       if (Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('FirebaseAuthentication')) {
@@ -1058,10 +1187,10 @@ function AuthGate() {
     setGuest(true)
   }
   if (authLoading) return <div className="auth-loading"><span className="auth-loading-mark"><BrandMark size={40} /></span><strong>VITIMAX</strong><span>Verificando sesión...</span></div>
-  if (guest) return <App guest onSignOut={handleSignOut} />
+  if (guest) return <App guest onSignOut={handleSignOut} oauthRefresh={oauthRefresh} onConnectOAuth={handleConnectOAuth} />
   if (!firebaseConfigured) return <AuthScreenV2 configured={false} onGuest={enterAsGuest} />
   if (!user) return <AuthScreenV2 configured initialError={authError} initialNotice={sessionNotice} onAuthenticated={setUser} onGuest={enterAsGuest} />
-  return <App user={user} onSignOut={handleSignOut} />
+  return <App user={user} onSignOut={handleSignOut} oauthRefresh={oauthRefresh} onConnectOAuth={handleConnectOAuth} />
 }
 
 function BrandMark({ size = 24 }) {
@@ -1420,8 +1549,20 @@ function AuthScreenV2({ configured, initialError = '', initialNotice = '', onAut
     if (!firebaseAuth) return
     setBusy(true)
     try {
-      provider.setCustomParameters?.(providerCustomParameters(provider))
-      const result = await openProviderSignIn(provider)
+      configureOAuthProvider(provider, true)
+      let result
+      try {
+        result = await openProviderSignIn(provider)
+      } catch (scopeError) {
+        if (!isOAuthScopeError(scopeError)) throw scopeError
+        // Si el proyecto OAuth aún no tiene aprobados todos los scopes, no
+        // bloqueamos el acceso: se entra igual y el BOT permite autorizarlos.
+        setNotice('Sesión lista. Pulsa "Conectar" en el BOT para autorizar correo y calendario cuando tu administrador de Google o Microsoft habilite los permisos.')
+        const basicProvider = provider.providerId === 'microsoft.com' ? new OAuthProvider('microsoft.com') : new GoogleAuthProvider()
+        configureOAuthProvider(basicProvider, false)
+        result = await openProviderSignIn(basicProvider)
+      }
+      if (result?.credential) rememberOAuthCredential(provider.providerId, result.credential)
       if (result?.user?.email) rememberEmail(result.user.email)
       if (result?.user) onAuthenticated?.(result.user)
     } catch (authError) { setError(providerErrorMessage(provider, authError)) }
@@ -1521,7 +1662,7 @@ function GoogleBrandIcon() {
 }
 function MicrosoftBrandIcon() { return <svg className="provider-logo ms" viewBox="0 0 23 23" aria-hidden="true" focusable="false"><rect x="1" y="1" width="10" height="10" fill="#F25022" /><rect x="12" y="1" width="10" height="10" fill="#7FBA00" /><rect x="1" y="12" width="10" height="10" fill="#00A4EF" /><rect x="12" y="12" width="10" height="10" fill="#FFB900" /></svg> }
 
-function App({ user, onSignOut, guest = false }) {
+function App({ user, onSignOut, guest = false, oauthRefresh = 0, onConnectOAuth }) {
   // Cada cuenta guarda su copia local con su propio uid, así al cerrar sesión
   // y entrar con otra cuenta no se mezclan el perfil ni los datos.
   const uid = user?.uid || ''
@@ -1578,11 +1719,65 @@ function App({ user, onSignOut, guest = false }) {
   })
   const [memories, setMemories] = useState(() => normalizeMemories(readLocalJson(localKey(MEMORY_STORAGE_KEY), [])))
   const [cloudReady, setCloudReady] = useState(!user || !firebaseDb)
+  const [oauthSessions, setOauthSessions] = useState(() => readOAuthSessions())
+  const [pendingEmail, setPendingEmail] = useState(null)
+  const [connectingOAuth, setConnectingOAuth] = useState('')
   const [saving, setSaving] = useState(false)
   const fileRef = useRef(null)
   const messagesRef = useRef(messages)
   const memoriesRef = useRef(memories)
+  const pendingEmailRef = useRef(pendingEmail)
+  const artifactsRef = useRef([])
+  const emailExecutorRef = useRef(null)
   const cloudSeededRef = useRef(false)
+  const oauthStatus = oauthCredentialsStatus(oauthSessions)
+
+  useEffect(() => { setOauthSessions(readOAuthSessions()) }, [uid, oauthRefresh])
+  useEffect(() => { pendingEmailRef.current = pendingEmail }, [pendingEmail])
+  useEffect(() => {
+    if (!oauthStatus.anyExpired) return undefined
+    const id = setInterval(() => setOauthSessions(readOAuthSessions()), 30_000)
+    return () => clearInterval(id)
+  }, [oauthStatus.anyExpired])
+
+  async function connectMailPermissions(providerId) {
+    if (!onConnectOAuth) {
+      setNotice('Las conexiones de correo requieren sesión con Google o Microsoft.')
+      return
+    }
+    setConnectingOAuth(providerId)
+    try {
+      await onConnectOAuth(providerId)
+      setOauthSessions(readOAuthSessions())
+      setNotice(providerId === 'microsoft.com' ? 'Permisos de Office 365 autorizados.' : 'Permisos de Gmail autorizados.')
+    } catch (error) {
+      setNotice(error?.message || 'No se pudieron autorizar los permisos de correo.')
+    } finally {
+      setConnectingOAuth('')
+    }
+  }
+
+  async function approvePendingEmail() {
+    const pending = pendingEmailRef.current || pendingEmail
+    if (!pending) return
+    if (!activeOAuthSession(pending.providerId)) {
+      setNotice('El permiso de correo venció. Vuelve a conectar tu cuenta antes de enviar.')
+      return
+    }
+    try {
+      const result = await emailExecutorRef.current?.(pending.id)
+      if (result?.ok) setNotice('Correo enviado correctamente.')
+      else setNotice(result?.error || 'No se pudo enviar el correo.')
+    } catch (error) {
+      setNotice(error?.message || 'No se pudo enviar el correo.')
+    }
+  }
+
+  function cancelPendingEmail() {
+    setPendingEmail(null)
+    pendingEmailRef.current = null
+    setNotice('Envío cancelado. El correo no se envió.')
+  }
 
   useEffect(() => {
     if (!user || !firebaseDb) return undefined
@@ -2318,6 +2513,7 @@ function App({ user, onSignOut, guest = false }) {
       // Se adjuntan TODOS los archivos generados en el turno (por ejemplo, un
       // Excel corregido + un informe PDF), no solo el último.
       const files = created.map(toFileExtra).filter(Boolean)
+      if (files.length) artifactsRef.current = files
       const regNote = registered?.length ? `\n\n✅ ${registered.length} productos generados por IA quedaron guardados en el catálogo de VITIMAX.` : ''
       const textOut = `${String(messageText || 'Listo.').trim()}${regNote}`
       const extra = {}
@@ -2328,7 +2524,103 @@ function App({ user, onSignOut, guest = false }) {
       if (tools?.length) extra.tools = tools
       replace(textOut, extra)
     }
+    const resolveOAuthSessionForTool = (providerId) => {
+      const requested = providerId === 'microsoft' ? 'microsoft.com' : providerId === 'google' ? 'google.com' : ''
+      return activeOAuthSession(requested) || null
+    }
+    const resolveEmailAttachments = async (names) => {
+      const wanted = (Array.isArray(names) ? names : []).map((item) => String(item || '').trim().toLowerCase()).filter(Boolean)
+      if (!wanted.length) return []
+      const files = []
+      for (const artifact of artifactsRef.current) {
+        const fileName = String(artifact?.name || '').toLowerCase()
+        if (!wanted.some((name) => fileName === name || fileName.includes(name))) continue
+        if (!artifact.blob) continue
+        const data = await blobToBase64(artifact.blob)
+        files.push({
+          name: artifact.name,
+          mimeType: artifact.mimeType || artifact.blob.type || 'application/octet-stream',
+          contentBase64: String(data || '').split(',').pop()
+        })
+      }
+      return files
+    }
     const executeTool = async (name, args = {}) => {
+      if (name === 'leer_correos') {
+        const session = resolveOAuthSessionForTool(args.proveedor)
+        if (!session) return { ok: false, error: 'No hay una cuenta de Gmail u Office 365 conectada. Pulsa "Conectar" en el BOT para autorizar el acceso.' }
+        try {
+          const correos = await leerCorreosOAuth({
+            session,
+            proveedor: args.proveedor || 'auto',
+            remitente: args.remitente || '',
+            asunto: args.asunto || '',
+            busqueda: args.busqueda || '',
+            limite: args.limite || 10,
+            noLeidos: Boolean(args.noLeidos)
+          })
+          return { ok: true, total: correos.length, correos }
+        } catch (error) { return { ok: false, error: oauthErrorMessage(error) } }
+      }
+      if (name === 'enviar_correo') {
+        const destinatario = String(args.destinatario || args.para || '').trim()
+        const asunto = String(args.asunto || '').trim()
+        const cuerpo = String(args.cuerpo || args.mensaje || '').trim()
+        if (!destinatario || !asunto || !cuerpo) return { ok: false, error: 'Faltan destinatario, asunto o cuerpo del correo.' }
+        // Incluso si el modelo envía "confirmar": true, el despacho real solo
+        // ocurre cuando el usuario aprueba la tarjeta visual.
+        const pending = {
+          id: args.id && pendingEmailRef.current?.id === args.id ? args.id : makeId('mail'),
+          proveedor: args.proveedor || 'auto',
+          destinatario,
+          asunto,
+          cuerpo,
+          adjuntos: Array.isArray(args.adjuntos) ? args.adjuntos.map((item) => String(item)) : []
+        }
+        emailExecutorRef.current = async (confirmationId) => {
+          if (confirmationId !== pending.id || pendingEmailRef.current?.id !== pending.id) {
+            return { ok: false, error: 'La confirmación ya no está vigente.' }
+          }
+          const session = resolveOAuthSessionForTool(pending.proveedor)
+          if (!session) return { ok: false, error: 'El permiso de correo venció. Vuelve a conectar tu cuenta antes de enviar.' }
+          try {
+            const adjuntos = await resolveEmailAttachments(pending.adjuntos)
+            const sent = await enviarCorreoOAuth({ session, ...pending, adjuntos })
+            setPendingEmail(null)
+            pendingEmailRef.current = null
+            return sent
+          } catch (error) { return { ok: false, error: oauthErrorMessage(error) } }
+        }
+        setPendingEmail(pending)
+        pendingEmailRef.current = pending
+        return {
+          ok: true,
+          requiere_confirmacion: true,
+          id: pending.id,
+          destinatario,
+          asunto,
+          cuerpo,
+          adjuntos: pending.adjuntos,
+          mensaje: 'Correo preparado. El usuario debe aprobar la tarjeta de confirmación antes de enviarlo.'
+        }
+      }
+      if (name === 'crear_evento_calendario') {
+        const session = resolveOAuthSessionForTool(args.proveedor)
+        if (!session) return { ok: false, error: 'No hay una cuenta de Google Calendar u Outlook conectada. Pulsa "Conectar" en el BOT.' }
+        try {
+          return await crearEventoOAuth({
+            session,
+            proveedor: args.proveedor || 'auto',
+            titulo: args.titulo,
+            inicio: args.inicio,
+            fin: args.fin,
+            zonaHoraria: args.zonaHoraria || temporal.zonaHoraria,
+            asistentes: args.asistentes || [],
+            descripcion: args.descripcion || '',
+            ubicacion: args.ubicacion || ''
+          })
+        } catch (error) { return { ok: false, error: oauthErrorMessage(error) } }
+      }
       if (name === 'crear_excel') {
         const aiProducts = normalizeProducts(args.productos || [], { generated: true })
         const sheets = Array.isArray(args.sheets) ? [...args.sheets] : []
@@ -2484,7 +2776,14 @@ function App({ user, onSignOut, guest = false }) {
           if (mode === 'proxy') {
             const httpResponse = await fetchWithTimeout(`${aiUrl}/api/assistant`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', ...(aiToken ? { 'X-Vitimax-Token': aiToken } : {}) },
+              headers: {
+                'Content-Type': 'application/json',
+                ...(aiToken ? { 'X-Vitimax-Token': aiToken } : {}),
+                ...(() => {
+                  const session = activeOAuthSession()
+                  return session ? { 'X-Vitimax-OAuth-Token': session.accessToken, 'X-Vitimax-OAuth-Provider': session.providerId } : {}
+                })()
+              },
               body: JSON.stringify({ message, products: workingProducts, attachment: fileAttachment, history: conversation, temporal: getTemporalContext(), system: withContext(systemPrompt, conversation), memories: memoriesRef.current, maxTokens })
             }, 90_000)
             const data = await httpResponse.json().catch(() => ({}))
@@ -2549,6 +2848,35 @@ function App({ user, onSignOut, guest = false }) {
           created: [],
           registered: [],
           tools: [{ role: 'tool', name: 'olvidar_memoria', arguments: action, result }]
+        }
+      }
+      if (kind.includes('leer_correo') || kind.includes('correos')) {
+        const result = await executeTool('leer_correos', action)
+        return {
+          text: result.ok ? `Encontré ${result.total} correo(s) en la cuenta conectada.` : result.error,
+          created: [],
+          registered: [],
+          tools: [{ role: 'tool', name: 'leer_correos', arguments: action, result: result.ok ? { total: result.total, correos: result.correos } : { error: result.error } }]
+        }
+      }
+      if (kind.includes('enviar_correo')) {
+        const result = await executeTool('enviar_correo', action)
+        return {
+          text: result.ok && result.requiere_confirmacion
+            ? `Preparé el correo a ${result.destinatario}. Revisa la tarjeta de confirmación antes de enviarlo.`
+            : result.ok ? `Correo enviado a ${result.destinatario}.` : result.error,
+          created: [],
+          registered: [],
+          tools: [{ role: 'tool', name: 'enviar_correo', arguments: action, result: result.ok ? { id: result.id, destinatario: result.destinatario, asunto: result.asunto } : { error: result.error } }]
+        }
+      }
+      if (kind.includes('calendario') || kind.includes('evento')) {
+        const result = await executeTool('crear_evento_calendario', action)
+        return {
+          text: result.ok ? `Agendé "${result.titulo}" en tu calendario.` : result.error,
+          created: [],
+          registered: [],
+          tools: [{ role: 'tool', name: 'crear_evento_calendario', arguments: action, result: result.ok ? { id: result.id, titulo: result.titulo, inicio: result.inicio } : { error: result.error } }]
         }
       }
       if (action.sheets || action.hojas || kind.includes('excel')) {
@@ -2761,7 +3089,7 @@ function App({ user, onSignOut, guest = false }) {
     {notice && <div className="toast"><PackageCheck size={18} />{notice}</div>}
     {mobileMenuOpen && <button className="drawer-backdrop" aria-label="Cerrar menú" onClick={() => setMobileMenuOpen(false)} />}
     {overlay === 'profile' && <ProfileModal profile={profile} user={user} guest={guest} onClose={() => setOverlay(null)} onSave={saveProfile} onSignOut={confirmSignOut} onResendVerification={resendVerificationEmail} onPasswordReset={sendPasswordResetToUser} />}
-    {overlay === 'settings' && <SettingsModal settings={settings} onClose={() => setOverlay(null)} onSave={saveSettings} />}
+    {overlay === 'settings' && <SettingsModal settings={settings} onClose={() => setOverlay(null)} onSave={saveSettings} oauthStatus={oauthStatus} onConnectOAuth={connectMailPermissions} connectingOAuth={connectingOAuth} />}
     {overlay === 'notifications' && <NotificationsModal lowStock={lowStock} missingData={missingData} onClose={() => setOverlay(null)} />}
     {importReport && <ImportReport report={importReport} onClose={() => setImportReport(null)} />}
     <button
@@ -2774,7 +3102,7 @@ function App({ user, onSignOut, guest = false }) {
       {assistantOpen ? <X size={22} /> : <><img className="assistant-bot-image" src="/bot-vitimax.png" alt="" /><span>BOT IA VITIMAX</span></>}
     </button>
     {assistantOpen && <SectionBoundary scope="asistente" resetKey={assistantOpen} compact title="El chat tuvo un problema" message="Tu catálogo, tu perfil y tus conversaciones están guardados. Reintenta o limpia la conversación; el resto de la app sigue funcionando." onReset={resetAssistantChat} resetLabel="Limpiar conversación">
-      <Assistant messages={messages} onClose={() => setAssistantOpen(false)} onAsk={askAssistant} onDownload={downloadMessageFile} onOpen={openMessageFile} aiReady={Boolean(resolveAiUrl(settings) || resolveDirectKey(settings) || (firebaseFunctions && import.meta.env.VITE_ENABLE_CLOUD_ASSISTANT === 'true' && !guest))} memories={memories} onSaveMemory={saveMemory} onDeleteMemory={(id) => forgetMemory(id)} onClearMemories={clearMemories} temporal={temporal} />
+      <Assistant messages={messages} onClose={() => setAssistantOpen(false)} onAsk={askAssistant} onDownload={downloadMessageFile} onOpen={openMessageFile} aiReady={Boolean(resolveAiUrl(settings) || resolveDirectKey(settings) || (firebaseFunctions && import.meta.env.VITE_ENABLE_CLOUD_ASSISTANT === 'true' && !guest))} memories={memories} onSaveMemory={saveMemory} onDeleteMemory={(id) => forgetMemory(id)} onClearMemories={clearMemories} temporal={temporal} oauthStatus={oauthStatus} onConnectOAuth={connectMailPermissions} connectingOAuth={connectingOAuth} pendingEmail={pendingEmail} onApproveEmail={approvePendingEmail} onCancelEmail={cancelPendingEmail} />
     </SectionBoundary>}
     {qrOpen && <QrScanner onClose={() => setQrOpen(false)} onResult={handleQrResult} />}
     {moduleModal && canManage && <ModuleFormModal config={MODULE_CONFIG[moduleModal.module]} record={moduleModal.record} onClose={() => setModuleModal(null)} onSave={(values) => saveModuleRecord(MODULE_CONFIG[moduleModal.module].key, values, moduleModal.record)} />}
@@ -3279,7 +3607,7 @@ function ProfileModal({ profile, user, guest = false, onClose, onSave, onSignOut
   </ModalShell>
 }
 
-function SettingsModal({ settings, onClose, onSave }) {
+function SettingsModal({ settings, onClose, onSave, oauthStatus, onConnectOAuth, connectingOAuth = '' }) {
   const [form, setForm] = useState(settings)
   const [test, setTest] = useState({ state: 'idle', message: '' })
   const [saveTest, setSaveTest] = useState({ state: 'idle', message: '' })
@@ -3385,6 +3713,21 @@ function SettingsModal({ settings, onClose, onSave }) {
           <button type="button" className="btn secondary" onClick={testConnection} disabled={test.state === 'loading'}>{test.state === 'loading' ? <RotateCcw size={15} className="spin" /> : <Zap size={15} />} {test.state === 'loading' ? 'Probando…' : 'Probar conexión IA'}</button>
         </div>
         {test.message && <small className={test.state === 'error' ? 'auth-error' : 'field-help'}>{test.message}</small>}
+      </section>
+      <section className="settings-group">
+        <div className="settings-group-head"><span className="settings-group-icon green"><Mail size={17} /></span><div><h3>Correo y calendario</h3><p>Permisos reales para leer correos, enviarlos y agendar desde el BOT.</p></div></div>
+        <div className="settings-oauth-status">
+          {(oauthStatus?.rows || []).map((row) => <span key={row.providerId} className={row.connected ? 'connected' : row.expired ? 'expired' : ''}>
+            {row.connected ? <Check size={13} /> : <Mail size={13} />}
+            {row.connected ? row.shortLabel : row.expired ? `${row.label} · permiso vencido` : `${row.label} sin conectar`}
+          </span>)}
+        </div>
+        <div className="settings-actions">
+          <button type="button" className="btn secondary" disabled={Boolean(connectingOAuth)} onClick={() => onConnectOAuth?.((oauthStatus?.rows || []).find((row) => !row.connected)?.providerId || 'google.com')}>
+            <Mail size={15} /> {connectingOAuth ? 'Autorizando…' : 'Conectar / Autorizar permisos'}
+          </button>
+        </div>
+        <small className="field-help">El token se guarda solo en la sesión y nunca se envía en el texto de la IA.</small>
       </section>
       {android && <section className="settings-group">
         <div className="settings-group-head"><span className="settings-group-icon blue"><ShieldCheck size={17} /></span><div><h3>Permisos y dispositivo</h3><p>Notificaciones, cámara y archivos del teléfono.</p></div></div>
@@ -3710,7 +4053,7 @@ function AssistantIcon() {
   return <span className="assistant-logo" aria-hidden="true"><svg viewBox="0 0 32 32" role="img"><path className="assistant-antenna" d="M16 5V2m0 0-2 2m2-2 2 2" /><rect x="5" y="7" width="22" height="18" rx="6" /><path d="M10 15h.01M22 15h.01M11 20c3 2 7 2 10 0" /><path className="assistant-ear" d="M5 14H2m25 0h3" /></svg><b>IA</b></span>
 }
 
-function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memories = [], onSaveMemory, onDeleteMemory, onClearMemories, temporal }) {
+function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memories = [], onSaveMemory, onDeleteMemory, onClearMemories, temporal, oauthStatus, onConnectOAuth, connectingOAuth = '', pendingEmail = null, onApproveEmail, onCancelEmail }) {
   const [text, setText] = useState('')
   const [attachment, setAttachment] = useState(null)
   const [attachError, setAttachError] = useState('')
@@ -3799,6 +4142,10 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
   const sizeKb = attachment ? Math.max(1, Math.ceil(attachment.size / 1024)) : 0
   const shortMonths = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']
   const shortDate = `${temporal.dia} ${shortMonths[temporal.mesNumero - 1]} ${temporal.anio}`
+  const connectionRows = oauthStatus?.rows || [
+    { providerId: 'google.com', label: 'Gmail', connected: false, expired: false },
+    { providerId: 'microsoft.com', label: 'Office 365', connected: false, expired: false }
+  ]
 
   return <div className="assistant-panel">
     <div className="assistant-head">
@@ -3812,6 +4159,17 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
         </button>
         <button className="icon-btn" aria-label="Cerrar asistente" onClick={onClose}><X size={18} /></button>
       </div>
+    </div>
+    <div className="assistant-oauth">
+      <div className="assistant-oauth-status">
+        {connectionRows.map((row) => <span key={row.providerId} className={row.connected ? 'connected' : row.expired ? 'expired' : ''}>
+          {row.connected ? <Check size={11} /> : <Mail size={11} />}
+          {row.connected ? row.shortLabel : row.expired ? `${row.label} · permiso vencido` : `${row.label} sin conectar`}
+        </span>)}
+      </div>
+      <button type="button" onClick={() => onConnectOAuth?.(connectionRows.find((row) => !row.connected)?.providerId || connectionRows[0]?.providerId || 'google.com')} disabled={Boolean(connectingOAuth)}>
+        {connectingOAuth ? 'Autorizando…' : connectionRows.some((row) => row.expired) ? 'Autorizar permisos' : 'Conectar / Autorizar permisos'}
+      </button>
     </div>
     {memoryOpen ? <div className="assistant-memory">
       <div className="assistant-memory-head">
@@ -3852,6 +4210,20 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
         </div>
       </div>)}
     </div>
+    {pendingEmail && <div className="assistant-email-confirm">
+      <div className="assistant-email-confirm-head"><Mail size={14} /><strong>Confirmar envío de correo</strong></div>
+      <dl>
+        <div><dt>Para</dt><dd>{pendingEmail.destinatario}</dd></div>
+        <div><dt>Asunto</dt><dd>{pendingEmail.asunto}</dd></div>
+        {pendingEmail.adjuntos?.length > 0 && <div><dt>Adjuntos</dt><dd>{pendingEmail.adjuntos.join(', ')}</dd></div>}
+      </dl>
+      <p>{pendingEmail.cuerpo}</p>
+      <div className="assistant-email-confirm-actions">
+        <button type="button" className="btn primary" onClick={onApproveEmail}>Aprobar y enviar</button>
+        <button type="button" className="btn secondary" onClick={onCancelEmail}>Cancelar</button>
+      </div>
+      <small>Nada se enviará hasta que apruebes esta tarjeta.</small>
+    </div>}
     <div className="quick-prompts">
       <button onClick={() => onAsk('Crea un catálogo de 10 productos con precios en CLP, stock y dosis de ejemplo, y genera el Excel con las 7 hojas.')}>Crear catálogo + Excel</button>
       <button onClick={() => onAsk('Simula las ventas de los próximos 30 días y dame recomendaciones para vender más.')}>Simular ventas</button>
