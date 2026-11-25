@@ -99,6 +99,12 @@ for (const reasoning of [
 assert.equal(sanitizeAssistantText('[informe](sandbox:/mnt/data/informe.pdf)'), 'Informe')
 assert.equal(sanitizeAssistantText('¡Claro que sí! Aquí tienes el informe.'), 'El informe.')
 assert.equal(sanitizeAssistantText('He guardado en mi memoria tu preferencia.'), 'Quedó anotado.')
+assert.equal(
+  sanitizeAssistantText('<think>Plan: crear el Excel\n```json\n{"accion":"crear_excel"}\n```\nFin del plan</think>\nEl Excel está listo.'),
+  'El Excel está listo.'
+)
+assert.equal(sanitizeAssistantText('<reasoning>I should create the PDF.</reasoning>\nEl PDF está listo.'), 'El PDF está listo.')
+assert.equal(sanitizeAssistantText('<analysis>Necesito revisar el catálogo</analysis>\nRevisado.'), 'Revisado.')
 const aiDataCode = fs.readFileSync('src/ai-data.js', 'utf8')
 const mainCode = fs.readFileSync('src/main.jsx', 'utf8')
 const serverCode = fs.readFileSync('ai-server.cjs', 'utf8')
@@ -110,6 +116,17 @@ for (const fragment of ['español natural, claro y profesional', 'moneda CLP $#,
 }
 assert.ok(DIRECT_AI_SYSTEM_PROMPT.startsWith(SPANISH_ONLY_RULE))
 assert.ok(DIRECT_AI_SYSTEM_PROMPT.trimEnd().endsWith(SPANISH_ONLY_RULE))
+for (const fragment of [
+  'Eres el asistente de inteligencia artificial senior de VITIMAX',
+  '1. IDENTIDAD, TONO E IDIOMA OBLIGATORIO',
+  '2. RIGOR DE DATOS Y REGLAS DE VITIMAX',
+  '3. ESTÁNDARES DE GENERACIÓN DE DOCUMENTOS Y CÓDIGO',
+  'para compatibilidad total con Excel en español sin errores #¿NOMBRE?.',
+  'vitimax_ai_memory'
+]) {
+  assert.ok(DIRECT_AI_SYSTEM_PROMPT.includes(fragment), `Falta el prompt exacto directo: ${fragment}`)
+  assert.ok(serverCode.includes(fragment), `Falta el prompt exacto del proxy: ${fragment}`)
+}
 for (const [label, code] of [['proxy', serverCode], ['cloud', functionsCode]]) {
   assert.match(code, /const systemInstruction = `\$\{SPANISH_ONLY_RULE\}/, `La regla no inicia el prompt ${label}`)
   assert.equal((code.match(/\$\{SPANISH_ONLY_RULE\}/g) || []).length, 2, `La regla debe estar al inicio y al final del prompt ${label}`)
@@ -170,7 +187,7 @@ console.log('Memoria + historial en system prompt · memoria editable · agente 
 for (const phrase of [
   '[Ejemplo / Demostración]', 'Cero filas fantasma', 'sin desplazar IDs',
   'Todos los archivos generados en un mismo turno', '8 hojas estándar',
-  'sin "=" duplicado', 'numeración secuencial real', 'panorámica 16:9',
+  'sin "=" duplicado', 'numeración secuencial real', '16:9',
   'vista previa interactiva'
 ]) {
   assert.ok(aiDataCode.includes(phrase), `Falta la regla de rigor en el prompt: ${phrase}`)
@@ -262,8 +279,8 @@ for (const phrase of [
   assert.ok(serverCode.includes(phrase), `Falta prohibir "${phrase}" en el proxy`)
   assert.ok(functionsCode.includes(phrase), `Falta prohibir "${phrase}" en la nube`)
 }
-assert.match(DIRECT_AI_SYSTEM_PROMPT, /humor sutil/)
-assert.match(DIRECT_AI_SYSTEM_PROMPT, /no escribas "Fecha:"/i)
+assert.match(DIRECT_AI_SYSTEM_PROMPT, /Ve directo al punto con empatía, criterio propio y naturalidad/)
+assert.match(DIRECT_AI_SYSTEM_PROMPT, /nunca recites la fecha ni la zona horaria/)
 console.log('Saludo exacto, tono humano y reloj silencioso: OK')
 
 // Sin Gmail, Outlook ni Microsoft Office: se eliminaron scopes, herramientas,

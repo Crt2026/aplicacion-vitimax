@@ -67,9 +67,20 @@ function cleanVisibleLine(line) {
     .replace(/^([a-záéíóúñ])/, (letter) => letter.toUpperCase())
 }
 
+// Elimina bloques internos antes de dividir el texto en segmentos de código.
+function stripReasoningBlocks(text) {
+  return String(text || '')
+    .replace(/<\s*(think|thinking|reasoning|analysis)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
+    .replace(/<\s*(?:think|thinking|reasoning|analysis)\b[^>]*>[\s\S]*$/gi, '')
+    .replace(/<\s*\/\s*(?:think|thinking|reasoning|analysis)\s*>/gi, '')
+    .replace(/<\|\s*(?:thinking|analysis|reasoning)\s*\|>/gi, '')
+}
+
 // Nunca se leen campos reasoning / reasoning_content: solo texto visible.
 function sanitizeAssistantText(value) {
-  const source = typeof value === 'string' ? value : ''
+  const raw = typeof value === 'string' ? value : ''
+  if (!raw) return ''
+  const source = stripReasoningBlocks(raw)
   if (!source) return ''
   const segments = source.split(/(```[\s\S]*?```)/g)
   const cleaned = segments.map((segment, index) => {
