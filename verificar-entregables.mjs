@@ -2,9 +2,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import assert from 'node:assert/strict'
 import {
+  DIRECT_AI_SYSTEM_PROMPT,
   buildConversationSection,
   buildDemoProducts,
   buildMemorySection,
+  buildWelcomeMessage,
   createExcelBlob,
   filterJunkProducts,
   isJunkProductName,
@@ -13,7 +15,8 @@ import {
   formatSpanishDate,
   getTemporalContext,
   mergeWorkbookSheets,
-  normalizeImportedRecords
+  normalizeImportedRecords,
+  resolveDisplayName
 } from './src/ai-data.js'
 import { sanitizeText } from './src/text-utils.js'
 import {
@@ -119,20 +122,60 @@ assert.ok(serverCode.includes('TEMPORAL_MARKER'), 'El proxy no evita duplicar el
 assert.ok(mainCode.includes('baidu/ernie-5.5-flash-preview:free'), 'El BOT no usa un modelo gratuito y estable por defecto')
 console.log('Reloj local: 4 franjas, semana 48, zona horaria y elapsed time: OK')
 
+// Saludo inicial exacto por franja, sin fecha, hora, zona ni nombres falsos.
+assert.equal(buildWelcomeMessage('', morning), 'Buenos días. ¿En qué te ayudo hoy?')
+assert.equal(buildWelcomeMessage('Cristóbal', afternoon), 'Buenas tardes, Cristóbal. ¿Qué resolvemos hoy?')
+assert.equal(buildWelcomeMessage('Cristóbal', night), 'Buenas noches, Cristóbal. ¿En qué trabajamos ahora?')
+for (const clock of [morning, afternoon, night]) {
+  const greeting = buildWelcomeMessage('Invitado', clock)
+  assert.ok(!/invitado|administrador|\d|UTC|America\//i.test(greeting), `Saludo con relleno: ${greeting}`)
+}
+assert.equal(resolveDisplayName({ profileName: 'Invitado', displayName: 'Administrador' }), '')
+assert.equal(resolveDisplayName({
+  profileName: 'Invitado',
+  memories: [{ contenido: 'Mi nombre es Cristóbal Suárez' }]
+}), 'Cristóbal')
+assert.ok(!mainCode.includes("profile.name || 'administrador'"), 'El saludo todavía usa un nombre falso')
+assert.match(buildTemporalSection(morning, []), /No menciones la fecha, la hora exacta ni la zona horaria/)
+for (const phrase of ['Soy VITIMAX IA', 'Como asistente de inteligencia artificial', 'Según mi reloj', 'He guardado en mi memoria']) {
+  assert.ok(DIRECT_AI_SYSTEM_PROMPT.includes(phrase), `Falta prohibir "${phrase}" en el prompt`)
+  assert.ok(serverCode.includes(phrase), `Falta prohibir "${phrase}" en el proxy`)
+}
+assert.match(DIRECT_AI_SYSTEM_PROMPT, /humor sutil/)
+assert.match(DIRECT_AI_SYSTEM_PROMPT, /no escribas "Fecha:"/i)
+console.log('Saludo exacto, tono humano y reloj silencioso: OK')
+
 // Excel multi-hoja con KPIs y fórmulas reales.
 const sheets = mergeWorkbookSheets([], products, {}, { allowDemo: true })
 const excelBlob = await createExcelBlob(sheets, { products })
 const excelBytes = await saveBlob(excelBlob, '01-resumen-ejecutivo.xlsx')
 console.log(`Excel: ${excelBytes} bytes · ${sheets.length} hojas`)
 
-// PDF con contenido sucio para verificar limpieza.
-const dirty = '# Informe VITIMAX\n\n## Dosis\n$50kg/ha$ y **negrita** con # raw\n\n| Producto | Precio |\n| --- | --- |\n| Ejemplo | $15.000 |'
-const pdf = buildPdfDocument({ title: 'Informe ejecutivo', subtitle: 'Datos reales', content: dirty, catalog: products, isDemo: false, dateLabel: 'Lunes, 23 de noviembre de 2026' })
+// PDF con contenido sucio y fecha repetida para verificar limpieza.
+const reportDate = 'Lunes, 23 de noviembre de 2026'
+const dirty = `# Informe VITIMAX\n\nFecha: ${reportDate}\n\n## Dosis\n$50kg/ha$ y **negrita** con # raw\n\n| Producto | Precio |\n| --- | --- |\n| Ejemplo | $15.000 |`
+const pdf = buildPdfDocument({ title: 'Informe ejecutivo', subtitle: `${reportDate} · Datos reales`, content: dirty, catalog: products, isDemo: false, dateLabel: reportDate })
 const pdfBytes = typeof pdf?.output === 'function'
   ? Buffer.from(await pdf.output('arraybuffer'))
   : Buffer.from(await pdf.arrayBuffer())
 fs.writeFileSync(path.join(out, '02-informe.pdf'), pdfBytes)
 console.log(`PDF: ${pdfBytes.length} bytes`)
+
+// Catálogo vacío: estado inicial real + guía de 4 pasos, sin datos de ejemplo.
+const emptyPdf = buildPdfDocument({
+  title: 'Estado inicial de VITIMAX',
+  subtitle: 'Diagnóstico de arranque con datos reales',
+  content: '# Estado inicial de VITIMAX\n\nConteos reales del centro de gestión.\n\n## Arranque rápido\n\n1. **Carga tu catálogo.** Importa el Excel oficial de VITIMAX.\n2. **Agrega tus clientes.** Registra contactos reales con nombre y teléfono.\n3. **Registra tus primeras ventas.** Asocia cada venta a un cliente y un producto.\n4. **Publica y ajusta.** Revisa la web, compártela por WhatsApp y corrige con datos reales.',
+  catalog: [],
+  isDemo: false,
+  dateLabel: reportDate,
+  emptyState: { productos: 0, clientes: 0, ventas: 0 }
+})
+const emptyPdfBytes = typeof emptyPdf?.output === 'function'
+  ? Buffer.from(await emptyPdf.output('arraybuffer'))
+  : Buffer.from(await emptyPdf.arrayBuffer())
+fs.writeFileSync(path.join(out, '06-estado-inicial.pdf'), emptyPdfBytes)
+console.log(`PDF estado inicial: ${emptyPdfBytes.length} bytes`)
 
 // Word ejecutivo.
 const wordBlob = await buildDocxDocument({ title: 'Informe ejecutivo', subtitle: 'Datos reales', content: dirty, catalog: products, isDemo: false })

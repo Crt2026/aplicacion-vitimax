@@ -67,6 +67,7 @@ import {
   parseJsonBlock,
   parseWorkbookImport,
   productToRow,
+  resolveDisplayName,
   simulateSales,
   summarizeSimulation
 } from './ai-data.js'
@@ -385,6 +386,28 @@ function catalogMarkdown(title, catalog, isDemo) {
     '## Descripciones',
     detail
   ].filter(Boolean).join('\n\n')
+}
+
+// Un resumen con 0 productos no debe rellenarse con datos de ejemplo: la app
+// dibuja las tarjetas reales y entrega una guía de arranque en 4 pasos.
+function isEmptyOverviewRequest(requestText = '', type = 'pdf') {
+  if (type !== 'pdf') return false
+  const value = String(requestText || '')
+  if (/ejemplo|demo|simulad|cat[aá]logo de prueba|productos de ejemplo/i.test(value)) return false
+  return /resumen|reporte|informe|estado|diagn[oó]stico|balance|panorama|situaci[oó]n/i.test(value)
+}
+
+function emptyOverviewMarkdown(counts = {}) {
+  const safe = (value) => Math.max(0, Number(value) || 0)
+  return [
+    '# Estado inicial de VITIMAX',
+    `Conteos reales del centro de gestión: ${safe(counts.productos)} productos, ${safe(counts.clientes)} clientes y ${safe(counts.ventas)} ventas registradas.`,
+    '## Arranque rápido',
+    '1. **Carga tu catálogo.** Importa el Excel oficial de VITIMAX o pide al asistente una propuesta de 10 productos con precios, stock y dosis.',
+    '2. **Agrega tus clientes.** Registra contactos reales con nombre, teléfono y localidad para cotizar y hacer seguimiento.',
+    '3. **Registra tus primeras ventas.** Asocia cada venta a un cliente y a un producto para activar los informes comerciales.',
+    '4. **Publica y ajusta.** Revisa el catálogo en la web, compártelo por WhatsApp y corrige precios o stock con datos reales.'
+  ].join('\n\n')
 }
 
 function imageFileToDataUrl(file) {
@@ -1567,7 +1590,11 @@ function App({ user, onSignOut, guest = false }) {
     if (restored.length) return restored
     return [{
       role: 'assistant',
-      text: buildWelcomeMessage(profile.name || 'administrador', getTemporalContext()),
+      text: buildWelcomeMessage(resolveDisplayName({
+        profileName: profile.name,
+        displayName: user?.displayName,
+        memories: readLocalJson(localKey(MEMORY_STORAGE_KEY), [])
+      }), getTemporalContext()),
       welcome: true,
       at: new Date().toISOString()
     }]
@@ -1638,13 +1665,17 @@ function App({ user, onSignOut, guest = false }) {
       index === 0 && item.role === 'assistant' && isWelcomeMessage(item)
         ? {
           ...item,
-          text: buildWelcomeMessage(profile.name || 'administrador', temporal),
+          text: buildWelcomeMessage(resolveDisplayName({
+            profileName: profile.name,
+            displayName: user?.displayName,
+            memories: memoriesRef.current
+          }), temporal),
           at: item.at || new Date().toISOString(),
           welcome: true
         }
         : item
     )))
-  }, [temporal.slot, temporal.fechaISO, profile.name])
+  }, [temporal.slot, temporal.fechaISO, profile.name, memories])
   useEffect(() => { memoriesRef.current = memories }, [memories])
   useEffect(() => {
     // Los archivos generados contienen Blob y no se pueden guardar en localStorage.
@@ -1864,18 +1895,38 @@ function App({ user, onSignOut, guest = false }) {
     return { added, updated, total: next.length }
   }
   async function generateAssistantFile(type, requestText, aiText = '', filenameOverride = '', subtitle = '') {
-    const title = String(requestText || '').trim().slice(0, 120) || 'Documento VITIMAX'
+    const requestedTitle = String(requestText || '').trim().slice(0, 120) || 'Documento VITIMAX'
     const realProducts = filterJunkProducts(products)
-    const catalogSource = realProducts.length ? realProducts : buildDemoProducts()
     const isDemo = !realProducts.length
-    const body = String(aiText || '').trim() || catalogMarkdown(title, catalogSource, isDemo)
+    const emptyOverview = isEmptyOverviewRequest(requestedTitle, type) && isDemo
+    const title = emptyOverview ? 'Estado inicial de VITIMAX' : requestedTitle
+    const docSubtitle = emptyOverview
+      ? String(subtitle || '').trim() || 'Diagnóstico de arranque con datos reales'
+      : subtitle
+    const counts = {
+      productos: realProducts.length,
+      clientes: Array.isArray(records.clientes) ? records.clientes.length : 0,
+      ventas: Array.isArray(records.ventas) ? records.ventas.length : 0
+    }
+    const catalogSource = emptyOverview ? [] : (isDemo ? buildDemoProducts() : realProducts)
+    const body = emptyOverview
+      ? emptyOverviewMarkdown(counts)
+      : String(aiText || '').trim() || catalogMarkdown(title, catalogSource, isDemo)
     const dateLabel = getTemporalContext().fechaCompleta
     const baseName = String(filenameOverride || '').trim()
     let filename = baseName || 'documento-vitimax'
     let saved = null
     if (type === 'pdf') {
       filename = withExtension(baseName, 'documento-vitimax', 'pdf')
-      saved = await saveBlob(buildPdfDocument({ title, subtitle, content: body, catalog: catalogSource, isDemo, dateLabel }), filename)
+      saved = await saveBlob(buildPdfDocument({
+        title,
+        subtitle: docSubtitle,
+        content: body,
+        catalog: catalogSource,
+        isDemo: emptyOverview ? false : isDemo,
+        dateLabel,
+        emptyState: emptyOverview ? counts : null
+      }), filename)
     } else if (type === 'word') {
       filename = withExtension(baseName, 'documento-vitimax', 'docx')
       saved = await saveBlob(await buildDocxDocument({ title, subtitle, content: body, catalog: catalogSource, isDemo, dateLabel }), filename)
@@ -2665,9 +2716,14 @@ function App({ user, onSignOut, guest = false }) {
     } catch { /* sin almacenamiento */ }
     clearErrorLog()
     const clock = getTemporalContext()
+    const name = resolveDisplayName({
+      profileName: profile.name,
+      displayName: user?.displayName,
+      memories: memoriesRef.current
+    })
     setMessages([{
       role: 'assistant',
-      text: `${clock.franja}, ${profile.name || 'administrador'}. Hoy es ${clock.fechaCompleta}, son las ${clock.hora24Short} (${clock.zonaHoraria}). Reinicié la conversación para dejar el chat limpio. ¿Qué necesitas?`,
+      text: buildWelcomeMessage(name, clock),
       welcome: true,
       at: new Date().toISOString()
     }])

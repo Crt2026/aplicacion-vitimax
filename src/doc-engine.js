@@ -52,6 +52,45 @@ function todayLabel() {
   return formatSpanishDate(new Date())
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+// La fecha se imprime una sola vez en la cabecera verde. Si el modelo la
+// repite en el subtítulo o en el cuerpo, se elimina aquí sin tocar fechas
+// históricas distintas a la del día.
+function stripHeaderDate(value, date) {
+  let text = String(value ?? '')
+  const dateOnly = String(date || '').replace(/^\s*[^,]+,\s*/, '').trim()
+  const values = [date, dateOnly].filter(Boolean)
+  if (!values.length) return text
+  for (const item of values) {
+    const escaped = escapeRegExp(item)
+    text = text.replace(new RegExp(`^\\s*fecha\\s*[:\\-]\\s*${escaped}\\s*`, 'i'), '')
+    text = text.replace(new RegExp(escaped, 'gi'), '')
+  }
+  text = text.replace(/^\s*fecha\s*[:\-]\s*/i, '')
+  text = text.replace(/^\s*[·|,;–—-]+\s*/, '')
+  return text.replace(/[ \t]{2,}/g, ' ').trim()
+}
+
+function sanitizeBlockDates(blocks, date) {
+  return blocks.map((block) => {
+    const next = { ...block }
+    if (typeof next.text === 'string') next.text = stripHeaderDate(next.text, date)
+    if (Array.isArray(next.items)) next.items = next.items.map((item) => stripHeaderDate(item, date)).filter(Boolean)
+    if (Array.isArray(next.header)) next.header = next.header.map((cell) => stripHeaderDate(cell, date))
+    if (Array.isArray(next.rows)) next.rows = next.rows.map((row) => Array.isArray(row) ? row.map((cell) => stripHeaderDate(cell, date)) : row)
+    if (typeof next.code === 'string') next.code = next.code.split('\n').map((line) => stripHeaderDate(line, date)).join('\n')
+    return next
+  }).filter((block) => {
+    if (block.type === 'table') return (block.rows || []).length > 0
+    if (['heading', 'paragraph', 'quote'].includes(block.type)) return Boolean(String(block.text || '').trim())
+    if (['bullets', 'numbers'].includes(block.type)) return (block.items || []).length > 0
+    return true
+  })
+}
+
 // ---------------------------------------------------------------------------
 // 1. Limpieza de Markdown y enlaces internos
 // ---------------------------------------------------------------------------
@@ -365,21 +404,21 @@ function layoutRich(doc, segments, maxWidth, size, baseBold = false) {
   return lines.length ? lines : [[{ text: '', bold: baseBold }]]
 }
 
-export function buildPdfDocument({ title = 'Documento VITIMAX', subtitle = '', content = '', dateLabel = '', catalog = [], isDemo = false } = {}) {
+export function buildPdfDocument({ title = 'Documento VITIMAX', subtitle = '', content = '', dateLabel = '', catalog = [], isDemo = false, emptyState = null } = {}) {
   const doc = new jsPDF({ unit: 'mm', format: 'a4', compress: true })
   const pageW = doc.internal.pageSize.getWidth()
   const pageH = doc.internal.pageSize.getHeight()
   const margin = 18
   const contentW = pageW - margin * 2
   const bottom = pageH - 22
+  const date = dateLabel || todayLabel()
   const cleanTitle = plainText(title) || 'Documento VITIMAX'
-  const cleanSubtitle = plainText(subtitle)
-  const rawBlocks = parseDocument(content)
+  const cleanSubtitle = stripHeaderDate(plainText(subtitle), date)
+  const rawBlocks = sanitizeBlockDates(parseDocument(content), date)
   const catalogMode = Array.isArray(catalog) && catalog.length > 0
     && isCatalogDocument(cleanTitle, cleanSubtitle, rawBlocks)
   const blocks = prepareDocumentBlocks(rawBlocks, catalogMode)
   const totals = catalogMode ? computeCatalogTotals(catalog) : null
-  const date = dateLabel || todayLabel()
   let y = 0
 
   function newPage() {
@@ -651,6 +690,17 @@ export function buildPdfDocument({ title = 'Documento VITIMAX', subtitle = '', c
   doc.text(`${date}${cleanSubtitle ? ` · ${cleanSubtitle}` : ''}`.slice(0, 120), margin, bannerH - 6)
 
   y = bannerH + 12
+
+  // Catálogo vacío: tarjetas con los conteos reales en lugar de datos de ejemplo.
+  if (emptyState && !catalogMode) {
+    const safeCount = (value) => Math.max(0, Number(value) || 0)
+    drawSectionLabel('Estado inicial')
+    drawKpiCards([
+      { label: 'Productos', value: String(safeCount(emptyState.productos)) },
+      { label: 'Clientes', value: String(safeCount(emptyState.clientes)) },
+      { label: 'Ventas', value: String(safeCount(emptyState.ventas)) }
+    ])
+  }
 
   // La página 1 nunca queda vacía: banner + KPIs reales + primera tabla.
   if (catalogMode && totals) {

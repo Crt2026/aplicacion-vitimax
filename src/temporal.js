@@ -148,18 +148,42 @@ export function buildTemporalSection(temporal = getTemporalContext(), history = 
 ### RELOJ Y CONTEXTO TEMPORAL EN VIVO: Hoy es ${clock.fechaCompleta}, son las ${clock.hora24} (${clock.franja}). Semana ${clock.numeroSemana} del año. Usa esta referencia exacta para saludar acorde a la hora real, calcular plazos ("hoy", "mañana", "esta semana", "próximo lunes", "fin de mes"), filtrar ventas/asesorías recientes y fechar documentos (Excel, PDF, Word, PowerPoint y Web) sin inventar ni desfasar fechas.
 Día de la semana: ${clock.diaSemana}. Mes: ${clock.mes}. Trimestre: ${clock.trimestre}. Hora en 12 horas: ${clock.hora12}. Zona horaria del dispositivo: ${clock.zonaHoraria} (${clock.offset}). Faltan ${clock.diasRestantesSemana} días para terminar la semana y ${clock.diasRestantesMes} días para terminar el mes.
 ${elapsed || 'Es la primera interacción de esta conversación.'}
-Si retomas la charla después de horas o de otro día, adapta el saludo y la continuidad a este paso del tiempo sin mencionarlo de forma robótica. Usa la franja horaria exacta "${clock.franja}" cuando saludes; en respuestas normales empieza por la respuesta, no por un saludo.`
+Si retomas la charla después de horas o de otro día, adapta el saludo y la continuidad a este paso del tiempo sin mencionarlo de forma robótica. Usa la franja horaria exacta "${clock.franja}" cuando saludes; en respuestas normales empieza por la respuesta, no por un saludo. No menciones la fecha, la hora exacta ni la zona horaria salvo que el usuario pregunte por la hora, la fecha o un plazo: este bloque es referencia interna, no texto para recitar.`
+}
+
+export function resolveDisplayName({ profileName = '', displayName = '', memories = [] } = {}) {
+  const clean = (value) => String(value ?? '').trim().replace(/\s+/g, ' ')
+  const generic = /^(invitado|administrador|admin|usuario|user)$/i
+  const namePattern = /[A-Za-zÁÉÍÓÚÑáéíóúñ][A-Za-zÁÉÍÓÚÑáéíóúñ'’-]*/
+  const candidates = [clean(profileName), clean(displayName)]
+  const rows = Array.isArray(memories) ? memories : []
+  for (const row of rows) {
+    const content = clean(row?.contenido ?? row?.content ?? row?.dato ?? row?.texto)
+    if (!content) continue
+    const match = content.match(new RegExp(`(?:me llamo|mi nombre es|ll[aá]mame|soy|nombre\\s*[:=])\\s+(${namePattern.source})`, 'i'))
+    if (match) candidates.push(match[1])
+  }
+  const found = candidates.find((value) => value && !generic.test(value))
+  if (!found) return ''
+  return found.charAt(0).toUpperCase() + found.slice(1)
 }
 
 export function buildWelcomeMessage(name = '', temporal = getTemporalContext()) {
   const clock = temporal && temporal.fechaCompleta ? temporal : getTemporalContext()
-  const who = String(name || '').trim() || 'administrador'
-  return `${clock.franja}, ${who}. Hoy es ${clock.fechaCompleta}, son las ${clock.hora24Short} (${clock.zonaHoraria}). Soy VITIMAX IA: puedo ayudarte con código, estudios, cálculos, redacción, negocios y toda la gestión de VITIMAX. También genero Excel, PDF, Word, PowerPoint y páginas web reales. ¿Qué resolvemos?`
+  const raw = String(name || '').trim()
+  const who = /^(invitado|administrador|admin|usuario|user)$/i.test(raw) ? '' : raw
+  const slot = clock.slot || (clock.franja === 'Buenos días' ? 'manana' : clock.franja === 'Buenas tardes' ? 'tarde' : 'noche')
+  const question = slot === 'manana'
+    ? '¿En qué te ayudo hoy?'
+    : slot === 'tarde'
+      ? '¿Qué resolvemos hoy?'
+      : '¿En qué trabajamos ahora?'
+  return who ? `${clock.franja}, ${who}. ${question}` : `${clock.franja}. ${question}`
 }
 
 export function isWelcomeMessage(item) {
   if (!item || typeof item !== 'object') return false
   if (item.welcome === true) return true
   const text = String(item.text || item.content || '')
-  return /Soy VITIMAX IA:|Reinicié la conversación para dejar el chat limpio/.test(text)
+  return /Soy VITIMAX IA:|Reinicié la conversación para dejar el chat limpio|¿En qué te ayudo hoy\?|¿Qué resolvemos hoy\?|¿En qué trabajamos ahora\?/.test(text)
 }
