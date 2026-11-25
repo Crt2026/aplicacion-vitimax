@@ -77,6 +77,7 @@ assert.match(historyPrompt, /HISTORIAL COMPLETO DE LA CONVERSACIÓN/)
 const aiDataCode = fs.readFileSync('src/ai-data.js', 'utf8')
 const mainCode = fs.readFileSync('src/main.jsx', 'utf8')
 const serverCode = fs.readFileSync('ai-server.cjs', 'utf8')
+const stylesCode = fs.readFileSync('src/styles.css', 'utf8')
 for (const rule of ['Próximos Pasos', 'COUNTIF', 'verde bosque']) {
   assert.ok(aiDataCode.includes(rule) || serverCode.includes(rule), `Falta la regla ${rule} en el prompt`)
 }
@@ -121,6 +122,17 @@ assert.ok(serverCode.includes('serverTemporalBlock('), 'El proxy no construye el
 assert.ok(serverCode.includes('TEMPORAL_MARKER'), 'El proxy no evita duplicar el bloque temporal')
 assert.ok(mainCode.includes('baidu/ernie-5.5-flash-preview:free'), 'El BOT no usa un modelo gratuito y estable por defecto')
 console.log('Reloj local: 4 franjas, semana 48, zona horaria y elapsed time: OK')
+
+// Reloj en pantalla: tick reactivo de 1 segundo y dígitos sin salto horizontal.
+assert.ok(mainCode.includes('const [now, setNow] = useState(() => new Date())'), 'Falta el estado reactivo now')
+assert.ok(mainCode.includes('setInterval(() => setNow(new Date()), 1000)'), 'El reloj no avanza cada segundo')
+assert.ok(mainCode.includes('return () => clearInterval(id)'), 'Falta limpiar el intervalo del reloj')
+assert.ok(mainCode.includes('const temporal = getTemporalContext(now)'), 'El reloj visible no se deriva del estado now')
+assert.ok(!mainCode.includes('useTemporalClock'), 'Quedó un reloj cacheado fuera del render')
+assert.ok(!/temporal = getTemporalContext\(\)/.test(mainCode), 'Un componente aún usa un reloj estático por defecto')
+assert.ok(mainCode.includes('className="temporal-clock"'), 'Falta la clase de dígitos tabulares en la hora')
+assert.match(stylesCode, /\.temporal-clock\{[^}]*font-variant-numeric:tabular-nums/)
+console.log('Reloj en pantalla: tick de 1s, derivado de now y dígitos tabulares: OK')
 
 // Saludo inicial exacto por franja, sin fecha, hora, zona ni nombres falsos.
 assert.equal(buildWelcomeMessage('', morning), 'Buenos días. ¿En qué te ayudo hoy?')

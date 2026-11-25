@@ -282,41 +282,6 @@ function normalize(value) {
   return String(value ?? '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
 }
 
-function greetingForNow() {
-  return getTemporalContext().franja
-}
-
-// Reloj en vivo del dispositivo. Se reevalúa al abrir la app, al volver a
-// enfocarla y cada 15 segundos, pero solo provoca un render cuando cambia el
-// minuto, el día o la franja horaria.
-function useTemporalClock() {
-  const [clock, setClock] = useState(() => getTemporalContext())
-  useEffect(() => {
-    const refresh = () => {
-      const next = getTemporalContext()
-      setClock((current) => (
-        current.hora24.slice(0, 5) === next.hora24.slice(0, 5)
-        && current.slot === next.slot
-        && current.fechaISO === next.fechaISO
-          ? current
-          : next
-      ))
-    }
-    refresh()
-    const timer = setInterval(refresh, 15_000)
-    window.addEventListener('focus', refresh)
-    window.addEventListener('pageshow', refresh)
-    document.addEventListener('visibilitychange', refresh)
-    return () => {
-      clearInterval(timer)
-      window.removeEventListener('focus', refresh)
-      window.removeEventListener('pageshow', refresh)
-      document.removeEventListener('visibilitychange', refresh)
-    }
-  }, [])
-  return clock
-}
-
 function makeId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
   return `vitimax-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
@@ -1560,7 +1525,15 @@ function App({ user, onSignOut, guest = false }) {
   // Cada cuenta guarda su copia local con su propio uid, así al cerrar sesión
   // y entrar con otra cuenta no se mezclan el perfil ni los datos.
   const uid = user?.uid || ''
-  const temporal = useTemporalClock()
+  // Reloj en vivo: un tick por segundo. Todo el texto del reloj se deriva de
+  // este estado en cada render, así segundos, minutos, hora, día y fecha avanzan
+  // realmente en pantalla sin depender de caches ni de variables externas.
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000)
+    return () => clearInterval(id)
+  }, [])
+  const temporal = getTemporalContext(now)
   const localKey = (base) => scopedKey(base, uid)
   const [products, setProducts] = useState(() => filterJunkProducts(readLocalJson(localKey(STORAGE_KEY), [])))
   const [profile, setProfile] = useState(() => {
@@ -2809,7 +2782,7 @@ function App({ user, onSignOut, guest = false }) {
   </div>
 }
 
-function Dashboard({ products, lowStock, missingData, onImport, onTemplate, onNavigate, records = EMPTY_MODULES, temporal = getTemporalContext() }) {
+function Dashboard({ products, lowStock, missingData, onImport, onTemplate, onNavigate, records = EMPTY_MODULES, temporal }) {
   const readOnly = !onImport
   const totalStock = products.reduce((sum, p) => sum + (Number(p.stock) || 0), 0)
   const categories = new Set(products.map((p) => p.category).filter(Boolean))
@@ -2832,7 +2805,7 @@ function Dashboard({ products, lowStock, missingData, onImport, onTemplate, onNa
   return <>
     <SectionHeader icon={LayoutDashboard} tone="lime" eyebrow={`CENTRO DIGITAL · 01 · ${temporal.fechaISO}`} title={`${temporal.franja}, ${readOnly ? 'invitado' : 'administrador'}`} aside={<span className="heading-spark"><Sparkles size={20} /></span>} description={`${temporal.fechaCompleta} · ${temporal.hora24Short} (${temporal.zonaHoraria}, ${temporal.offset}) · Semana ${temporal.numeroSemana} del año`} actions={!readOnly && <><button className="btn secondary" onClick={onTemplate}><FileSpreadsheet size={16} /> Plantilla Excel</button><button className="btn primary" onClick={onImport}><Upload size={16} /> Importar productos</button></>} />
     <div className="temporal-bar" role="status" aria-live="polite">
-      <span className="temporal-item"><Clock size={14} /><strong>{temporal.franja}</strong> · {temporal.hora24}</span>
+      <span className="temporal-item"><Clock size={14} /><strong>{temporal.franja}</strong> · <span className="temporal-clock">{temporal.hora24}</span></span>
       <span className="temporal-item"><CalendarDays size={14} />{temporal.fechaCompleta}</span>
       <span className="temporal-item">{temporal.diaSemana} · Mes {temporal.mes} · Trimestre {temporal.trimestre} · Semana {temporal.numeroSemana}</span>
       <span className="temporal-item">{temporal.diasRestantesSemana} días para terminar la semana · {temporal.diasRestantesMes} días para terminar el mes · {temporal.zonaHoraria} ({temporal.offset})</span>
@@ -3711,7 +3684,7 @@ function AssistantIcon() {
   return <span className="assistant-logo" aria-hidden="true"><svg viewBox="0 0 32 32" role="img"><path className="assistant-antenna" d="M16 5V2m0 0-2 2m2-2 2 2" /><rect x="5" y="7" width="22" height="18" rx="6" /><path d="M10 15h.01M22 15h.01M11 20c3 2 7 2 10 0" /><path className="assistant-ear" d="M5 14H2m25 0h3" /></svg><b>IA</b></span>
 }
 
-function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memories = [], onSaveMemory, onDeleteMemory, onClearMemories, temporal = getTemporalContext() }) {
+function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memories = [], onSaveMemory, onDeleteMemory, onClearMemories, temporal }) {
   const [text, setText] = useState('')
   const [attachment, setAttachment] = useState(null)
   const [attachError, setAttachError] = useState('')
@@ -3803,7 +3776,7 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
     <div className="assistant-head">
       <div className="assistant-title">
         <div className="bot-avatar"><img className="assistant-bot-image panel-bot-image" src="/bot-vitimax.png" alt="Robot BOT IA VITIMAX" /></div>
-        <div><strong>BOT IA VITIMAX</strong><span>{temporal.fechaCorta} · {temporal.hora24Short} · {temporal.franja} · {temporal.zonaHoraria}</span><span>{aiReady ? 'IA conectada · Catálogo · Archivos · Memoria' : 'IA no configurada · respuestas locales'}</span></div>
+        <div><strong>BOT IA VITIMAX</strong><span>{temporal.fechaCorta} · <span className="temporal-clock assistant-clock">{temporal.hora24}</span> · {temporal.franja} · {temporal.zonaHoraria}</span><span>{aiReady ? 'IA conectada · Catálogo · Archivos · Memoria' : 'IA no configurada · respuestas locales'}</span></div>
       </div>
       <div className="assistant-head-actions">
         <button type="button" className={`assistant-memory-btn${memoryOpen ? ' active' : ''}`} onClick={() => setMemoryOpen((current) => !current)} aria-expanded={memoryOpen} title="Ver lo que la IA recuerda">
