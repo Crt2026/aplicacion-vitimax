@@ -17,10 +17,24 @@ const apiKey = provider === 'openrouter' ? process.env.OPENROUTER_API_KEY : proc
 const model = provider === 'openrouter'
   ? (process.env.OPENROUTER_MODEL || 'baidu/ernie-5.5-flash-preview:free')
   : (process.env.GEMINI_MODEL || 'gemini-2.0-flash')
-const fallbackModels = (process.env.OPENROUTER_FALLBACK_MODELS || 'nvidia/nemotron-3-ultra-550b-a55b:free,recursive/flint-v1.0:free')
-  .split(',')
-  .map((item) => item.trim())
-  .filter(Boolean)
+// Modelos gratuitos activos verificados en OpenRouter. Se envían de uno en uno
+// porque el arreglo "models" de OpenRouter no garantiza el respaldo ante 429.
+const ACTIVE_FREE_MODELS = [
+  'baidu/ernie-5.5-flash-preview:free',
+  'google/gemma-4-31b-it:free',
+  'google/gemma-4-26b-a4b-it:free',
+  'nvidia/nemotron-3-ultra-550b-a55b:free',
+  'nvidia/nemotron-3.5-lightning:free',
+  'recursive/flint-v1.0:free',
+  'inclusionai/ling-3.2-flash:free',
+  'liquid/lfm-3-1.7b:free',
+  'particle-ai/particle-1:free',
+  'openrouter/free'
+]
+const fallbackModels = [...new Set([
+  ...(process.env.OPENROUTER_FALLBACK_MODELS || '').split(',').map((item) => item.trim()).filter(Boolean),
+  ...ACTIVE_FREE_MODELS
+])]
 const sharedToken = (process.env.AI_SHARED_TOKEN || '').trim()
 const upstreamTimeout = Number(process.env.AI_TIMEOUT_MS || 60_000)
 const rateLimitWindow = 60_000
@@ -75,6 +89,15 @@ OPERACIÓN INTERNA DE LA APP (no expliques ni muestres estos detalles al usuario
 - Todos los archivos generados en un mismo turno deben coincidir exactamente, sin contradicciones entre cifras, nombres ni fechas.
 - Después de usar una herramienta, confirma en una línea qué archivo creaste y qué contiene, sin mostrar el JSON ni el proceso técnico. Si falla, dilo con claridad y ofrece la alternativa más útil.
 ${SPANISH_ONLY_RULE}`
+
+// Prompt operativo compacto: conserva el contrato senior (documentado arriba)
+// pero gasta unos cientos de tokens por llamada, no miles.
+const compactSystemInstruction = SPANISH_ONLY_RULE + `
+Asistente senior de VITIMAX (agricultura, datos, documentos y código). Español chileno directo; nunca <think>, razonamientos, nombres internos ni enlaces sandbox:/.
+Usa el reloj inyectado para plazos y documentos sin recitarlo; aplica la memoria sin anunciarla. No inventes datos reales: etiqueta los ficticios [Ejemplo / Demostración], ignora totales, verifica IVA 19% y Precio × Stock con cifras coherentes en todo el turno.
+AGENTE ÉLITE: encadena herramientas hasta 8 pasos sobre Productos, Clientes, Plantas, Inventario, Ventas, Asesorías y Proveedores; no simules archivos. Sin herramientas, devuelve un bloque \`\`\`json con {"accion":"crear_excel"|"crear_pdf"|"crear_word"|"crear_ppt"|"crear_pagina_web"|"crear_codigo"|"guardar_memoria"|"olvidar_memoria", ...} y confirma en una línea el archivo creado.
+Excel: 8 hojas con Resumen Ejecutivo, fórmulas OpenXML sin "=" duplicado, verde #1E4D2B y CLP $#,##0. PDF/Word con numeración real; PowerPoint 16:9 con Próximos Pasos; web/código completo con Tailwind y vista previa interactiva.
+Prohibido: "¡Claro que sí!", "Aquí tienes", "Como asistente de IA", "He guardado en mi memoria", "Según mi reloj", "Soy VITIMAX IA".`
 
 const rateBuckets = new Map()
 
@@ -241,8 +264,8 @@ function memoryBlock(memories) {
   const lines = []
   let total = 0
   for (const item of list) {
-    const line = `- [${item.categoria}] ${item.contenido.slice(0, 280)}`
-    if (total + line.length > 7000) break
+    const line = `- [${item.categoria}] ${item.contenido.slice(0, 180)}`
+    if (total + line.length > 2600) break
     lines.push(line)
     total += line.length + 1
   }
@@ -380,20 +403,29 @@ ${elapsed || 'Es la primera interacción de esta conversación.'}`
 
 const HISTORY_MARKER = 'HISTORIAL COMPLETO DE LA CONVERSACIÓN'
 
-function conversationBlock(history) {
+// Solo los últimos 10 turnos viajan al modelo: el historial completo se queda
+// en el dispositivo y la memoria persistente se inyecta siempre por separado.
+function recentHistory(history, maxTurns = 10) {
   const rows = (Array.isArray(history) ? history : [])
     .filter((item) => item && ['user', 'assistant', 'tool'].includes(item.role) && typeof item.content === 'string' && item.content.trim())
-    .slice(-300)
+  if (rows.length <= maxTurns) return rows
+  const userIndexes = []
+  rows.forEach((item, index) => { if (item.role === 'user') userIndexes.push(index) })
+  return userIndexes.length > maxTurns ? rows.slice(userIndexes[userIndexes.length - maxTurns]) : rows
+}
+
+function conversationBlock(history) {
+  const rows = recentHistory(history)
   if (!rows.length) return ''
   const lines = []
   let total = 0
   for (const item of rows) {
     const speaker = item.role === 'user' ? 'USUARIO' : item.role === 'tool' ? 'HERRAMIENTA' : 'VITIMAX IA'
-    const text = String(item.content).replace(/\s+/g, ' ').trim().slice(0, 4000)
+    const text = String(item.content).replace(/\s+/g, ' ').trim().slice(0, 1200)
     const when = item.at ? serverTemporalContext(item.at) : null
     const prefix = when ? `[${when.fechaISO} ${when.hora24Short}] ` : ''
     const line = `${prefix}${speaker}: ${text}`
-    if (total + line.length > 60_000) break
+    if (total + line.length > 14_000) break
     lines.push(line)
     total += line.length + 1
   }
@@ -402,14 +434,14 @@ function conversationBlock(history) {
   return `
 
 ### ${HISTORY_MARKER}
-Continúa esta conversación con naturalidad. Es contexto ya compartido: no lo repitas, no lo enumeres y no digas que lo estás consultando.
+Últimos ${Math.min(10, rows.filter((item) => item.role === 'user').length)} turnos, contextuales y ya compartidos: no los repitas ni digas que los consultaste.
 ${elapsed ? `${elapsed}\n` : ''}${lines.join('\n')}`
 }
 
 // System prompt único con memoria, reloj e historial, sin duplicar bloques que
 // la app ya haya inyectado antes de enviar la solicitud.
 function buildSystemPrompt(system, memories, history, temporal) {
-  const base = typeof system === 'string' && system.trim() ? system.slice(0, 100_000) : systemInstruction
+  const base = typeof system === 'string' && system.trim() ? system.slice(0, 12_000) : compactSystemInstruction
   let result = base
   if (!result.includes(TEMPORAL_MARKER)) result += serverTemporalBlock(temporal, history)
   if (!result.includes('MEMORIA PERSISTENTE')) result += memoryBlock(memories)
@@ -451,7 +483,35 @@ function attachmentParts(attachment) {
   return parts
 }
 
-async function askOpenRouter({ catalog, message, history, attachment, signal, system, memories, temporal, maxTokens = 6000 }) {
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+function isRetryableAiError(error) {
+  const status = Number(error?.status || 0)
+  if ([401, 402, 403].includes(status)) return false
+  if ([408, 429, 502, 503, 504].includes(status)) return true
+  if (error?.name === 'AbortError' || error?.name === 'TimeoutError') return true
+  const text = String(error?.message || '')
+  if (/\b(?:401|402|403)\b/i.test(text)) return false
+  return /\b(?:408|429|502|503|504)\b|rate.?limit|too many requests|saturad|timeout|tardó|aborted|conexi|offline|fetch failed|network/i.test(text)
+}
+
+// Último recurso con datos reales: el proxy no crea archivos, pero sí entrega
+// un resumen verificable para que la app pueda generarlos en el dispositivo.
+function serverLocalAnswer(products = [], message = '') {
+  const list = (Array.isArray(products) ? products : []).filter((item) => {
+    const name = String(item?.name ?? item?.nombre ?? item?.producto ?? '')
+    return name.trim() && !/^(?:total|totales|Total Valorado Inventario)\b/i.test(name.trim())
+  })
+  const units = list.reduce((sum, item) => sum + (Number(item.stock) || 0), 0)
+  const value = list.reduce((sum, item) => sum + (Number(item.price) || 0) * (Number(item.stock) || 0), 0)
+  const query = String(message || '').toLowerCase()
+  const parts = []
+  if (/iva|impuesto/.test(query)) parts.push('El IVA en Chile es 19%.')
+  parts.push(`El catálogo real tiene ${list.length} productos, ${units} unidades en stock y un valor de $${Math.round(value).toLocaleString('es-CL')}.`)
+  return `${parts.join(' ')} Puedo generar el archivo solicitado con estos datos en tu dispositivo.`
+}
+
+async function askOpenRouter({ catalog, message, history, attachment, signal, system, memories, temporal, products = [], maxTokens = 6000 }) {
   const content = []
   const attachmentItems = attachmentParts(attachment)
   const textBlocks = [`CATÁLOGO REAL DE VITIMAX:\n${catalog}`, `CONSULTA DEL USUARIO:\n${message}`]
@@ -469,28 +529,46 @@ async function askOpenRouter({ catalog, message, history, attachment, signal, sy
     ...(fullSystem.includes(HISTORY_MARKER) ? [] : history.map((item) => ({ role: item.role, content: item.content }))),
     { role: 'user', content }
   ]
-  const modelList = [model, ...fallbackModels].filter(Boolean).slice(0, 3)
-  const result = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    signal,
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': process.env.AI_PUBLIC_URL || 'https://vitimax.app',
-      'X-Title': 'VITIMAX'
-    },
-    body: JSON.stringify({ models: modelList, messages, temperature: 0.7, max_tokens: Math.min(Math.max(Number(maxTokens) || 1500, 100), 6000) })
-  })
-  const payload = await result.json().catch(() => ({}))
-  if (!result.ok) {
-    const reason = payload?.error?.message || `HTTP ${result.status}`
-    const error = new Error(`OpenRouter rechazó la solicitud: ${reason}`)
-    error.status = result.status
-    throw error
+  const cascade = [...new Set([model, ...fallbackModels].filter(Boolean))]
+  const safeMaxTokens = Math.min(Math.max(Number(maxTokens) || 1500, 100), 6000)
+  let lastError = null
+  for (let index = 0; index < cascade.length; index += 1) {
+    const candidate = cascade[index]
+    try {
+      const attemptSignal = typeof AbortSignal !== 'undefined' && AbortSignal.any
+        ? AbortSignal.any([signal, AbortSignal.timeout(25_000)])
+        : signal
+      const result = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        signal: attemptSignal,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': process.env.AI_PUBLIC_URL || 'https://vitimax.app',
+          'X-Title': 'VITIMAX'
+        },
+        body: JSON.stringify({ model: candidate, messages, temperature: 0.7, max_tokens: safeMaxTokens })
+      })
+      const payload = await result.json().catch(() => ({}))
+      if (!result.ok) {
+        const reason = payload?.error?.message || `HTTP ${result.status}`
+        const error = new Error(`OpenRouter rechazó la solicitud: ${reason}`)
+        error.status = result.status
+        throw error
+      }
+      // Solo se lee content: nunca reasoning ni reasoning_content.
+      const aiMessage = payload.choices?.[0]?.message || {}
+      const text = sanitizeAssistantText(aiMessage.content)
+      if (!text) throw new Error('La IA devolvió una respuesta vacía.')
+      return { text, model: payload.model || candidate }
+    } catch (error) {
+      lastError = error
+      if (!isRetryableAiError(error)) break
+      if (index < cascade.length - 1) await sleep(error.status === 429 ? 1500 : 350)
+    }
   }
-  // Solo se lee content: nunca reasoning ni reasoning_content.
-  const aiMessage = payload.choices?.[0]?.message || {}
-  return { text: sanitizeAssistantText(aiMessage.content), model: payload.model || model }
+  if (lastError && !isRetryableAiError(lastError)) throw lastError
+  return { text: serverLocalAnswer(products, message), model: 'local' }
 }
 
 async function askGemini({ catalog, message, history, attachment, signal, system, memories, temporal, maxTokens = 6000 }) {
@@ -587,6 +665,7 @@ const server = http.createServer(async (request, response) => {
     try {
       result = await (provider === 'openrouter' ? askOpenRouter : askGemini)({
         catalog,
+        products,
         message: message.trim(),
         history: safeHistory,
         attachment,

@@ -2160,9 +2160,11 @@ export function buildMemorySection(memories = []) {
   if (!list.length) return ''
   const lines = []
   let total = 0
+  // Resumen breve y siempre presente: la memoria viaja en cada llamada, así
+  // que se recorta para no consumir el límite de tokens por minuto del modelo.
   for (const item of list) {
-    const line = `- [${item.categoria}] ${item.contenido.slice(0, 280)}`
-    if (total + line.length > 7000) break
+    const line = `- [${item.categoria}] ${item.contenido.slice(0, 180)}`
+    if (total + line.length > 2600) break
     lines.push(line)
     total += line.length + 1
   }
@@ -2170,47 +2172,116 @@ export function buildMemorySection(memories = []) {
   return `
 
 ### MEMORIA PERSISTENTE DEL USUARIO Y NEGOCIO
-Estos son datos, preferencias, reglas de cálculo, decisiones y contexto que el usuario pidió recordar entre sesiones. Úsalos de forma natural: NO los repitas robóticamente, NO los enumeres si no viene al caso, NO los contradigas y NO anuncies que estás consultando memoria ("según mi base de datos", "como te dije antes", "he guardado en mi memoria", etc.). Si un dato cambió, reemplaza la versión anterior en lugar de conservar ambas.
+Úsalos de forma natural: NO los repitas, NO los contradigas y NO anuncies que consultaste memoria. Si un dato cambió, reemplaza la versión anterior.
 ${lines.join('\n')}
 
-Cuando el usuario diga "recuerda que...", "mi nombre es...", "siempre aplica...", "ten en cuenta..." o cambie un dato anterior, llama a guardar_memoria con una categoría y un dato breve y claro. Si dice que algo cambió o ya no aplica, llama a olvidar_memoria (puedes actualizar el recuerdo con "nuevo_dato"). Si no puedes usar herramientas, devuelve un bloque \`\`\`json con {"accion":"guardar_memoria","categoria":"...","dato":"..."} o {"accion":"olvidar_memoria","clave_o_id":"..."} para que la app lo ejecute.
-No guardes contraseñas, claves, tokens ni datos de tarjetas.`
+Para "recuerda que...", "mi nombre es..." o cambios, usa guardar_memoria / olvidar_memoria; sin herramientas, devuelve un bloque \`\`\`json con {"accion":"guardar_memoria","categoria":"...","dato":"..."}. Nunca guardes claves ni datos de tarjetas.`
 }
 
 /**
- * bloque que se inyecta en el system prompt con la conversación completa.
- * Se usa como contexto silencioso: la IA no debe enumerarlo ni mencionar que
- * lo está leyendo. Cada mensaje se recorta solo para no exceder el contexto.
+ * Contexto silencioso de los últimos turnos. Se limita a 10 turnos (mensaje
+ * del usuario + respuestas/ herramientas posteriores) y a 14 000 caracteres
+ * para no disparar el límite de tokens por minuto de los modelos gratuitos.
  */
 export function buildConversationSection(history = []) {
-  const rows = (Array.isArray(history) ? history : [])
-    .filter((item) => item && ['user', 'assistant', 'tool'].includes(item.role) && typeof item.content === 'string' && item.content.trim())
-    .slice(-300)
+  const rows = limitRecentHistory(history, 10)
   if (!rows.length) return ''
   const lines = []
   let total = 0
   rows.forEach((item) => {
     const speaker = item.role === 'user' ? 'USUARIO' : item.role === 'tool' ? 'HERRAMIENTA' : 'VITIMAX IA'
-    const text = String(item.content).replace(/\s+/g, ' ').trim().slice(0, 4000)
+    const text = String(item.content).replace(/\s+/g, ' ').trim().slice(0, 1200)
     const stamp = item.at || item.timestamp || item.createdAt
     const when = stamp ? getTemporalContext(stamp) : null
     const prefix = when ? `[${when.fechaISO} ${when.hora24Short}] ` : ''
     const line = `${prefix}${speaker}: ${text}`
-    if (total + line.length > 60_000) return
+    if (total + line.length > 14_000) return
     lines.push(line)
     total += line.length + 1
   })
   if (!lines.length) return ''
-  const elapsed = formatElapsedSince(lastInteractionAt(history), getTemporalContext().epoch)
+  const elapsed = formatElapsedSince(lastInteractionAt(rows), getTemporalContext().epoch)
   return `
 
 ### HISTORIAL COMPLETO DE LA CONVERSACIÓN
-Continúa esta conversación con naturalidad. Es contexto ya compartido: no lo repitas, no lo enumeres y no digas que lo estás consultando.
+Últimos ${Math.min(10, rows.filter((item) => item.role === 'user').length)} turnos, contextuales y ya compartidos: no los repitas ni digas que los consultaste.
 ${elapsed ? `${elapsed}\n` : ''}${lines.join('\n')}`
 }
 
 // Regla literal que va al inicio y al final de todos los system prompt.
 export const SPANISH_ONLY_RULE = 'IDIOMA OBLIGATORIO: Responde SIEMPRE en español natural, claro y profesional (Chile, moneda CLP $#,##0). Está estrictamente prohibido escribir pensamientos internos, bloques <think>, razonamientos en inglés, nombres técnicos de herramientas internas o enlaces sandbox:/ en tus respuestas visibles.'
+
+// Últimos N turnos: se conserva el mensaje del usuario que inicia cada turno y
+// todo lo que le sigue (respuesta, llamadas a herramientas y resultados).
+export function limitRecentHistory(history = [], maxTurns = 10) {
+  const rows = (Array.isArray(history) ? history : [])
+    .filter((item) => item && ['user', 'assistant', 'tool'].includes(item.role) && typeof item.content === 'string' && item.content.trim())
+  if (rows.length <= maxTurns) return rows
+  const userIndexes = []
+  rows.forEach((item, index) => { if (item.role === 'user') userIndexes.push(index) })
+  if (userIndexes.length <= maxTurns) return rows
+  return rows.slice(userIndexes[userIndexes.length - maxTurns])
+}
+
+// Modelos gratuitos verificados en OpenRouter. "openrouter/free" enruta solo a
+// modelos gratuitos; "openrouter/auto" se excluye porque puede elegir de pago.
+export const FREE_AI_MODELS = [
+  'baidu/ernie-5.5-flash-preview:free',
+  'google/gemma-4-31b-it:free',
+  'google/gemma-4-26b-a4b-it:free',
+  'nvidia/nemotron-3-ultra-550b-a55b:free',
+  'nvidia/nemotron-3.5-lightning:free',
+  'recursive/flint-v1.0:free',
+  'inclusionai/ling-3.2-flash:free',
+  'liquid/lfm-3-1.7b:free',
+  'particle-ai/particle-1:free',
+  'openrouter/free'
+]
+
+/** Cascada sin duplicados: primero los configurados, luego los gratuitos activos. */
+export function aiModelCascade(configured = []) {
+  const list = [...(Array.isArray(configured) ? configured : []), ...FREE_AI_MODELS]
+  return [...new Set(list.map((item) => String(item || '').trim()).filter(Boolean))]
+}
+
+/** Solo se rota ante fallos temporales; 401/402/403 son definitivos. */
+export function isRetryableAiError(error) {
+  const status = Number(error?.status || error?.statusCode || 0)
+  if ([401, 402, 403].includes(status)) return false
+  if ([408, 429, 502, 503, 504].includes(status)) return true
+  if (error?.name === 'AbortError' || error?.name === 'TimeoutError') return true
+  const text = String(error?.message || '')
+  if (/\b(?:401|402|403)\b/i.test(text)) return false
+  return /\b(?:408|429|502|503|504)\b|rate.?limit|too many requests|saturad|timeout|tardó|fetch failed|network|aborted|conexi|offline/i.test(text)
+}
+
+const formatClpLocal = (value) => `$${Math.round(Number(value) || 0).toLocaleString('es-CL')}`
+
+/** Respuesta determinista con datos reales cuando ningún modelo responde. */
+export function buildLocalDataSummary({ products = [], modules = {}, message = '' } = {}) {
+  const list = filterJunkProducts(products)
+  const units = list.reduce((sum, item) => sum + (Number(item.stock) || 0), 0)
+  const value = list.reduce((sum, item) => sum + (Number(item.price) || 0) * (Number(item.stock) || 0), 0)
+  const low = list.filter((item) => (Number(item.stock) || 0) <= 5).length
+  const query = String(message || '').toLowerCase()
+  const parts = []
+  if (/iva|impuesto/.test(query)) parts.push('El IVA en Chile es 19%.')
+  if (/producto|catálogo|catalogo|inventario|stock|cuántos|cuantos|resumen|datos/.test(query) || !parts.length) {
+    parts.push(`El catálogo real tiene ${list.length} producto(s), ${units} unidades en stock y un valor de ${formatClpLocal(value)}.`)
+    if (low) parts.push(`${low} producto(s) tienen stock bajo (5 o menos).`)
+  }
+  const moduleKeys = [
+    ['clientes', 'clientes registrados'], ['ventas', 'ventas registradas'],
+    ['plantas', 'plantas registradas'], ['proveedores', 'proveedores registrados'],
+    ['pedidos', 'pedidos registrados'], ['asesorias', 'asesorías registradas']
+  ]
+  for (const [key, label] of moduleKeys) {
+    if (new RegExp(key).test(query) && Array.isArray(modules?.[key])) {
+      parts.push(`Hay ${modules[key].length} ${label}.`)
+    }
+  }
+  return parts.join(' ')
+}
 
 function extractAssistantContent(value) {
   if (typeof value === 'string') return value
@@ -2401,6 +2472,17 @@ OPERACIÓN INTERNA DE LA APP (no expliques ni muestres estos detalles al usuario
 - Todos los archivos generados en un mismo turno deben coincidir exactamente, sin contradicciones entre cifras, nombres ni fechas.
 - Después de usar una herramienta, confirma en una línea qué archivo creaste y qué contiene, sin mostrar el JSON ni el proceso técnico. Si falla, dilo con claridad y ofrece la alternativa más útil.
 ${SPANISH_ONLY_RULE}`
+
+// Versión operativa enviada en cada llamada. Conserva las reglas críticas del
+// prompt senior completo (que sigue siendo el contrato documental) pero cabe
+// en unos cientos de tokens: evita agotar el límite por minuto de los modelos
+// gratuitos y permite que la cascada de respaldo responda más rápido.
+export const COMPACT_AI_SYSTEM_PROMPT = SPANISH_ONLY_RULE + `
+Asistente senior de VITIMAX (agricultura, datos, documentos y código). Responde en español chileno, directo y sin rodeos; nunca escribas <think>, razonamientos, nombres de herramientas internos ni enlaces sandbox:/.
+Usa el reloj inyectado para plazos y fechas de documentos sin recitarlo; aplica la memoria persistente sin anunciarla. No inventes datos reales: etiqueta los ficticios como [Ejemplo / Demostración], ignora filas de totales, verifica IVA 19%, Precio × Stock y que todas las cifras del turno coincidan.
+AGENTE ÉLITE: elige y encadena herramientas (tool_choice "auto") hasta 8 pasos sobre Productos, Clientes, Plantas, Inventario, Ventas, Asesorías y Proveedores; no simules crear archivos. Si no hay herramientas, devuelve un bloque \`\`\`json con {"accion":"crear_excel"|"crear_pdf"|"crear_word"|"crear_ppt"|"crear_pagina_web"|"crear_codigo"|"guardar_memoria"|"olvidar_memoria", ...}. Nunca muestres ese JSON al usuario: confirma en una línea el archivo creado.
+Excel: 8 hojas estándar con Resumen Ejecutivo primero, fórmulas OpenXML en inglés sin "=" duplicado, verde #1E4D2B y CLP $#,##0. PDF/Word: texto sanitizado y numeración real. PowerPoint: 16:9 con Próximos Pasos. Web/código: Tailwind completo, vista previa interactiva y código completo y funcional.
+No digas "¡Claro que sí!", "Aquí tienes", "Como asistente de IA", "He guardado en mi memoria", "Según mi reloj" ni "Soy VITIMAX IA".`
 
 export const EXCEL_SYSTEM_PROMPT = `${SPANISH_ONLY_RULE}
 Eres el generador de Excel de VITIMAX. Creas planillas reales, completas y listas para usar, con fórmulas activas y formato profesional.

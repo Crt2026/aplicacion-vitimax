@@ -38,10 +38,13 @@ import {
 } from './doc-engine.js'
 import {
   ASSISTANT_TOOLS,
-  DIRECT_AI_SYSTEM_PROMPT,
+  COMPACT_AI_SYSTEM_PROMPT,
   SPANISH_ONLY_RULE,
+  aiModelCascade,
   assistantTextFromOpenRouter,
   assistantTextFromResponse,
+  buildLocalDataSummary,
+  isRetryableAiError,
   MEMORY_CATEGORIES,
   MEMORY_STORAGE_KEY,
   analyzeWorkbook,
@@ -810,11 +813,14 @@ function aiErrorMessage(error, fallback) {
   return message || fallback
 }
 
-const DIRECT_AI_MODELS = (import.meta.env.VITE_AI_MODELS || 'baidu/ernie-5.5-flash-preview:free,nvidia/nemotron-3-ultra-550b-a55b:free,recursive/flint-v1.0:free')
-  .split(',')
-  .map((item) => item.trim())
-  .filter(Boolean)
-  .slice(0, 3) // OpenRouter acepta como máximo 3 modelos en el arreglo "models".
+// Cascada real: se envía un solo "model" por intento para poder rotar en cuanto
+// OpenRouter devuelve 429/502/503 o corta la conexión. El arreglo "models" de
+// OpenRouter no garantiza el respaldo ante esos errores, por eso se hace aquí.
+const DIRECT_AI_MODELS = aiModelCascade(
+  String(import.meta.env.VITE_AI_MODELS || 'baidu/ernie-5.5-flash-preview:free').split(',').map((item) => item.trim()).filter(Boolean)
+)
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function resolveDirectKey(settings) {
   return String(settings?.aiApiKey || import.meta.env.VITE_AI_DIRECT_KEY || '').trim()
@@ -864,9 +870,9 @@ function affordableTokensFromError(payload) {
   return values.length ? Math.min(...values) : 0
 }
 
-async function askOpenRouterChatOnce({ messages, apiKey, tools, toolChoice, maxTokens = 1500, temperature = 0.7, responseFormat, stream = false }) {
+async function askOpenRouterChatOnce({ messages, apiKey, model, tools, toolChoice, maxTokens = 1500, temperature = 0.7, responseFormat, stream = false, timeoutMs = 45_000 }) {
   const body = {
-    models: DIRECT_AI_MODELS,
+    model: model || DIRECT_AI_MODELS[0],
     messages,
     temperature,
     max_tokens: maxTokens
@@ -886,7 +892,7 @@ async function askOpenRouterChatOnce({ messages, apiKey, tools, toolChoice, maxT
       'X-Title': 'VITIMAX'
     },
     body: JSON.stringify(body)
-  }, 240_000)
+  }, timeoutMs)
   const readPayload = (res) => (res.ok && stream ? Promise.resolve(null) : res.json().catch(() => ({})))
   let response = await send()
   let payload = await readPayload(response)
@@ -923,26 +929,37 @@ async function askOpenRouterChatOnce({ messages, apiKey, tools, toolChoice, maxT
     response = await send()
     payload = await readPayload(response)
   }
-  if (!response.ok) throw new Error(payload?.error?.message || `La IA rechazó la solicitud (${response.status}).`)
+  if (!response.ok) {
+    const error = new Error(payload?.error?.message || `La IA rechazó la solicitud (${response.status}).`)
+    error.status = response.status
+    error.retryable = isRetryableAiError(error)
+    throw error
+  }
   // Tanto el modo streaming como el completo pasan por el mismo saneamiento.
   // Nunca se lee message.reasoning ni delta.reasoning: solo el texto visible.
   if (stream) return parseOpenRouterStreamResponse(response)
   const content = assistantTextFromOpenRouter(payload)
   const toolCalls = Array.isArray(payload?.choices?.[0]?.message?.tool_calls) ? payload.choices[0].message.tool_calls : []
   if (!content && !toolCalls.length) throw new Error('La IA devolvió una respuesta vacía.')
-  return { content, toolCalls, model: payload.model || '' }
+  return { content, toolCalls, model: payload.model || model }
 }
 
+// Rotación en cascada: un modelo por intento, 1,5 s de espera tras un 429 y
+// espera corta ante 502/503/timeout. Los errores de clave o saldo no se rotan.
 async function askOpenRouterChat(options) {
-  try {
-    return await askOpenRouterChatOnce(options)
-  } catch (error) {
-    const message = String(error?.message || '')
-    const retryable = /429|rate|limit|saturad|temporal|502|503|504|timeout|tardó|fetch/i.test(message)
-    if (!retryable) throw error
-    await new Promise((resolve) => setTimeout(resolve, 2500))
-    return askOpenRouterChatOnce(options)
+  const cascade = aiModelCascade(options.models)
+  let lastError = null
+  for (let index = 0; index < cascade.length; index += 1) {
+    try {
+      return await askOpenRouterChatOnce({ ...options, model: cascade[index] })
+    } catch (error) {
+      lastError = error
+      if (!isRetryableAiError(error)) break
+      if (index < cascade.length - 1) await sleep(error.status === 429 ? 1500 : 350)
+    }
   }
+  if (lastError) lastError.exhausted = true
+  throw lastError || new Error('La IA no respondió.')
 }
 
 async function askOpenRouterDirect({ message, products, history, attachment, apiKey, systemPrompt, maxTokens = 1500, tools, toolChoice, temperature = 0.7 }) {
@@ -955,7 +972,7 @@ async function askOpenRouterDirect({ message, products, history, attachment, api
   }, ...attachmentContentParts(attachment)]
   return askOpenRouterChat({
     messages: [
-      { role: 'system', content: systemPrompt || DIRECT_AI_SYSTEM_PROMPT },
+      { role: 'system', content: systemPrompt || COMPACT_AI_SYSTEM_PROMPT },
       ...(Array.isArray(history) ? history : []).map((item) => ({ role: item.role, content: item.content })),
       { role: 'user', content }
     ],
@@ -2289,7 +2306,7 @@ function App({ user, onSignOut, guest = false }) {
     const conversationSection = (source = history) => buildConversationSection(source)
     // El reloj se lee de nuevo en cada llamada (y en cada paso del agente), no
     // una vez al abrir la app: la referencia temporal va al segundo exacto.
-    const withContext = (base, source = history) => `${base || DIRECT_AI_SYSTEM_PROMPT}${buildTemporalSection(getTemporalContext(), source)}${memorySection()}${conversationSection(source)}`
+    const withContext = (base, source = history) => `${base || COMPACT_AI_SYSTEM_PROMPT}${buildTemporalSection(getTemporalContext(), source)}${memorySection()}${conversationSection(source)}`
     const catalogForAi = (list = workingProducts) => JSON.stringify(list.map(({ id, name, category, price, stock, format, description, usage, recommendations, features, source }) => ({
       id, name, category, price, stock, format, description, usage, recommendations, features, source
     })))
@@ -2497,7 +2514,7 @@ function App({ user, onSignOut, guest = false }) {
       }
       return { ok: false, error: `Herramienta no reconocida: ${name}` }
     }
-    const callDirectAgent = async ({ message, systemPrompt = DIRECT_AI_SYSTEM_PROMPT, maxTokens = 6000, conversation = history, attachment: fileAttachment = attachment, tools = ASSISTANT_TOOLS, toolChoice = 'auto', temperature = 0.7 }) => {
+    const callDirectAgent = async ({ message, systemPrompt = COMPACT_AI_SYSTEM_PROMPT, maxTokens = 6000, conversation = history, attachment: fileAttachment = attachment, tools = ASSISTANT_TOOLS, toolChoice = 'auto', temperature = 0.7 }) => {
       const messagesForAi = [
         { role: 'system', content: withContext(systemPrompt, conversation) },
         {
@@ -2689,7 +2706,7 @@ function App({ user, onSignOut, guest = false }) {
         if (directKey) {
           const result = await callDirectAgent({
             message: text,
-            systemPrompt: DIRECT_AI_SYSTEM_PROMPT,
+            systemPrompt: COMPACT_AI_SYSTEM_PROMPT,
             maxTokens: 6000,
             conversation: history
           })
@@ -2724,20 +2741,23 @@ function App({ user, onSignOut, guest = false }) {
               if (handled) { finish(handled.text, handled.created, handled.registered, handled.tools); return }
             }
             finish(stripActionJson(answer) || localFallback)
-            setNotice(aiErrorMessage(error, 'La IA directa no respondió. Se usó el respaldo remoto.'))
+            if (!isRetryableAiError(error)) setNotice(aiErrorMessage(error, 'La IA directa no respondió. Se usó el respaldo remoto.'))
             return
           } catch { /* se conserva el respaldo local */ }
         }
         let localCreated = []
         try { localCreated = await generateLocalFiles() } catch { /* el aviso ya se muestra */ }
-        const friendly = aiErrorMessage(error, 'La IA no respondió.')
-        // No culpar a la configuración cuando la clave sí existe: el motivo
-        // real (402, 401, red, etc.) debe verse en el propio chat.
-        const answer = directKey
-          ? `${friendly}\n\nMientras tanto sigo pudiendo generar archivos locales con los datos de VITIMAX.`
+        // Último recurso útil: responder con datos reales y archivos generados
+        // en el dispositivo, sin dejar al usuario bloqueado por un 429.
+        const localData = buildLocalDataSummary({ products: workingProducts, modules: records, message: text })
+        const fileNote = localCreated.length
+          ? ` Generé ${localCreated.length} archivo(s) con esos datos; están listos para descargar.`
+          : ' Puedo generar el Excel, PDF, Word, PowerPoint o la web con esos datos en este dispositivo.'
+        const answer = directKey || modes.length
+          ? `${localData}${fileNote}`
           : localFallback
         finish(answer, localCreated)
-        setNotice(friendly)
+        if (!isRetryableAiError(error)) setNotice(aiErrorMessage(error, 'La IA no respondió.'))
       }
     })()
   }
@@ -3425,18 +3445,24 @@ function SettingsModal({ settings, onClose, onSave }) {
       }
     }
     if (key) {
-      try {
-        const response = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'X-Title': 'VITIMAX' },
-          body: JSON.stringify({ models: DIRECT_AI_MODELS, messages: [{ role: 'user', content: 'Responde solo: OK' }], max_tokens: 20 })
-        }, 45_000)
-        const data = await response.json().catch(() => ({}))
-        if (!response.ok) throw new Error(data?.error?.message || `OpenRouter respondió ${response.status}.`)
-        setTest({ state: 'ok', message: `Conectado · OpenRouter · ${data.model || DIRECT_AI_MODELS[0]}` })
-        return
-      } catch (error) {
-        errors.push(error)
+      for (const candidate of DIRECT_AI_MODELS.slice(0, 4)) {
+        try {
+          const response = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'X-Title': 'VITIMAX' },
+            body: JSON.stringify({ model: candidate, messages: [{ role: 'user', content: 'Responde solo: OK' }], max_tokens: 20 })
+          }, 12_000)
+          const data = await response.json().catch(() => ({}))
+          const error = new Error(data?.error?.message || `OpenRouter respondió ${response.status}.`)
+          error.status = response.status
+          if (!response.ok) throw error
+          setTest({ state: 'ok', message: `Conectado · OpenRouter · ${data.model || candidate}` })
+          return
+        } catch (error) {
+          errors.push(error)
+          if (!isRetryableAiError(error)) break
+          await sleep(error.status === 429 ? 1500 : 200)
+        }
       }
     }
     setTest({ state: 'error', message: aiErrorMessage(errors[errors.length - 1], 'No se pudo conectar con la IA.') })

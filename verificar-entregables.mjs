@@ -2,14 +2,20 @@ import fs from 'node:fs'
 import path from 'node:path'
 import assert from 'node:assert/strict'
 import {
+  COMPACT_AI_SYSTEM_PROMPT,
   DIRECT_AI_SYSTEM_PROMPT,
+  FREE_AI_MODELS,
+  aiModelCascade,
   buildConversationSection,
   buildDemoProducts,
+  buildLocalDataSummary,
   buildMemorySection,
   buildWelcomeMessage,
   createExcelBlob,
   filterJunkProducts,
   isJunkProductName,
+  isRetryableAiError,
+  limitRecentHistory,
   buildTemporalSection,
   formatElapsedSince,
   formatSpanishDate,
@@ -133,6 +139,53 @@ for (const [label, code] of [['proxy', serverCode], ['cloud', functionsCode]]) {
   assert.ok(code.includes('${SPANISH_ONLY_RULE}`'), `La regla no cierra el prompt ${label}`)
 }
 console.log('Filtro de razonamiento e idioma obligatorio: OK')
+
+// Rotación de modelos gratuitos y payload compacto para evitar 429.
+assert.ok(COMPACT_AI_SYSTEM_PROMPT.length < 2600, 'El prompt compacto debe caber en unos cientos de tokens')
+for (const fragment of [SPANISH_ONLY_RULE, '<think>', 'IVA 19%', 'CLP $#,##0', '8 hojas', 'Próximos Pasos', 'vista previa interactiva', 'tool_choice "auto"', 'crear_excel']) {
+  assert.ok(COMPACT_AI_SYSTEM_PROMPT.includes(fragment), `Falta la regla esencial en el prompt compacto: ${fragment}`)
+}
+const cascade = aiModelCascade(['modelo/configurado:free'])
+assert.equal(cascade[0], 'modelo/configurado:free')
+assert.equal(new Set(cascade).size, cascade.length, 'La cascada no debe repetir modelos')
+assert.ok(cascade.includes('google/gemma-4-31b-it:free') && cascade.includes('openrouter/free'))
+assert.ok(FREE_AI_MODELS.length >= 5)
+for (const status of [408, 429, 502, 503, 504]) {
+  assert.equal(isRetryableAiError({ status }), true, `El estado ${status} debe rotar de modelo`)
+}
+for (const status of [401, 402, 403]) {
+  assert.equal(isRetryableAiError({ status }), false, `El estado ${status} no debe rotar de modelo`)
+}
+assert.equal(isRetryableAiError(new Error('No hay conexión')), true)
+assert.equal(isRetryableAiError(new Error('Invalid API key 401')), false)
+
+const manyTurns = Array.from({ length: 30 }, (_, index) => [
+  { role: 'user', content: `Pregunta ${index}` },
+  { role: 'assistant', content: `Respuesta ${index}` }
+]).flat()
+assert.equal(limitRecentHistory(manyTurns, 10).filter((item) => item.role === 'user').length, 10)
+assert.ok(!buildConversationSection(manyTurns).includes('Pregunta 0'), 'El historial enviado debe limitarse a los últimos turnos')
+assert.ok(buildConversationSection(manyTurns).includes('Pregunta 29'))
+const localSummary = buildLocalDataSummary({
+  products: [
+    { name: 'Producto real', price: 10000, stock: 3 },
+    { name: 'Total Valorado Inventario', price: 999, stock: 99 }
+  ],
+  modules: { clientes: [{}] },
+  message: '¿cuántos productos hay, cuál es el IVA y cuántos clientes?'
+})
+assert.match(localSummary, /1 producto\(s\)/)
+assert.match(localSummary, /\$30\.000/)
+assert.match(localSummary, /IVA en Chile es 19%/)
+assert.match(localSummary, /1 clientes registrados/)
+assert.ok(!localSummary.includes('Total Valorado'), 'Las filas de totales no son datos reales')
+assert.match(mainCode, /model:\s*model\s*\|\|/)
+assert.match(mainCode, /error\.status === 429 \? 1500/)
+assert.match(mainCode, /buildLocalDataSummary/)
+assert.match(serverCode, /error\.status === 429 \? 1500/)
+assert.match(serverCode, /openrouter\/free/)
+assert.match(serverCode, /serverLocalAnswer/)
+console.log('Rotación multi-modelo, backoff, prompt compacto y fallback local: OK')
 
 // Memoria + historial inyectados en el system prompt.
 const memoryPrompt = buildMemorySection([{ categoria: 'Negocio', contenido: 'El IVA es 19%' }])
