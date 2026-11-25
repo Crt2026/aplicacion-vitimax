@@ -3661,7 +3661,7 @@ function ChatMessageBody({ text, onCopy, copiedCode }) {
       return <ul key={index}>{block.items.map((item, itemIndex) => <li key={itemIndex}>{richText(item)}</li>)}</ul>
     }
     if (block.type === 'numbers') {
-      return <ol key={index}>{block.items.map((item, itemIndex) => <li key={itemIndex}>{richText(item)}</li>)}</ol>
+      return <ol key={index} start={block.start || 1}>{block.items.map((item, itemIndex) => <li key={itemIndex}>{richText(item)}</li>)}</ol>
     }
     if (block.type === 'table') {
       return <div className="chat-table-wrap" key={index}>

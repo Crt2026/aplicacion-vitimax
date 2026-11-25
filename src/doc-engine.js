@@ -129,6 +129,14 @@ export function inlineSegments(value) {
     .map((part) => ({ ...part, text: part.text.replace(/\s+/g, ' ') }))
     .filter((part) => part.text.length)
   if (!cleaned.length) return []
+  // Un espacio limpio entre segmentos: evita que el título en negrita quede
+  // pegado a su descripción (**Título.**Descripción -> "Título. Descripción").
+  for (let index = 0; index < cleaned.length - 1; index += 1) {
+    const current = cleaned[index]
+    const next = cleaned[index + 1]
+    cleaned[index] = { ...current, text: `${current.text.replace(/\s+$/, '')} ` }
+    cleaned[index + 1] = { ...next, text: next.text.replace(/^\s+/, '') }
+  }
   // Recorta espacios al inicio y al final del conjunto, no entre segmentos.
   cleaned[0] = { ...cleaned[0], text: cleaned[0].text.replace(/^\s+/, '') }
   const lastIndex = cleaned.length - 1
@@ -159,6 +167,17 @@ function splitTableRow(line) {
 
 function isTableSeparator(line) {
   return /^\s*\|?[\s:|-]*-[\s:|-]*\|[\s:|-]*\|?\s*$/.test(line)
+}
+
+function nextMeaningfulLine(lines, from) {
+  for (let index = from; index < lines.length; index += 1) {
+    if (lines[index].trim()) return lines[index]
+  }
+  return ''
+}
+
+function listStart(block, index = 0) {
+  return (Number(block?.start) || 1) + index
 }
 
 export function parseDocument(value) {
@@ -206,7 +225,13 @@ export function parseDocument(value) {
     }
 
     if (!line.trim()) {
-      flushAll()
+      flushParagraph()
+      // Una lista numerada puede tener líneas en blanco entre ítems. No la
+      // cerramos si sigue otro número o un renglón continuado: si la cerramos,
+      // cada ítem empezaría de nuevo en "1." al renderizarse.
+      const next = nextMeaningfulLine(lines, index + 1)
+      const continuesList = list && /^\s*(\d{1,3})[.)]\s+/.test(next)
+      if (!continuesList) flushList()
       continue
     }
 
@@ -254,7 +279,8 @@ export function parseDocument(value) {
       flushParagraph()
       if (!list || list.type !== 'numbers') {
         flushList()
-        list = { type: 'numbers', items: [] }
+        const explicit = Number(numbered[1])
+        list = { type: 'numbers', items: [], start: Number.isFinite(explicit) && explicit > 0 ? explicit : 1 }
       }
       list.items.push(numbered[2].trim())
       continue
@@ -502,7 +528,7 @@ export function buildPdfDocument({ title = 'Documento VITIMAX', subtitle = '', c
     }
   }
 
-  function drawBullet(item, index, numbered) {
+  function drawBullet(item, index, numbered, start = 1) {
     const segments = inlineSegments(item)
     if (!segments.length) return
     const indent = 6
@@ -512,7 +538,7 @@ export function buildPdfDocument({ title = 'Documento VITIMAX', subtitle = '', c
     doc.setFont('helvetica', 'bold')
     doc.setFontSize(10.5)
     doc.setTextColor(...rgb(BRAND.mid))
-    doc.text(numbered ? `${index + 1}.` : '•', margin, y)
+    doc.text(numbered ? `${listStart({ start }, index)}.` : '•', margin, y)
     let cursorY = y
     for (const line of lines) {
       let cursorX = margin + indent
@@ -727,7 +753,7 @@ export function buildPdfDocument({ title = 'Documento VITIMAX', subtitle = '', c
     else if (block.type === 'paragraph') drawRich(inlineSegments(block.text), margin, contentW)
     else if (block.type === 'quote') drawRich(inlineSegments(block.text), margin + 2, contentW - 4, { color: BRAND.deep, size: 10.2, bold: true })
     else if (block.type === 'bullets') block.items.forEach((item, i) => drawBullet(item, i, false))
-    else if (block.type === 'numbers') block.items.forEach((item, i) => drawBullet(item, i, true))
+    else if (block.type === 'numbers') block.items.forEach((item, i) => drawBullet(item, i, true, block.start))
     else if (block.type === 'table') drawTable(block)
     else if (block.type === 'code') drawCode(block)
     else if (block.type === 'divider') {
@@ -952,7 +978,7 @@ export function buildDocxDocument({ title = 'Documento VITIMAX', subtitle = '', 
         indent: { left: 460, hanging: 280 },
         spacing: { after: 70, line: 290 },
         children: [
-          new TextRun({ text: `${itemIndex + 1}. `, bold: true, size: 22, color: BRAND.mid }),
+          new TextRun({ text: `${listStart(block, itemIndex)}. `, bold: true, size: 22, color: BRAND.mid }),
           ...docxRuns(item, { size: 22 })
         ]
       })))
@@ -1120,7 +1146,7 @@ function deckFromBlocks(blocks, deckTitle) {
     }
     if (!current) current = { title: deckTitle || 'VITIMAX', bullets: [], paragraphs: [], table: null }
     if (block.type === 'bullets') current.bullets.push(...block.items.map((item) => plainText(item)).filter(Boolean))
-    else if (block.type === 'numbers') current.bullets.push(...block.items.map((item, index) => `${index + 1}. ${plainText(item)}`).filter(Boolean))
+    else if (block.type === 'numbers') current.bullets.push(...block.items.map((item, index) => `${listStart(block, index)}. ${plainText(item)}`).filter(Boolean))
     else if (block.type === 'paragraph') {
       const text = plainText(block.text)
       if (text) current.paragraphs.push({ text })
@@ -2013,7 +2039,7 @@ function blocksToHtml(markdown) {
     }
     if (block.type === 'paragraph') return `<p>${inlineHtml(block.text)}</p>`
     if (block.type === 'bullets') return `<ul>${block.items.map((item) => `<li>${inlineHtml(item)}</li>`).join('')}</ul>`
-    if (block.type === 'numbers') return `<ol>${block.items.map((item) => `<li>${inlineHtml(item)}</li>`).join('')}</ol>`
+    if (block.type === 'numbers') return `<ol${block.start && block.start !== 1 ? ` start="${block.start}"` : ''}>${block.items.map((item) => `<li>${inlineHtml(item)}</li>`).join('')}</ol>`
     if (block.type === 'table') {
       const head = block.header.map((cell) => `<th>${inlineHtml(cell)}</th>`).join('')
       const body = block.rows.map((row) => `<tr>${block.header.map((_, index) => `<td>${inlineHtml(row[index] || '')}</td>`).join('')}</tr>`).join('')

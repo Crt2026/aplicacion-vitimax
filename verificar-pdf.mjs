@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import assert from 'node:assert/strict'
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs'
+import { parseDocument, inlineSegments, buildPdfDocument } from './src/doc-engine.js'
 
 async function readPdf(filename) {
   const data = new Uint8Array(fs.readFileSync(filename))
@@ -42,3 +43,40 @@ assert.ok(!empty.text.includes('Ejemplo'), 'El estado inicial no debe inventar p
 assert.ok(!empty.text.includes('$15.000'), 'El estado inicial no debe mostrar precios ajenos')
 assert.equal(empty.text.split('23 de noviembre de 2026').length - 1, 1, 'La fecha debe aparecer una sola vez')
 console.log(`PDF estado inicial: ${empty.doc.numPages} página(s) · 3 tarjetas + 4 pasos: OK`)
+
+// Listas numeradas: las líneas en blanco entre ítems no deben reiniciar el
+// contador, y el título en negrita debe quedar separado por un espacio limpio.
+const listContent = [
+  '# Guía de arranque',
+  '',
+  '1. **Carga tu catálogo.**Importa el Excel oficial con precios reales.',
+  '',
+  '2. **Agrega tus clientes.**Registra nombre, teléfono y localidad.',
+  '',
+  '3. **Registra tus ventas.**Asocia cada venta a cliente y producto.',
+  '',
+  '4. **Publica y ajusta.**Corrige precios y stock con datos reales.'
+].join('\n')
+const numbers = parseDocument(listContent).filter((block) => block.type === 'numbers')
+assert.equal(numbers.length, 1, 'La lista con líneas en blanco debe ser un solo bloque')
+assert.equal(numbers[0].items.length, 4, 'Deben conservarse los 4 ítems')
+assert.equal(numbers[0].start, 1, 'La numeración debe arrancar en 1')
+assert.equal(
+  inlineSegments('**Carga tu catálogo.**Importa el Excel.').map((part) => part.text).join(''),
+  'Carga tu catálogo. Importa el Excel.',
+  'El título en negrita debe llevar un espacio antes de la descripción'
+)
+const numberedPdf = buildPdfDocument({
+  title: 'Numeración secuencial',
+  content: listContent,
+  dateLabel: 'Martes, 24 de noviembre de 2026'
+})
+const numberedBytes = typeof numberedPdf?.output === 'function'
+  ? Buffer.from(await numberedPdf.output('arraybuffer'))
+  : Buffer.from(await numberedPdf.arrayBuffer())
+fs.writeFileSync('verificacion-entregables/07-numeracion.pdf', numberedBytes)
+const numbered = await readPdf('verificacion-entregables/07-numeracion.pdf')
+const sequence = [...numbered.text.matchAll(/\b([1-4])\.\s/g)].map((match) => match[1])
+assert.deepEqual(sequence, ['1', '2', '3', '4'], `Numeración incorrecta en el PDF: ${sequence.join(',')}`)
+assert.ok(numbered.text.includes('catálogo. Importa'), 'Falta el espacio limpio tras el título en negrita')
+console.log('PDF listas numeradas: secuencia 1-4 y espaciado del título en negrita: OK')
