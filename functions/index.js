@@ -46,9 +46,9 @@ ${SPANISH_ONLY_RULE}`
 
 const REASONING_START_PATTERNS = [
   /^\s*(?:analysis|reasoning|thinking|thoughts?|plan|notas? internas?|pensamiento(?:s)? internos?)\s*[:：]/i,
-  /^\s*(?:the user is asking|looking at (?:the )?context|let me (?:create|start|use|check|prepare|build|write|make|review|try)|i (?:need to|should|must|will|have to|can|am going to)|i'll|we (?:need to|should|must|will)|now i (?:need|have|should)|for (?:the|this|excel|pdf|the catalog|the file)|since (?:the|this|only)|based on (?:the )?context|according to (?:the )?context|the (?:context|catalog|user|app|file) (?:is|has|shows|says)|so i|first,? i|next,? i|my plan|to do this)\b/i
+  /^\s*(?:(?:actually|okay|ok|so|but|now|well)\s*,?\s*)?(?:looking at (?:the )?(?:instructions|context|catalog|file|request|prompt|data)|the user\b|they want\b|i (?:need to|should|must|will|have to|can|am going to)|i'll|we (?:need to|should|must|will)|let me\b|my plan\b|first,? i\b|next,? i\b|to do this\b|for (?:the|this|excel|pdf|the catalog|the file)|since (?:the|this|only)|based on (?:the )?(?:context|instructions|prompt|request)|according to (?:the )?context|the (?:context|catalog|user|app|file) (?:is|has|shows|says))\b/i
 ]
-const ENGLISH_HINT_RE = /\b(?:the|and|is|are|to|of|for|with|this|that|i|we|my|have|has|need|should|will|can|from|user|context|catalog|file|app|so|now|let|based|according|since|only|also|then|but|if|it|its|as|at|on|in|by|files|both|create|use|check)\b/gi
+const ENGLISH_HINT_RE = /\b(?:the|and|is|are|to|of|for|with|this|that|i|we|my|have|has|need|should|will|can|from|user|context|catalog|file|app|so|now|let|based|according|since|only|also|then|but|if|it|its|as|at|on|in|by|files|both|create|use|check|actually|instructions|they|want|specifically|asked|sheets|products|details|empty|data|because|those|these)\b/gi
 const SPANISH_HINT_RE = /\b(?:el|la|los|las|de|del|que|y|en|con|por|para|es|son|al|un|una|se|su|sus|te|tu|necesito|debo|voy|puedo|archivo|archivos|catálogo|catalogo|producto|productos|cliente|clientes|venta|ventas|informe|excel|pdf|word|resumen|total|precio|stock|fecha|generé|generar|creé|crear|lista|datos)\b/gi
 const CLICHE_START_RE = /^\s*(?:(?:¡\s*)?claro que sí\s*[!,.:]?\s*|aquí tienes\s*[:,-]?\s*|como asistente de (?:inteligencia artificial|ia)\s*[,.]?\s*)/i
 

@@ -86,6 +86,16 @@ assert.equal(assistantTextFromOpenRouter(fullResponse), 'Listo, generé el Excel
 const streamChunk = 'data: {"choices":[{"delta":{"reasoning":"I should prepare the PDF","content":"Aquí tienes el PDF."}}]}\r\n\r\n'
 assert.equal(assistantTextFromStreamChunk(streamChunk), 'El PDF.')
 assert.equal(sanitizeAssistantText('<think>Let me create the workbook</think>\nEl archivo está listo.'), 'El archivo está listo.')
+for (const reasoning of [
+  'The user is asking about the catalog.',
+  'Looking at the instructions: usa las 7 hojas.',
+  'Actually, looking at the context: los productos están vacíos.',
+  'But the user specifically asked for "productos".',
+  'So I should create all 7 sheets for a complete catalog.',
+  'They want products and plants primarily.'
+]) {
+  assert.equal(sanitizeAssistantText(reasoning), '', `No se filtró el razonamiento: ${reasoning}`)
+}
 assert.equal(sanitizeAssistantText('[informe](sandbox:/mnt/data/informe.pdf)'), 'Informe')
 assert.equal(sanitizeAssistantText('¡Claro que sí! Aquí tienes el informe.'), 'El informe.')
 assert.equal(sanitizeAssistantText('He guardado en mi memoria tu preferencia.'), 'Quedó anotado.')
