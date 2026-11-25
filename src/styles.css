@@ -764,7 +764,7 @@ h1,h2,h3,h4,p,small,strong,span,label,td,th{overflow-wrap:break-word}
 .assistant-memory-empty{margin:4px 0;padding:14px 12px;border:1px dashed #d9e7dc;border-radius:10px;background:#f8fbf8;font-size:11px;line-height:1.5;color:#6c8877;text-align:center}
 .assistant-memory-note{display:block;font-size:9.5px;line-height:1.4;color:var(--muted);text-align:center;padding-bottom:2px}
 @media(max-width:650px){
-  .assistant-memory-btn span{display:none}
+  .assistant-memory-btn{padding:0 7px;gap:4px;font-size:9.5px;white-space:nowrap}
   .assistant-memory-form{grid-template-columns:1fr auto}
   .assistant-memory-form select{grid-column:1/-1;max-width:none}
   .assistant-memory-form input{font-size:16px}
@@ -882,4 +882,14 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 .temporal-clock{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
 .assistant-head .assistant-clock{display:inline}
 @media(max-width:650px){.temporal-bar{gap:6px 12px;padding:9px 11px;font-size:10px}}
-.assistant-head .assistant-title>div:last-child span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:min(46vw,340px)}
+/* Cabecera del chat: el título cede espacio y "Memoria" nunca se recorta. */
+.assistant-head{gap:8px}
+.assistant-head .assistant-title{min-width:0;flex:1}
+.assistant-head .assistant-title>div:last-child{min-width:0}
+.assistant-head .assistant-title>div:last-child>span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.assistant-head .assistant-title .assistant-subline>span{display:inline;margin-top:0}
+@media(max-width:650px){.assistant-head .assistant-tz{display:none}}
+
+/* Sugerencias rápidas: deslizamiento táctil sin barra de scroll visible. */
+.quick-prompts{scrollbar-width:none;-ms-overflow-style:none;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}
+.quick-prompts::-webkit-scrollbar{display:none}

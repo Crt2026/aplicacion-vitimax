@@ -3614,12 +3614,38 @@ function QrScanner({ onClose, onResult }) {
   </div>
 }
 
+// Los nombres de archivo llevan guiones bajos que Markdown interpreta como
+// itálica y el saneador de texto elimina. Los protegemos antes de formatear y
+// los restauramos después, para que "Guia_arranque_VITIMAX.pdf" llegue intacto.
+const CHAT_FILE_TOKEN = /[A-Za-z0-9][\w.-]*\.(?:pdf|xlsx|docx|pptx|html|csv)\b/gi
+
+function protectChatFileTokens(value) {
+  const files = []
+  const text = String(value ?? '').replace(CHAT_FILE_TOKEN, (token) => {
+    const marker = `VITIMAXFILETOKEN${files.length}END`
+    files.push(token)
+    return marker
+  })
+  return { text, files }
+}
+
+function restoreChatFileTokens(text, files) {
+  return files.reduce(
+    (current, token, index) => current.replaceAll(`VITIMAXFILETOKEN${index}END`, token),
+    text
+  )
+}
+
 function richText(value) {
-  const segments = inlineSegments(value)
+  const { text, files } = protectChatFileTokens(value)
+  const segments = inlineSegments(text)
   if (!segments.length) return null
-  return segments.map((segment, index) => (segment.bold
-    ? <strong key={index}>{segment.text}</strong>
-    : <span key={index}>{segment.text}</span>))
+  return segments.map((segment, index) => {
+    const content = restoreChatFileTokens(segment.text, files)
+    return segment.bold
+      ? <strong key={index}>{content}</strong>
+      : <span key={index}>{content}</span>
+  })
 }
 
 function isHtmlFile(file) {
@@ -3771,12 +3797,14 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
   const messageList = Array.isArray(messages) ? messages : []
   const busy = messageList.some((m) => m.pending)
   const sizeKb = attachment ? Math.max(1, Math.ceil(attachment.size / 1024)) : 0
+  const shortMonths = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']
+  const shortDate = `${temporal.dia} ${shortMonths[temporal.mesNumero - 1]} ${temporal.anio}`
 
   return <div className="assistant-panel">
     <div className="assistant-head">
       <div className="assistant-title">
         <div className="bot-avatar"><img className="assistant-bot-image panel-bot-image" src="/bot-vitimax.png" alt="Robot BOT IA VITIMAX" /></div>
-        <div><strong>BOT IA VITIMAX</strong><span>{temporal.fechaCorta} · <span className="temporal-clock assistant-clock">{temporal.hora24}</span> · {temporal.franja} · {temporal.zonaHoraria}</span><span>{aiReady ? 'IA conectada · Catálogo · Archivos · Memoria' : 'IA no configurada · respuestas locales'}</span></div>
+        <div><strong>BOT IA VITIMAX</strong><span className="assistant-subline">{shortDate} · <span className="temporal-clock assistant-clock">{temporal.hora24}</span> · {temporal.franja}<span className="assistant-tz"> · {temporal.zonaHoraria}</span></span><span className="assistant-subline">{aiReady ? 'IA conectada · Archivos · Memoria' : 'IA local sin conexión'}</span></div>
       </div>
       <div className="assistant-head-actions">
         <button type="button" className={`assistant-memory-btn${memoryOpen ? ' active' : ''}`} onClick={() => setMemoryOpen((current) => !current)} aria-expanded={memoryOpen} title="Ver lo que la IA recuerda">
@@ -3842,7 +3870,7 @@ function Assistant({ messages, onClose, onAsk, onDownload, onOpen, aiReady, memo
     </div>}
     {attachError && <p className="assistant-attach-error">{attachError}</p>}
     <form className="assistant-input" onSubmit={submit}>
-      <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Pregunta, programa, analiza o pide un archivo…" />
+      <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Pregunta o pide crear algo..." />
       <button type="button" className="assistant-attach" title="Adjuntar archivo" aria-label="Adjuntar archivo" onClick={() => fileInputRef.current?.click()}><Paperclip size={18} /></button>
       <input ref={fileInputRef} type="file" accept="image/*,.pdf,.txt,.md,.json,.csv,.xlsx,.xls,.doc,.docx,.ppt,.pptx" hidden onChange={chooseAttachment} />
       <button type="submit" className="assistant-send" disabled={busy} aria-label="Enviar mensaje"><ArrowUpToLine size={17} /></button>

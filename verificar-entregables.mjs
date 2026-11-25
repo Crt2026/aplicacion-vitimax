@@ -134,6 +134,20 @@ assert.ok(mainCode.includes('className="temporal-clock"'), 'Falta la clase de d�
 assert.match(stylesCode, /\.temporal-clock\{[^}]*font-variant-numeric:tabular-nums/)
 console.log('Reloj en pantalla: tick de 1s, derivado de now y dígitos tabulares: OK')
 
+// Interfaz del chat: cabecera responsiva, nombres de archivo intactos y
+// sugerencias sin barra de scroll visible.
+assert.ok(mainCode.includes('className="assistant-subline"'), 'Falta la línea secundaria compacta de la cabecera')
+assert.ok(mainCode.includes('className="assistant-tz"'), 'Falta ocultar la zona horaria en móvil')
+assert.ok(mainCode.includes('placeholder="Pregunta o pide crear algo..."'), 'El placeholder del chat no se acortó')
+assert.ok(mainCode.includes('CHAT_FILE_TOKEN'), 'Falta proteger los nombres de archivo en el Markdown del chat')
+assert.ok(mainCode.includes("(?:pdf|xlsx|docx|pptx|html|csv)"), 'La protección no cubre todas las extensiones')
+assert.ok(mainCode.includes('restoreChatFileTokens'), 'No se restauran los nombres de archivo protegidos')
+assert.match(stylesCode, /\.assistant-head \.assistant-title\{min-width:0;flex:1\}/)
+assert.match(stylesCode, /\.assistant-head \.assistant-tz\{display:none\}/)
+assert.match(stylesCode, /\.quick-prompts\{[^}]*scrollbar-width:none/)
+assert.match(stylesCode, /\.quick-prompts::-webkit-scrollbar\{display:none\}/)
+console.log('Chat UI: cabecera sin recortes, archivos con "_" y sugerencias sin scrollbar: OK')
+
 // Saludo inicial exacto por franja, sin fecha, hora, zona ni nombres falsos.
 assert.equal(buildWelcomeMessage('', morning), 'Buenos días. ¿En qué te ayudo hoy?')
 assert.equal(buildWelcomeMessage('Cristóbal', afternoon), 'Buenas tardes, Cristóbal. ¿Qué resolvemos hoy?')
