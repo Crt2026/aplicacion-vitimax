@@ -35,6 +35,9 @@ assert.ok(lower.includes('arranque rápido'), 'Falta la guía de arranque rápid
 for (const step of ['carga tu catálogo', 'agrega tus clientes', 'registra tus primeras ventas', 'publica y ajusta']) {
   assert.ok(lower.includes(step), `Falta el paso "${step}"`)
 }
+for (const label of ['2\\.', '3\\.', '4\\.']) {
+  assert.match(empty.text, new RegExp(label), 'La guía debe numerar los pasos del 1 al 4')
+}
 assert.ok(!empty.text.includes('Ejemplo'), 'El estado inicial no debe inventar productos de ejemplo')
 assert.ok(!empty.text.includes('$15.000'), 'El estado inicial no debe mostrar precios ajenos')
 assert.equal(empty.text.split('23 de noviembre de 2026').length - 1, 1, 'La fecha debe aparecer una sola vez')

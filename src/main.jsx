@@ -399,14 +399,18 @@ function isEmptyOverviewRequest(requestText = '', type = 'pdf') {
 
 function emptyOverviewMarkdown(counts = {}) {
   const safe = (value) => Math.max(0, Number(value) || 0)
-  return [
-    '# Estado inicial de VITIMAX',
-    `Conteos reales del centro de gestión: ${safe(counts.productos)} productos, ${safe(counts.clientes)} clientes y ${safe(counts.ventas)} ventas registradas.`,
-    '## Arranque rápido',
+  const steps = [
     '1. **Carga tu catálogo.** Importa el Excel oficial de VITIMAX o pide al asistente una propuesta de 10 productos con precios, stock y dosis.',
     '2. **Agrega tus clientes.** Registra contactos reales con nombre, teléfono y localidad para cotizar y hacer seguimiento.',
     '3. **Registra tus primeras ventas.** Asocia cada venta a un cliente y a un producto para activar los informes comerciales.',
     '4. **Publica y ajusta.** Revisa el catálogo en la web, compártelo por WhatsApp y corrige precios o stock con datos reales.'
+  ]
+  return [
+    '# Estado inicial de VITIMAX',
+    `Conteos reales del centro de gestión: ${safe(counts.productos)} productos, ${safe(counts.clientes)} clientes y ${safe(counts.ventas)} ventas registradas.`,
+    '## Arranque rápido',
+    // Sin líneas en blanco entre pasos: así se renderizan como 1, 2, 3 y 4.
+    steps.join('\n')
   ].join('\n\n')
 }
 
