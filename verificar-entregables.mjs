@@ -84,14 +84,20 @@ const fullResponse = {
 }
 assert.equal(assistantTextFromOpenRouter(fullResponse), 'Listo, generé el Excel con 10 productos.')
 const streamChunk = 'data: {"choices":[{"delta":{"reasoning":"I should prepare the PDF","content":"Aquí tienes el PDF."}}]}\r\n\r\n'
-assert.equal(assistantTextFromStreamChunk(streamChunk), 'Aquí tienes el PDF.')
+assert.equal(assistantTextFromStreamChunk(streamChunk), 'El PDF.')
 assert.equal(sanitizeAssistantText('<think>Let me create the workbook</think>\nEl archivo está listo.'), 'El archivo está listo.')
+assert.equal(sanitizeAssistantText('[informe](sandbox:/mnt/data/informe.pdf)'), 'Informe')
+assert.equal(sanitizeAssistantText('¡Claro que sí! Aquí tienes el informe.'), 'El informe.')
+assert.equal(sanitizeAssistantText('He guardado en mi memoria tu preferencia.'), 'Quedó anotado.')
 const aiDataCode = fs.readFileSync('src/ai-data.js', 'utf8')
 const mainCode = fs.readFileSync('src/main.jsx', 'utf8')
 const serverCode = fs.readFileSync('ai-server.cjs', 'utf8')
 const stylesCode = fs.readFileSync('src/styles.css', 'utf8')
 const functionsCode = fs.readFileSync('functions/index.js', 'utf8')
 assert.ok(SPANISH_ONLY_RULE.includes('IDIOMA OBLIGATORIO'))
+for (const fragment of ['español natural, claro y profesional', 'moneda CLP $#,##0', 'bloques <think>', 'enlaces sandbox:/']) {
+  assert.ok(SPANISH_ONLY_RULE.includes(fragment), `Falta en la regla de idioma: ${fragment}`)
+}
 assert.ok(DIRECT_AI_SYSTEM_PROMPT.startsWith(SPANISH_ONLY_RULE))
 assert.ok(DIRECT_AI_SYSTEM_PROMPT.trimEnd().endsWith(SPANISH_ONLY_RULE))
 for (const [label, code] of [['proxy', serverCode], ['cloud', functionsCode]]) {
@@ -149,6 +155,19 @@ assert.ok(mainCode.includes('ASSISTANT_TOOLS'), 'El agente no usa las herramient
 const fenced = extractFencedCode('```js\nconsole.log(1)\n```\n```js\n' + 'x'.repeat(500) + '\n```')
 assert.equal(fenced.code.length, 500, 'Se conserva el bloque de código completo más largo')
 console.log('Memoria + historial en system prompt · memoria editable · agente élite · código completo: OK')
+
+// Estándar senior de VITIMAX: rigor de datos y formatos profesionales.
+for (const phrase of [
+  '[Ejemplo / Demostración]', 'Cero filas fantasma', 'sin desplazar IDs',
+  'Todos los archivos generados en un mismo turno', '8 hojas estándar',
+  'sin "=" duplicado', 'numeración secuencial real', 'panorámica 16:9',
+  'vista previa interactiva'
+]) {
+  assert.ok(aiDataCode.includes(phrase), `Falta la regla de rigor en el prompt: ${phrase}`)
+  assert.ok(serverCode.includes(phrase), `Falta la regla de rigor en el proxy: ${phrase}`)
+  assert.ok(functionsCode.includes(phrase), `Falta la regla de rigor en la nube: ${phrase}`)
+}
+console.log('Rigor de datos, 8 hojas, formatos y web completa: OK')
 
 // Reloj en vivo: franjas exactas, fecha local, semana, zona y elapsed time.
 const morning = getTemporalContext(new Date(2026, 10, 23, 5, 0, 0))
@@ -225,9 +244,13 @@ assert.equal(resolveDisplayName({
 }), 'Cristóbal')
 assert.ok(!mainCode.includes("profile.name || 'administrador'"), 'El saludo todavía usa un nombre falso')
 assert.match(buildTemporalSection(morning, []), /No menciones la fecha, la hora exacta ni la zona horaria/)
-for (const phrase of ['Soy VITIMAX IA', 'Como asistente de inteligencia artificial', 'Según mi reloj', 'He guardado en mi memoria']) {
+for (const phrase of [
+  'Soy VITIMAX IA', 'Como asistente de IA', 'Como asistente de inteligencia artificial',
+  'Aquí tienes', '¡Claro que sí!', 'Según mi reloj', 'He guardado en mi memoria', 'sandbox:/'
+]) {
   assert.ok(DIRECT_AI_SYSTEM_PROMPT.includes(phrase), `Falta prohibir "${phrase}" en el prompt`)
   assert.ok(serverCode.includes(phrase), `Falta prohibir "${phrase}" en el proxy`)
+  assert.ok(functionsCode.includes(phrase), `Falta prohibir "${phrase}" en la nube`)
 }
 assert.match(DIRECT_AI_SYSTEM_PROMPT, /humor sutil/)
 assert.match(DIRECT_AI_SYSTEM_PROMPT, /no escribas "Fecha:"/i)

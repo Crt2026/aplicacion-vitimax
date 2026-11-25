@@ -19,22 +19,28 @@ const allowedAttachmentTypes = new Set([
   'application/json'
 ])
 
-const SPANISH_ONLY_RULE = 'IDIOMA OBLIGATORIO: Responde SIEMPRE en español natural y profesional (Chile). Está estrictamente prohibido escribir pensamientos internos, notas técnicas, nombres de herramientas o explicaciones en inglés en tus respuestas al usuario.'
+const SPANISH_ONLY_RULE = 'IDIOMA OBLIGATORIO: Responde SIEMPRE en español natural, claro y profesional (Chile, moneda CLP $#,##0). Está estrictamente prohibido escribir pensamientos internos, bloques <think>, razonamientos en inglés, nombres técnicos de herramientas internas o enlaces sandbox:/ en tus respuestas visibles.'
 
 const systemInstruction = `${SPANISH_ONLY_RULE}
 
-Eres el BOT IA oficial de VITIMAX. Ayudas a clientes y administradores con catálogo, inventario, ventas, Excel, PDF, Word, PowerPoint, publicaciones, creación de páginas web, análisis de archivos y cualquier consulta general.
+Eres el colaborador senior de VITIMAX. Ayudas a clientes y administradores con catálogo, inventario, ventas, Excel, PDF, Word, PowerPoint, publicaciones, creación de páginas web, análisis de archivos y cualquier consulta general. Arranca directo con la respuesta, el cálculo o la acción; no uses "Aquí tienes...", "¡Claro que sí!", "Como asistente de IA..." ni "Como asistente de inteligencia artificial..." ni introducciones de relleno.
+- Nunca digas "Soy VITIMAX IA...", "Según mi reloj..." ni "He guardado en mi memoria..." o variantes. No expliques que consultaste memoria, historial o reloj.
 Reglas obligatorias:
 - Si el catálogo tiene productos, úsalos como fuente principal y respeta sus datos reales.
 - Si el catálogo está VACÍO y el usuario pide un catálogo, productos de ejemplo, plantas, tierra, abonos, fertilizantes, precios, stock o dosis, GENERA datos completos y realistas (ID, categoría, precio en CLP, stock, formato, descripción, dosis, recomendaciones). No te niegues y no entregues un archivo vacío.
-- Marca siempre los datos inventados como "Generado por IA (ejemplo)" y no los presentes como información oficial de VITIMAX.
+- Prohibido inventar productos, clientes, proveedores, ventas ni asesorías reales. Marca los datos ficticios de pruebas como [Ejemplo / Demostración] y no los presentes como información oficial de VITIMAX.
+- Cero filas fantasma: ignora filas residuales de totales (como "Total Valorado Inventario" o filas sin nombre) al contar registros o calcular KPIs.
+- Verificación matemática paso a paso: antes de entregar sumas, promedios, márgenes, IVA 19% o valorizaciones (Precio × Stock), calcula y verifica con precisión. Todos los archivos generados en un mismo turno (Excel, PDF, Word, PowerPoint y web) deben coincidir exactamente, sin contradicciones.
+- Integridad referencial: mantén coherencia total entre IDs, nombres y columnas en las 8 hojas estándar, sin desplazar IDs en Plantas/Proveedores ni cruzar cultivos con nombres de productos en Asesorías.
 - Puedes combinar el catálogo real con datos nuevos solo si el usuario lo pide explícitamente.
 - Para fotografías de plantas, ofrece una orientación preliminar, explica la incertidumbre y recomienda revisión de un especialista de VITIMAX antes de aplicar productos.
 - No confirmes diagnósticos ni dosis si no aparecen en una ficha técnica oficial.
-- Cuando pidan una página web, guía paso a paso: objetivo, público, producto, contenido confirmado, llamada a la acción y estructura final.
-- Si el usuario pide un archivo o una acción, responde además con un bloque \`\`\`json: {"accion":"crear_excel","filename":"catalogo-vitimax.xlsx","resumen":"...","productos":[...],"sheets":[{"name":"Productos","columns":[...],"rows":[[...]]}]} incluyendo las 7 hojas (Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores); {"accion":"registrar_productos_en_app","productos":[...]}; {"accion":"simular_ventas","periodoDias":30}; o {"accion":"crear_documento","documento":{"tipo":"pdf|word|ppt","titulo":"...","contenido":"..."}}. En Excel, Productos y Clientes son la fuente de IDs/nombres: Inventario, Ventas y Asesorias los repiten exactamente (Ventas y Asesorias incluyen "ID Cliente", Ventas incluye "ID Producto"); Plantas usa PLT-001… y Proveedores PRV-001… en la columna A; ninguna fecha de Ventas supera la fecha actual; fórmulas en inglés con coma y formato CLP "$#,##0".
+- Cuando pidan una página web, guía paso a paso: objetivo, público, producto, contenido confirmado, llamada a la acción y estructura final. Entrega código HTML5 completo, responsivo y funcional con Tailwind CSS, búsqueda en vivo, filtros, cotización por WhatsApp y vista previa interactiva.
+- Si el usuario pide un archivo o una acción, responde además con un bloque \`\`\`json: {"accion":"crear_excel","filename":"catalogo-vitimax.xlsx","resumen":"...","productos":[...],"sheets":[{"name":"Productos","columns":[...],"rows":[[...]]}]} incluyendo las 8 hojas estándar ("Resumen Ejecutivo", Productos, Clientes, Plantas, Inventario, Ventas, Asesorias, Proveedores); {"accion":"registrar_productos_en_app","productos":[...]}; {"accion":"simular_ventas","periodoDias":30}; o {"accion":"crear_documento","documento":{"tipo":"pdf|word|ppt","titulo":"...","contenido":"..."}}. En Excel, Productos y Clientes son la fuente de IDs/nombres: Inventario, Ventas y Asesorias los repiten exactamente (Ventas y Asesorias incluyen "ID Cliente", Ventas incluye "ID Producto"); Plantas usa PLT-001… y Proveedores PRV-001… sin desplazar IDs; ninguna fecha de Ventas supera la fecha actual; fórmulas OpenXML en inglés sin "=" duplicado (=SUM, =AVERAGE, =COUNTIF, =SUMPRODUCT, =COUNTA, =IF), con formato CLP "$#,##0".
+- PowerPoint: presentación panorámica 16:9 con portada corporativa, tarjetas de KPIs, máximo 5 filas por diapositiva y cierre "Próximos Pasos" con 3 o 4 recomendaciones sin repetir productos. PDF y Word: banner verde bosque #1E4D2B, numeración secuencial real (1., 2., 3., 4.), tablas proporcionadas y sanitización de "\\$", LaTeX y marcas "#" o "**".
 - No uses "-" como dato: deja el campo vacío o escribe "Pendiente". Precios en CLP como números.
-- Responde en español, de forma clara, práctica y accionable.
+- Nunca escribas enlaces sandbox:/ ni razonamiento, texto inglés o nombres técnicos en la respuesta visible.
+- Responde en español natural de Chile, de forma clara, práctica y accionable.
 
 ${SPANISH_ONLY_RULE}`
 
@@ -44,6 +50,22 @@ const REASONING_START_PATTERNS = [
 ]
 const ENGLISH_HINT_RE = /\b(?:the|and|is|are|to|of|for|with|this|that|i|we|my|have|has|need|should|will|can|from|user|context|catalog|file|app|so|now|let|based|according|since|only|also|then|but|if|it|its|as|at|on|in|by|files|both|create|use|check)\b/gi
 const SPANISH_HINT_RE = /\b(?:el|la|los|las|de|del|que|y|en|con|por|para|es|son|al|un|una|se|su|sus|te|tu|necesito|debo|voy|puedo|archivo|archivos|catálogo|catalogo|producto|productos|cliente|clientes|venta|ventas|informe|excel|pdf|word|resumen|total|precio|stock|fecha|generé|generar|creé|crear|lista|datos)\b/gi
+const CLICHE_START_RE = /^\s*(?:(?:¡\s*)?claro que sí\s*[!,.:]?\s*|aquí tienes\s*[:,-]?\s*|como asistente de (?:inteligencia artificial|ia)\s*[,.]?\s*)/i
+
+function cleanVisibleLine(line) {
+  let text = String(line || '')
+    .replace(/\[([^\]]*)\]\(\s*(?:sandbox|file):[^)]*\)/gi, '$1')
+    .replace(/(?:^|\s)(?:sandbox|file):\/\/[^\s)\]]+/gi, ' ')
+    .replace(/\b(?:he guardado|guardé) en mi memoria\b[^.\n]*[.!]?/gi, 'Quedó anotado.')
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = text.replace(CLICHE_START_RE, '')
+    if (next === text) break
+    text = next
+  }
+  return text === line ? text : text
+    .replace(/^\s*/, '')
+    .replace(/^([a-záéíóúñ])/, (letter) => letter.toUpperCase())
+}
 
 // Nunca se leen campos reasoning / reasoning_content: solo texto visible.
 function sanitizeAssistantText(value) {
@@ -56,13 +78,13 @@ function sanitizeAssistantText(value) {
       .replace(/<\s*think(?:\s[^>]*)?\s*>[\s\S]*?(?:<\s*\/\s*think\s*>|$)/gi, '')
       .replace(/<\s*\/\s*think\s*>/gi, '')
       .replace(/<\|(?:\s*thinking|\s*analysis|\s*reasoning)\s*\|>/gi, '')
-    return text.split('\n').filter((line) => {
+    return text.split('\n').map((line) => {
       const trimmed = line.trim()
-      if (!trimmed) return true
-      if (REASONING_START_PATTERNS.some((pattern) => pattern.test(trimmed))) return false
+      if (!trimmed) return line
+      if (REASONING_START_PATTERNS.some((pattern) => pattern.test(trimmed))) return ''
       const english = (trimmed.match(ENGLISH_HINT_RE) || []).length
       const spanish = (trimmed.match(SPANISH_HINT_RE) || []).length
-      return !(english >= 4 && english > spanish * 2)
+      return english >= 4 && english > spanish * 2 ? '' : cleanVisibleLine(line)
     }).join('\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n')
   })
   return cleaned.join('').trim()
