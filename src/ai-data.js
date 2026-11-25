@@ -2223,9 +2223,18 @@ export function limitRecentHistory(history = [], maxTurns = 10) {
   return rows.slice(userIndexes[userIndexes.length - maxTurns])
 }
 
-// Modelos gratuitos verificados en OpenRouter. "openrouter/free" enruta solo a
-// modelos gratuitos; "openrouter/auto" se excluye porque puede elegir de pago.
-export const FREE_AI_MODELS = [
+// Preferencia solicitada: principal gemini 2.0 flash y respaldos clásicos.
+// Si OpenRouter ya no publica alguno de estos IDs, el 404 se trata como error
+// temporal de ruta y la cascada continúa con los modelos gratuitos activos.
+export const DEFAULT_FREE_MODELS = [
+  'google/gemini-2.0-flash-exp:free',
+  'meta-llama/llama-3.3-70b-instruct:free',
+  'qwen/qwen-2.5-72b-instruct:free',
+  'mistralai/mistral-small-3.1-24b-instruct:free'
+]
+
+// Modelos gratuitos activos verificados en OpenRouter, como respaldo final.
+export const VERIFIED_FREE_MODELS = [
   'baidu/ernie-5.5-flash-preview:free',
   'google/gemma-4-31b-it:free',
   'google/gemma-4-26b-a4b-it:free',
@@ -2238,6 +2247,10 @@ export const FREE_AI_MODELS = [
   'openrouter/free'
 ]
 
+// "openrouter/auto" se conserva como último recurso solicitado, después de
+// agotar los modelos gratuitos explícitos.
+export const FREE_AI_MODELS = [...new Set([...DEFAULT_FREE_MODELS, ...VERIFIED_FREE_MODELS, 'openrouter/auto'])]
+
 /** Cascada sin duplicados: primero los configurados, luego los gratuitos activos. */
 export function aiModelCascade(configured = []) {
   const list = [...(Array.isArray(configured) ? configured : []), ...FREE_AI_MODELS]
@@ -2248,11 +2261,12 @@ export function aiModelCascade(configured = []) {
 export function isRetryableAiError(error) {
   const status = Number(error?.status || error?.statusCode || 0)
   if ([401, 402, 403].includes(status)) return false
-  if ([408, 429, 502, 503, 504].includes(status)) return true
+  // 404 = modelo retirado de OpenRouter: se salta y se prueba el siguiente.
+  if ([404, 408, 429, 502, 503, 504].includes(status)) return true
   if (error?.name === 'AbortError' || error?.name === 'TimeoutError') return true
   const text = String(error?.message || '')
   if (/\b(?:401|402|403)\b/i.test(text)) return false
-  return /\b(?:408|429|502|503|504)\b|rate.?limit|too many requests|saturad|timeout|tardó|fetch failed|network|aborted|conexi|offline/i.test(text)
+  return /\b(?:404|408|429|502|503|504)\b|no longer supported|not found|rate.?limit|too many requests|saturad|timeout|tardó|fetch failed|network|aborted|conexi|offline/i.test(text)
 }
 
 const formatClpLocal = (value) => `$${Math.round(Number(value) || 0).toLocaleString('es-CL')}`
@@ -2281,6 +2295,62 @@ export function buildLocalDataSummary({ products = [], modules = {}, message = '
     }
   }
   return parts.join(' ')
+}
+
+const GREETING_RE = /^\s*(?:hola|buenas(?:\s+(?:días|tardes|noches))?|buen\s+día|qué\s+tal|como\s+estás|como\s+estas|hey|hi|hello)\s*[!?.,¡¿\s]*$/i
+const CONTEXT_WORDS_RE = /\b(?:excel|pdf|word|powerpoint|ppt|archivo|planilla|hoja|documento|web|página|pagina|código|codigo|adjunto|pendiente|totales|fila|columna)\b/i
+const FOLLOW_UP_RE = /^\s*(?:y\s|pero\s|además\s|también\s|agrega|agregar|agrégale|añade|añadir|cambia|cambiar|cámbialo|corrige|con\s|sin\s|ponle|quita|sube|baja|ajusta|revisa|explica|detalla|sí\s|si\s|no\s|ok\s|vale\s|gracias)/i
+const STOP_CONTEXT_WORDS = new Set(['los', 'las', 'por', 'para', 'con', 'una', 'uno', 'del', 'que', 'más', 'mas', 'muy', 'pero', 'como', 'cuando', 'donde', 'este', 'esta'])
+
+function contextWords(value) {
+  return new Set(String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9ñ\s]/g, ' ')
+    .split(/\s+/)
+    .filter((word) => word.length > 2 && !STOP_CONTEXT_WORDS.has(word)))
+}
+
+/** Saludos breves y cambios de tema no deben arrastrar pendientes anteriores. */
+export function shouldResetConversationContext(message = '', history = []) {
+  const text = String(message || '').trim()
+  if (!text) return false
+  if (GREETING_RE.test(text.replace(/[¿?¡!]/g, ''))) return true
+  if (FOLLOW_UP_RE.test(text)) return false
+  const previous = [...(Array.isArray(history) ? history : [])]
+    .reverse()
+    .find((item) => item?.role === 'user' && typeof item.content === 'string' && item.content.trim())
+  if (!previous) return false
+  const currentWords = contextWords(text)
+  const previousWords = contextWords(previous.content)
+  if (!currentWords.size || !previousWords.size) return false
+  if (CONTEXT_WORDS_RE.test(previous.content) && !CONTEXT_WORDS_RE.test(text) && currentWords.size <= 8) return true
+  const overlap = [...currentWords].filter((word) => previousWords.has(word)).length / Math.min(currentWords.size, previousWords.size)
+  return overlap <= 0.2 && currentWords.size <= 6
+}
+
+/**
+ * Reenumera las listas numeradas del chat antes de parsearlas: algunos modelos
+ * escriben "1." en cada renglón y el renderizador terminaba mostrando 1, 1, 1.
+ * Los números explícitos consecutivos se respetan; los duplicados se corrigen.
+ */
+export function normalizeChatListNumbers(value) {
+  const lines = String(value ?? '').replace(/\r\n?/g, '\n').split('\n')
+  let fence = false
+  let counter = 0
+  return lines.map((line) => {
+    if (/^\s*```/.test(line)) { fence = !fence; counter = 0; return line }
+    if (fence) return line
+    const match = line.match(/^(\s*(?:\*\*|__)?\s*)(\d{1,3})(\s*[.)-]\s*)/)
+    if (match) {
+      const explicit = Number(match[2])
+      counter = counter ? counter + 1 : (explicit > 0 ? explicit : 1)
+      return `${match[1]}${counter}${match[3]}${line.slice(match[0].length)}`
+    }
+    if (line.trim()) counter = 0
+    return line
+  }).join('\n')
 }
 
 function extractAssistantContent(value) {
@@ -2480,6 +2550,7 @@ ${SPANISH_ONLY_RULE}`
 export const COMPACT_AI_SYSTEM_PROMPT = SPANISH_ONLY_RULE + `
 Asistente senior de VITIMAX (agricultura, datos, documentos y código). Responde en español chileno, directo y sin rodeos; nunca escribas <think>, razonamientos, nombres de herramientas internos ni enlaces sandbox:/.
 Usa el reloj inyectado para plazos y fechas de documentos sin recitarlo; aplica la memoria persistente sin anunciarla. No inventes datos reales: etiqueta los ficticios como [Ejemplo / Demostración], ignora filas de totales, verifica IVA 19%, Precio × Stock y que todas las cifras del turno coincidan.
+Consultas agronómicas (por ejemplo "quiero sembrar tomate"): entrega una recomendación completa y accionable con época y zona, variedad, suelo y pH, preparación, siembra o trasplante, densidad, riego, fertilización, control integrado de plagas y enfermedades, monitoreo, cosecha y precauciones; si falta información local, indícalo y usa [Ejemplo / Demostración] solo para valores orientativos.
 AGENTE ÉLITE: elige y encadena herramientas (tool_choice "auto") hasta 8 pasos sobre Productos, Clientes, Plantas, Inventario, Ventas, Asesorías y Proveedores; no simules crear archivos. Si no hay herramientas, devuelve un bloque \`\`\`json con {"accion":"crear_excel"|"crear_pdf"|"crear_word"|"crear_ppt"|"crear_pagina_web"|"crear_codigo"|"guardar_memoria"|"olvidar_memoria", ...}. Nunca muestres ese JSON al usuario: confirma en una línea el archivo creado.
 Excel: 8 hojas estándar con Resumen Ejecutivo primero, fórmulas OpenXML en inglés sin "=" duplicado, verde #1E4D2B y CLP $#,##0. PDF/Word: texto sanitizado y numeración real. PowerPoint: 16:9 con Próximos Pasos. Web/código: Tailwind completo, vista previa interactiva y código completo y funcional.
 No digas "¡Claro que sí!", "Aquí tienes", "Como asistente de IA", "He guardado en mi memoria", "Según mi reloj" ni "Soy VITIMAX IA".`

@@ -3,8 +3,11 @@ import path from 'node:path'
 import assert from 'node:assert/strict'
 import {
   COMPACT_AI_SYSTEM_PROMPT,
+  DEFAULT_FREE_MODELS,
   DIRECT_AI_SYSTEM_PROMPT,
   FREE_AI_MODELS,
+  normalizeChatListNumbers,
+  shouldResetConversationContext,
   aiModelCascade,
   buildConversationSection,
   buildDemoProducts,
@@ -156,8 +159,22 @@ for (const status of [408, 429, 502, 503, 504]) {
 for (const status of [401, 402, 403]) {
   assert.equal(isRetryableAiError({ status }), false, `El estado ${status} no debe rotar de modelo`)
 }
+assert.equal(isRetryableAiError({ status: 404 }), true, 'Un modelo retirado debe saltarse')
 assert.equal(isRetryableAiError(new Error('No hay conexión')), true)
 assert.equal(isRetryableAiError(new Error('Invalid API key 401')), false)
+assert.equal(DEFAULT_FREE_MODELS[0], 'google/gemini-2.0-flash-exp:free')
+assert.deepEqual(DEFAULT_FREE_MODELS.slice(1, 4), [
+  'meta-llama/llama-3.3-70b-instruct:free',
+  'qwen/qwen-2.5-72b-instruct:free',
+  'mistralai/mistral-small-3.1-24b-instruct:free'
+])
+assert.equal(FREE_AI_MODELS[FREE_AI_MODELS.length - 1], 'openrouter/auto')
+assert.match(serverCode, /google\/gemini-2\.0-flash-exp:free/)
+assert.match(serverCode, /meta-llama\/llama-3\.3-70b-instruct:free/)
+assert.match(serverCode, /qwen\/qwen-2\.5-72b-instruct:free/)
+assert.doesNotMatch(mainCode, /No hay un modelo de IA configurado/, 'El aviso antiguo debe haberse eliminado')
+assert.match(mainCode, /if \(aiUrl\) modes\.push\('proxy'\)/)
+assert.match(mainCode, /const preferRemote = Boolean\(aiUrl\) && !manualDirectKey/)
 
 const manyTurns = Array.from({ length: 30 }, (_, index) => [
   { role: 'user', content: `Pregunta ${index}` },
@@ -186,6 +203,24 @@ assert.match(serverCode, /error\.status === 429 \? 1500/)
 assert.match(serverCode, /openrouter\/free/)
 assert.match(serverCode, /serverLocalAnswer/)
 console.log('Rotación multi-modelo, backoff, prompt compacto y fallback local: OK')
+
+// Saludos/cambios de tema y numeración consecutiva del chat.
+const previousTurn = [
+  { role: 'user', content: 'Crea un Excel con el catálogo y déjalo pendiente' },
+  { role: 'assistant', content: 'Listo, quedó pendiente.' }
+]
+for (const greeting of ['Hola', 'Buenas', '¿Cómo estás?']) {
+  assert.equal(shouldResetConversationContext(greeting, previousTurn), true, `El saludo ${greeting} debe limpiar el contexto`)
+}
+assert.equal(shouldResetConversationContext('Agrega una fila con tomate', previousTurn), false, 'Un seguimiento debe conservar el contexto')
+assert.equal(shouldResetConversationContext('quiero sembrar tomate', previousTurn), true, 'Un cambio de tema debe limpiar el contexto')
+assert.match(mainCode, /shouldResetConversationContext\(text, messages\)/)
+assert.match(serverCode, /cleanConversationContext\(message, history\)/)
+assert.equal(normalizeChatListNumbers('1. Uno\n2. Dos\n3. Tres\n4. Cuatro'), '1. Uno\n2. Dos\n3. Tres\n4. Cuatro')
+assert.equal(normalizeChatListNumbers('1. Uno\n1. Dos\n1. Tres\n1. Cuatro'), '1. Uno\n2. Dos\n3. Tres\n4. Cuatro')
+assert.equal(normalizeChatListNumbers('**1. Uno**\n\n**2. Dos**\n\n**3. Tres**'), '**1. Uno**\n\n**2. Dos**\n\n**3. Tres**')
+assert.match(mainCode, /parseDocument\(normalizeChatListNumbers\(text\)\)/)
+console.log('Contexto limpio en saludos y numeración consecutiva: OK')
 
 // Memoria + historial inyectados en el system prompt.
 const memoryPrompt = buildMemorySection([{ categoria: 'Negocio', contenido: 'El IVA es 19%' }])
@@ -281,7 +316,7 @@ assert.ok(mainCode.includes('buildTemporalSection(getTemporalContext(), source)'
 assert.ok(mainCode.includes('temporal: getTemporalContext()'), 'El proxy no recibe el reloj del dispositivo')
 assert.ok(serverCode.includes('serverTemporalBlock('), 'El proxy no construye el bloque temporal')
 assert.ok(serverCode.includes('TEMPORAL_MARKER'), 'El proxy no evita duplicar el bloque temporal')
-assert.ok(mainCode.includes('baidu/ernie-5.5-flash-preview:free'), 'El BOT no usa un modelo gratuito y estable por defecto')
+assert.ok(mainCode.includes('DEFAULT_FREE_MODELS.join(\',\')'), 'El BOT no usa el modelo gratuito principal solicitado por defecto')
 console.log('Reloj local: 4 franjas, semana 48, zona horaria y elapsed time: OK')
 
 // Reloj en pantalla: tick reactivo de 1 segundo y dígitos sin salto horizontal.

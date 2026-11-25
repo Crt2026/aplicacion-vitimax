@@ -39,6 +39,7 @@ import {
 import {
   ASSISTANT_TOOLS,
   COMPACT_AI_SYSTEM_PROMPT,
+  DEFAULT_FREE_MODELS,
   SPANISH_ONLY_RULE,
   aiModelCascade,
   assistantTextFromOpenRouter,
@@ -67,7 +68,9 @@ import {
   normalizeImportedProducts,
   normalizeImportedRecords,
   normalizeMemories,
+  normalizeChatListNumbers,
   normalizeProduct,
+  shouldResetConversationContext,
   normalizeProducts,
   parseJsonBlock,
   parseOpenRouterStreamResponse,
@@ -216,7 +219,7 @@ function restoreChatMessages(saved) {
   return saved
     .filter((item) => item && typeof item === 'object' && typeof item.text === 'string')
     .map((item) => {
-      const clean = { ...item, text: item.role === 'assistant' ? sanitizeAssistantText(item.text) : item.text, pending: false }
+      const clean = { ...item, text: item.role === 'assistant' ? normalizeChatListNumbers(sanitizeAssistantText(item.text)) : item.text, pending: false }
       const files = Array.isArray(item.files)
         ? item.files
           .filter((file) => file && typeof file === 'object')
@@ -817,13 +820,18 @@ function aiErrorMessage(error, fallback) {
 // OpenRouter devuelve 429/502/503 o corta la conexión. El arreglo "models" de
 // OpenRouter no garantiza el respaldo ante esos errores, por eso se hace aquí.
 const DIRECT_AI_MODELS = aiModelCascade(
-  String(import.meta.env.VITE_AI_MODELS || 'baidu/ernie-5.5-flash-preview:free').split(',').map((item) => item.trim()).filter(Boolean)
+  String(import.meta.env.VITE_AI_MODELS || DEFAULT_FREE_MODELS.join(',')).split(',').map((item) => item.trim()).filter(Boolean)
 )
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+function resolveManualDirectKey(settings) {
+  // Solo la clave escrita por el usuario en Configuración cuenta como manual.
+  return String(settings?.aiApiKey || '').trim()
+}
+
 function resolveDirectKey(settings) {
-  return String(settings?.aiApiKey || import.meta.env.VITE_AI_DIRECT_KEY || '').trim()
+  return resolveManualDirectKey(settings) || String(import.meta.env.VITE_AI_DIRECT_KEY || '').trim()
 }
 
 function attachmentText(attachment) {
@@ -2264,11 +2272,16 @@ function App({ user, onSignOut, guest = false }) {
     const cloudAssistantEnabled = import.meta.env.VITE_ENABLE_CLOUD_ASSISTANT === 'true'
     const aiUrl = resolveAiUrl(settings)
     const aiToken = resolveAiToken(settings)
-    const directKey = resolveDirectKey(settings)
+    const manualDirectKey = resolveManualDirectKey(settings)
+    const embeddedDirectKey = String(import.meta.env.VITE_AI_DIRECT_KEY || '').trim()
+    const directKey = manualDirectKey || embeddedDirectKey
     const modes = []
+    // Sin clave manual, se usa primero el backend ai-server.cjs (clave en .env).
     if (aiUrl) modes.push('proxy')
-    if (directKey) modes.push('direct')
+    if (manualDirectKey) modes.push('direct')
     if (firebaseFunctions && cloudAssistantEnabled && !guest) modes.push('cloud')
+    // Si no hay proxy alcanzable, la clave integrada es el último respaldo.
+    if (!aiUrl && !manualDirectKey && embeddedDirectKey) modes.push('direct-embedded')
     let workingProducts = products
     let attachment
     try {
@@ -2287,7 +2300,10 @@ function App({ user, onSignOut, guest = false }) {
       else attachmentNote = `Archivo adjunto "${attachmentFile.name}" (${Math.ceil(attachmentFile.size / 1024)} KB).`
     }
     const userText = attachmentFile ? `${text}\n📎 ${attachmentFile.name}` : text
-    const history = messages
+    // Los saludos breves y los cambios de tema empiezan una conversación nueva:
+    // no se les inyectan archivos ni pendientes de turnos anteriores.
+    const resetContext = shouldResetConversationContext(text, messages)
+    const history = (resetContext ? [] : messages)
       .filter((item) => !item.pending && item.text !== '…' && typeof item.text === 'string' && item.text.trim())
       .flatMap((item) => {
         const visibleText = item.role === 'assistant' ? sanitizeAssistantText(item.text) : item.text
@@ -2354,7 +2370,7 @@ function App({ user, onSignOut, guest = false }) {
     }
     const localFallback = attachmentNote
       ? `Leí el archivo "${attachmentFile.name}" en modo local.\n\n${attachmentNote}`
-      : 'No hay un modelo de IA configurado ahora mismo. Puedo generar archivos locales con los datos de VITIMAX; para razonamiento avanzado, auditoría de datos y documentos redactados por IA, agrega una clave de OpenRouter en Configuración.'
+      : buildLocalDataSummary({ products: workingProducts, modules: records, message: text }) || 'Procesé la solicitud con los datos disponibles de VITIMAX en este dispositivo.'
     const generateLocalFiles = async () => {
       const created = []
       if (localExcel) {
@@ -2566,7 +2582,7 @@ function App({ user, onSignOut, guest = false }) {
       return { text: lastText || 'Listo. Ejecuté las acciones solicitadas.', created, registered, tools: toolTrace }
     }
     const callProxyOrCloud = async ({ message, systemPrompt, maxTokens = 6000, conversation = history, attachment: fileAttachment = attachment }) => {
-      const remoteModes = modes.filter((mode) => mode !== 'direct')
+      const remoteModes = modes.filter((mode) => mode === 'proxy' || mode === 'cloud')
       let lastError = null
       for (const mode of remoteModes) {
         try {
@@ -2694,53 +2710,64 @@ function App({ user, onSignOut, guest = false }) {
       return null
     }
     const stripActionJson = (value) => sanitizeAssistantText(String(value || '').replace(/```(?:json)?\s*\{[\s\S]*?\}\s*```/gi, ''))
-    void (async () => {
-      try {
-        if (!modes.length) {
-          const localCreated = await generateLocalFiles()
-          finish(localFallback, localCreated)
-          return
-        }
-        // Con un modelo directo disponible, TODA la intención pasa por el
-        // agente: él elige la herramienta correcta con tool_choice: "auto".
-        if (directKey) {
-          const result = await callDirectAgent({
-            message: text,
-            systemPrompt: COMPACT_AI_SYSTEM_PROMPT,
-            maxTokens: 6000,
-            conversation: history
-          })
-          if (!result.created.length) {
-            const action = parseJsonBlock(result.text)
-            if (action) {
-              const handled = await runJsonAction(action)
-              if (handled) { finish(handled.text, handled.created, handled.registered, handled.tools); return }
-            }
-          }
-          const answer = stripActionJson(result.text) || (result.created.length ? `Listo. Generé ${result.created.length} archivo(s); puedes descargarlos desde este mensaje.` : 'Listo.')
-          finish(answer, result.created, result.registered, result.tools)
-          return
-        }
-        // Sin modelo directo: el proxy/cloud devuelve acciones JSON que la app ejecuta.
-        const answer = await callProxyOrCloud({ message: text })
-        const action = parseJsonBlock(answer)
+    const handleRemoteAnswer = async (answer) => {
+      const action = parseJsonBlock(answer)
+      if (action) {
+        const handled = await runJsonAction(action)
+        if (handled) { finish(handled.text, handled.created, handled.registered, handled.tools); return }
+      }
+      finish(stripActionJson(answer) || 'Listo.')
+    }
+    // Con un modelo directo disponible, TODA la intención pasa por el agente:
+    // él elige la herramienta correcta con tool_choice: "auto".
+    const runDirect = async () => {
+      const result = await callDirectAgent({
+        message: text,
+        systemPrompt: COMPACT_AI_SYSTEM_PROMPT,
+        maxTokens: 6000,
+        conversation: history
+      })
+      if (!result.created.length) {
+        const action = parseJsonBlock(result.text)
         if (action) {
           const handled = await runJsonAction(action)
           if (handled) { finish(handled.text, handled.created, handled.registered, handled.tools); return }
         }
-        finish(stripActionJson(answer) || 'Listo.')
+      }
+      const answer = stripActionJson(result.text) || (result.created.length ? `Listo. Generé ${result.created.length} archivo(s); puedes descargarlos desde este mensaje.` : 'Listo.')
+      finish(answer, result.created, result.registered, result.tools)
+    }
+    const runRemote = async () => handleRemoteAnswer(await callProxyOrCloud({ message: text }))
+    void (async () => {
+      try {
+        if (!modes.length) {
+          const localCreated = await generateLocalFiles()
+          // Nunca culpar al usuario de una configuración ausente: el backend
+          // con OPENROUTER_API_KEY o cualquier modelo gratuito está disponible.
+          finish(localFallback || 'Procesé la solicitud con los datos locales de VITIMAX.', localCreated)
+          return
+        }
+        const preferRemote = Boolean(aiUrl) && !manualDirectKey
+        if (preferRemote) {
+          try {
+            await runRemote()
+            return
+          } catch {
+            if (!directKey) throw new Error('El backend de IA no respondió y no hay una clave de respaldo.')
+            // El proxy local no está levantado: se usa la clave integrada.
+          }
+        }
+        if (directKey) {
+          await runDirect()
+          return
+        }
+        await runRemote()
       } catch (error) {
         // Si el modelo directo falla, se intenta el respaldo remoto antes de
         // caer al modo local, sin inventar simulaciones ni respuestas armadas.
-        if (modes.some((mode) => mode !== 'direct')) {
+        if (directKey && modes.some((mode) => mode === 'proxy' || mode === 'cloud')) {
           try {
-            const answer = await callProxyOrCloud({ message: text })
-            const action = parseJsonBlock(answer)
-            if (action) {
-              const handled = await runJsonAction(action)
-              if (handled) { finish(handled.text, handled.created, handled.registered, handled.tools); return }
-            }
-            finish(stripActionJson(answer) || localFallback)
+            await runRemote()
             if (!isRetryableAiError(error)) setNotice(aiErrorMessage(error, 'La IA directa no respondió. Se usó el respaldo remoto.'))
             return
           } catch { /* se conserva el respaldo local */ }
@@ -3739,7 +3766,7 @@ function restoreChatFileTokens(text, files) {
 }
 
 function richText(value) {
-  const { text, files } = protectChatFileTokens(value)
+  const { text, files } = protectChatFileTokens(normalizeChatListNumbers(value))
   const segments = inlineSegments(text)
   if (!segments.length) return null
   return segments.map((segment, index) => {
@@ -3778,7 +3805,7 @@ function ChatCodeBlock({ code, language, onCopy, copied }) {
 }
 
 function ChatMessageBody({ text, onCopy, copiedCode }) {
-  const blocks = useMemo(() => parseDocument(text), [text])
+  const blocks = useMemo(() => parseDocument(normalizeChatListNumbers(text)), [text])
   if (!blocks.length) return null
   return <div className="chat-rich">{blocks.map((block, index) => {
     if (block.type === 'heading') {

@@ -15,8 +15,16 @@ const host = process.env.AI_SERVER_HOST || '0.0.0.0'
 const provider = (process.env.AI_PROVIDER || (process.env.OPENROUTER_API_KEY ? 'openrouter' : 'gemini')).toLowerCase()
 const apiKey = provider === 'openrouter' ? process.env.OPENROUTER_API_KEY : process.env.GEMINI_API_KEY
 const model = provider === 'openrouter'
-  ? (process.env.OPENROUTER_MODEL || 'baidu/ernie-5.5-flash-preview:free')
+  ? (process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-exp:free')
   : (process.env.GEMINI_MODEL || 'gemini-2.0-flash')
+// Preferencia solicitada: principal gemini 2.0 flash y respaldos clásicos.
+const DEFAULT_FREE_MODELS = [
+  'google/gemini-2.0-flash-exp:free',
+  'meta-llama/llama-3.3-70b-instruct:free',
+  'qwen/qwen-2.5-72b-instruct:free',
+  'mistralai/mistral-small-3.1-24b-instruct:free',
+  'openrouter/auto'
+]
 // Modelos gratuitos activos verificados en OpenRouter. Se envían de uno en uno
 // porque el arreglo "models" de OpenRouter no garantiza el respaldo ante 429.
 const ACTIVE_FREE_MODELS = [
@@ -33,8 +41,11 @@ const ACTIVE_FREE_MODELS = [
 ]
 const fallbackModels = [...new Set([
   ...(process.env.OPENROUTER_FALLBACK_MODELS || '').split(',').map((item) => item.trim()).filter(Boolean),
-  ...ACTIVE_FREE_MODELS
+  ...DEFAULT_FREE_MODELS.filter((item) => item !== model && item !== 'openrouter/auto'),
+  ...ACTIVE_FREE_MODELS.filter((item) => item !== model),
+  'openrouter/auto'
 ])]
+const cascadeModels = [...new Set([model, ...fallbackModels].filter(Boolean))]
 const sharedToken = (process.env.AI_SHARED_TOKEN || '').trim()
 const upstreamTimeout = Number(process.env.AI_TIMEOUT_MS || 60_000)
 const rateLimitWindow = 60_000
@@ -95,6 +106,7 @@ ${SPANISH_ONLY_RULE}`
 const compactSystemInstruction = SPANISH_ONLY_RULE + `
 Asistente senior de VITIMAX (agricultura, datos, documentos y código). Español chileno directo; nunca <think>, razonamientos, nombres internos ni enlaces sandbox:/.
 Usa el reloj inyectado para plazos y documentos sin recitarlo; aplica la memoria sin anunciarla. No inventes datos reales: etiqueta los ficticios [Ejemplo / Demostración], ignora totales, verifica IVA 19% y Precio × Stock con cifras coherentes en todo el turno.
+Consultas agronómicas (por ejemplo "quiero sembrar tomate"): da recomendación completa con época y zona, variedad, suelo y pH, preparación, siembra o trasplante, densidad, riego, fertilización, control integrado de plagas y enfermedades, monitoreo, cosecha y precauciones; si falta información local, indícalo y etiqueta los valores orientativos [Ejemplo / Demostración].
 AGENTE ÉLITE: encadena herramientas hasta 8 pasos sobre Productos, Clientes, Plantas, Inventario, Ventas, Asesorías y Proveedores; no simules archivos. Sin herramientas, devuelve un bloque \`\`\`json con {"accion":"crear_excel"|"crear_pdf"|"crear_word"|"crear_ppt"|"crear_pagina_web"|"crear_codigo"|"guardar_memoria"|"olvidar_memoria", ...} y confirma en una línea el archivo creado.
 Excel: 8 hojas con Resumen Ejecutivo, fórmulas OpenXML sin "=" duplicado, verde #1E4D2B y CLP $#,##0. PDF/Word con numeración real; PowerPoint 16:9 con Próximos Pasos; web/código completo con Tailwind y vista previa interactiva.
 Prohibido: "¡Claro que sí!", "Aquí tienes", "Como asistente de IA", "He guardado en mi memoria", "Según mi reloj", "Soy VITIMAX IA".`
@@ -485,14 +497,51 @@ function attachmentParts(attachment) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+const GREETING_RE = /^\s*(?:hola|buenas(?:\s+(?:días|tardes|noches))?|buen\s+día|qué\s+tal|como\s+estás|como\s+estas|hey|hi|hello)\s*[!?.,¡¿\s]*$/i
+const CONTEXT_WORDS_RE = /\b(?:excel|pdf|word|powerpoint|ppt|archivo|planilla|hoja|documento|web|página|pagina|código|codigo|adjunto|pendiente|totales|fila|columna)\b/i
+const FOLLOW_UP_RE = /^\s*(?:y\s|pero\s|además\s|también\s|agrega|agregar|agrégale|añade|añadir|cambia|cambiar|cámbialo|corrige|con\s|sin\s|ponle|quita|sube|baja|ajusta|revisa|explica|detalla|sí\s|si\s|no\s|ok\s|vale\s|gracias)/i
+const STOP_CONTEXT_WORDS = new Set(['los', 'las', 'por', 'para', 'con', 'una', 'uno', 'del', 'que', 'más', 'mas', 'muy', 'pero', 'como', 'cuando', 'donde', 'este', 'esta'])
+
+function contextWords(value) {
+  return new Set(String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9ñ\s]/g, ' ')
+    .split(/\s+/)
+    .filter((word) => word.length > 2 && !STOP_CONTEXT_WORDS.has(word)))
+}
+
+/** Saludos y cambios de tema no arrastran pendientes de turnos anteriores. */
+function shouldResetConversationContext(message = '', history = []) {
+  const text = String(message || '').trim()
+  if (!text) return false
+  if (GREETING_RE.test(text.replace(/[¿?¡!]/g, ''))) return true
+  if (FOLLOW_UP_RE.test(text)) return false
+  const previous = [...(Array.isArray(history) ? history : [])]
+    .reverse()
+    .find((item) => item?.role === 'user' && typeof item.content === 'string' && item.content.trim())
+  if (!previous) return false
+  const currentWords = contextWords(text)
+  const previousWords = contextWords(previous.content)
+  if (!currentWords.size || !previousWords.size) return false
+  if (CONTEXT_WORDS_RE.test(previous.content) && !CONTEXT_WORDS_RE.test(text) && currentWords.size <= 8) return true
+  const overlap = [...currentWords].filter((word) => previousWords.has(word)).length / Math.min(currentWords.size, previousWords.size)
+  return overlap <= 0.2 && currentWords.size <= 6
+}
+
+function cleanConversationContext(message, history) {
+  return shouldResetConversationContext(message, history) ? [] : history
+}
+
 function isRetryableAiError(error) {
   const status = Number(error?.status || 0)
   if ([401, 402, 403].includes(status)) return false
-  if ([408, 429, 502, 503, 504].includes(status)) return true
+  if ([404, 408, 429, 502, 503, 504].includes(status)) return true
   if (error?.name === 'AbortError' || error?.name === 'TimeoutError') return true
   const text = String(error?.message || '')
   if (/\b(?:401|402|403)\b/i.test(text)) return false
-  return /\b(?:408|429|502|503|504)\b|rate.?limit|too many requests|saturad|timeout|tardó|aborted|conexi|offline|fetch failed|network/i.test(text)
+  return /\b(?:404|408|429|502|503|504)\b|no longer supported|not found|rate.?limit|too many requests|saturad|timeout|tardó|aborted|conexi|offline|fetch failed|network/i.test(text)
 }
 
 // Último recurso con datos reales: el proxy no crea archivos, pero sí entrega
@@ -523,17 +572,17 @@ async function askOpenRouter({ catalog, message, history, attachment, signal, sy
     if (item.kind === 'image') content.push({ type: 'image_url', image_url: { url: `data:${item.mimeType};base64,${item.data}` } })
     if (item.kind === 'file') content.push({ type: 'file', file: { filename: item.name, file_data: `data:${item.mimeType};base64,${item.data}` } })
   }
-  const fullSystem = buildSystemPrompt(system, memories, history, temporal)
+  const cleanHistory = cleanConversationContext(message, history)
+  const fullSystem = buildSystemPrompt(system, memories, cleanHistory, temporal)
   const messages = [
     { role: 'system', content: fullSystem },
-    ...(fullSystem.includes(HISTORY_MARKER) ? [] : history.map((item) => ({ role: item.role, content: item.content }))),
+    ...(fullSystem.includes(HISTORY_MARKER) ? [] : cleanHistory.map((item) => ({ role: item.role, content: item.content }))),
     { role: 'user', content }
   ]
-  const cascade = [...new Set([model, ...fallbackModels].filter(Boolean))]
   const safeMaxTokens = Math.min(Math.max(Number(maxTokens) || 1500, 100), 6000)
   let lastError = null
-  for (let index = 0; index < cascade.length; index += 1) {
-    const candidate = cascade[index]
+  for (let index = 0; index < cascadeModels.length; index += 1) {
+    const candidate = cascadeModels[index]
     try {
       const attemptSignal = typeof AbortSignal !== 'undefined' && AbortSignal.any
         ? AbortSignal.any([signal, AbortSignal.timeout(25_000)])
@@ -564,7 +613,7 @@ async function askOpenRouter({ catalog, message, history, attachment, signal, sy
     } catch (error) {
       lastError = error
       if (!isRetryableAiError(error)) break
-      if (index < cascade.length - 1) await sleep(error.status === 429 ? 1500 : 350)
+      if (index < cascadeModels.length - 1) await sleep(error.status === 429 ? 1500 : 350)
     }
   }
   if (lastError && !isRetryableAiError(lastError)) throw lastError
@@ -578,8 +627,9 @@ async function askGemini({ catalog, message, history, attachment, signal, system
     if (item.kind === 'image') parts.push({ inline_data: { mime_type: item.mimeType, data: item.data } })
     if (item.kind === 'file') parts.push({ inline_data: { mime_type: item.mimeType, data: item.data } })
   }
-  const fullSystem = buildSystemPrompt(system, memories, history, temporal)
-  const contents = fullSystem.includes(HISTORY_MARKER) ? [] : history.map((item) => ({
+  const cleanHistory = cleanConversationContext(message, history)
+  const fullSystem = buildSystemPrompt(system, memories, cleanHistory, temporal)
+  const contents = fullSystem.includes(HISTORY_MARKER) ? [] : cleanHistory.map((item) => ({
     role: item.role === 'assistant' ? 'model' : 'user',
     parts: [{ text: item.content }]
   }))
@@ -617,6 +667,7 @@ const server = http.createServer(async (request, response) => {
       provider,
       model,
       keyConfigured: Boolean(apiKey),
+      cascadeSize: cascadeModels.length,
       rateLimitPerMinute: rateLimitMax
     })
   }
