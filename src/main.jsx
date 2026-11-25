@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as XLSX from 'xlsx'
 import { jsPDF } from 'jspdf'
 import { Html5Qrcode } from 'html5-qrcode'
-import { GoogleAuthProvider, OAuthProvider, createUserWithEmailAndPassword, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, signInWithCredential, signInWithEmailAndPassword, signInWithPopup, signInWithRedirect, signOut, updateProfile } from 'firebase/auth'
+import { GoogleAuthProvider, OAuthProvider, createUserWithEmailAndPassword, getRedirectResult, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, signInWithCredential, signInWithEmailAndPassword, signInWithPopup, signInWithRedirect, signOut, updateProfile } from 'firebase/auth'
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication'
 import { Capacitor, registerPlugin } from '@capacitor/core'
 import { Directory, Filesystem } from '@capacitor/filesystem'
@@ -673,13 +673,13 @@ async function openProviderSignIn(provider) {
   try {
     return await Promise.race([
       signInWithPopup(firebaseAuth, provider),
-      new Promise((_, reject) => setTimeout(() => reject({ code: 'auth/popup-timeout' }), 15000))
+      new Promise((_, reject) => setTimeout(() => reject({ code: 'auth/popup-timeout' }), 25000))
     ])
   } catch (error) {
     const code = error?.code || ''
-    // En WebView y navegadores con bloqueador de popups, la redirección es
-    // más confiable que la ventana emergente.
-    if (/popup-blocked|popup-timeout|popup-closed-by-user/.test(code)) {
+    // Solo se redirige si la ventana fue bloqueada y nunca abrió. Redirigir
+    // tras un timeout deja dos flujos vivos y el botón se queda en "Procesando".
+    if (code === 'auth/popup-blocked') {
       await signInWithRedirect(firebaseAuth, provider)
       return null
     }
@@ -1100,12 +1100,42 @@ async function signInWithNativeProvider(providerId) {
   }
 }
 
+// Firebase serializa las operaciones de autenticación. Si la persistencia
+// IndexedDB no responde, signOut() puede quedar encolado para siempre: sin un
+// límite de tiempo el botón "Cerrar sesión" se queda pegado.
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { setTimeout(() => reject(new Error('auth-timeout')), ms) })
+  ])
+}
+
 function AuthGate() {
   const [user, setUser] = useState(null)
   const [guest, setGuest] = useState(() => sessionStorage.getItem('vitimax-guest') === 'true')
   const [authLoading, setAuthLoading] = useState(Boolean(firebaseAuth))
   const [authError, setAuthError] = useState('')
   const [sessionNotice, setSessionNotice] = useState('')
+  const [signingOut, setSigningOut] = useState(false)
+  // Ignora eventos tardíos de onAuthStateChanged mientras se cierra; si no,
+  // un evento atrasado puede meter al usuario otra vez en la aplicación.
+  const signingOutRef = useRef(false)
+
+  function clearGuestFlag() {
+    try { sessionStorage.removeItem('vitimax-guest') } catch { /* sessionStorage puede no estar disponible */ }
+  }
+
+  function handleAuthenticated(nextUser) {
+    if (!nextUser) return
+    signingOutRef.current = false
+    clearGuestFlag()
+    setGuest(false)
+    setAuthError('')
+    setSessionNotice('')
+    setUser(nextUser)
+    setAuthLoading(false)
+  }
+
   useEffect(() => {
     if (!firebaseAuth) return undefined
     const loadingTimeout = setTimeout(() => {
@@ -1116,35 +1146,61 @@ function AuthGate() {
     }, 12000)
     const unsubscribe = onAuthStateChanged(
       firebaseAuth,
-      (nextUser) => { setUser(nextUser); setAuthLoading(false) },
-      (error) => { setAuthError(authErrorMessage(error.code)); setAuthLoading(false) }
+      (nextUser) => {
+        if (signingOutRef.current) return
+        setUser(nextUser)
+        setAuthLoading(false)
+      },
+      (error) => {
+        if (signingOutRef.current) return
+        setAuthError(authErrorMessage(error.code))
+        setAuthLoading(false)
+      }
     )
+    // Cuando el popup fue bloqueado se usa redirección. Antes nadie leía el
+    // resultado y la sesión podía quedar a medias entre Firebase y la UI.
+    getRedirectResult(firebaseAuth)
+      .then((result) => { if (result?.user) handleAuthenticated(result.user) })
+      .catch((error) => { if (!signingOutRef.current) setAuthError(authErrorMessage(error?.code)) })
     return () => { clearTimeout(loadingTimeout); unsubscribe() }
   }, [])
+
   async function handleSignOut() {
+    if (signingOutRef.current) return
+    signingOutRef.current = true
+    setSigningOut(true)
     setAuthError('')
-    setSessionNotice('Sesión cerrada correctamente. Puedes volver a iniciar sesión cuando quieras.')
-    try { sessionStorage.removeItem('vitimax-guest') } catch { /* sessionStorage puede no estar disponible */ }
-    setGuest(false)
+    setSessionNotice('')
     try {
-      if (Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('FirebaseAuthentication')) {
-        await FirebaseAuthentication.signOut()
-      }
-    } catch { /* el plugin nativo puede no tener sesión activa */ }
-    try {
-      if (firebaseAuth) await signOut(firebaseAuth)
-    } catch { /* la sesión local se limpia igualmente */ }
-    setUser(null)
+      try {
+        if (Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('FirebaseAuthentication')) {
+          await withTimeout(FirebaseAuthentication.signOut(), 5000)
+        }
+      } catch { /* el plugin nativo puede no tener sesión activa */ }
+      try {
+        if (firebaseAuth) await withTimeout(signOut(firebaseAuth), 5000)
+      } catch { /* la sesión local se limpia igualmente */ }
+      setSessionNotice('Sesión cerrada correctamente. Puedes volver a iniciar sesión cuando quieras.')
+    } finally {
+      // Se ejecuta aunque Firebase falle o se cuelgue: la interfaz nunca
+      // queda atrapada dentro de la app con el botón "pegado".
+      clearGuestFlag()
+      setGuest(false)
+      setUser(null)
+      setSigningOut(false)
+      setTimeout(() => { signingOutRef.current = false }, 1500)
+    }
   }
   function enterAsGuest() {
+    signingOutRef.current = false
     try { sessionStorage.setItem('vitimax-guest', 'true') } catch { /* sessionStorage puede no estar disponible */ }
     setGuest(true)
   }
   if (authLoading) return <div className="auth-loading"><span className="auth-loading-mark"><BrandMark size={40} /></span><strong>VITIMAX</strong><span>Verificando sesión...</span></div>
-  if (guest) return <App guest onSignOut={handleSignOut} />
+  if (guest) return <App guest onSignOut={handleSignOut} signingOut={signingOut} />
   if (!firebaseConfigured) return <AuthScreenV2 configured={false} onGuest={enterAsGuest} />
-  if (!user) return <AuthScreenV2 configured initialError={authError} initialNotice={sessionNotice} onAuthenticated={setUser} onGuest={enterAsGuest} />
-  return <App user={user} onSignOut={handleSignOut} />
+  if (!user) return <AuthScreenV2 configured initialError={authError} initialNotice={sessionNotice} onAuthenticated={handleAuthenticated} onGuest={enterAsGuest} />
+  return <App user={user} onSignOut={handleSignOut} signingOut={signingOut} />
 }
 
 function BrandMark({ size = 24 }) {
@@ -1604,7 +1660,7 @@ function GoogleBrandIcon() {
 }
 function MicrosoftBrandIcon() { return <svg className="provider-logo ms" viewBox="0 0 23 23" aria-hidden="true" focusable="false"><rect x="1" y="1" width="10" height="10" fill="#F25022" /><rect x="12" y="1" width="10" height="10" fill="#7FBA00" /><rect x="1" y="12" width="10" height="10" fill="#00A4EF" /><rect x="12" y="12" width="10" height="10" fill="#FFB900" /></svg> }
 
-function App({ user, onSignOut, guest = false }) {
+function App({ user, onSignOut, guest = false, signingOut = false }) {
   // Cada cuenta guarda su copia local con su propio uid, así al cerrar sesión
   // y entrar con otra cuenta no se mezclan el perfil ni los datos.
   const uid = user?.uid || ''
@@ -2867,7 +2923,7 @@ function App({ user, onSignOut, guest = false }) {
       <div className="brand"><div className="brand-mark"><BrandMark size={21} /></div><div><strong>VITIMAX</strong><span>Centro de gestión</span></div><button type="button" className="sidebar-close" aria-label="Cerrar menú" onClick={() => setMobileMenuOpen(false)}><X size={19} /></button></div>
       <div className="workspace-label">ESPACIO DE TRABAJO · v1.1.12 <span className="status-dot" /></div>
       <nav>{nav.map(({ label, icon: Icon, tone }) => <button key={label} className={active === label ? 'nav-item active' : 'nav-item'} onClick={() => navigate(label)}><span className={`nav-icon ${tone}`}><Icon size={17} /></span><span>{label}</span>{moduleCounts[label] > 0 && <em>{moduleCounts[label]}</em>}</button>)}</nav>
-      <div className="sidebar-bottom">{canManage && <button className="nav-item" onClick={() => { setOverlay('settings'); setMobileMenuOpen(false) }}><span className="nav-icon slate"><Settings2 size={17} /></span><span>Configuración</span></button>}<button className="nav-item signout-item" onClick={() => { setOverlay(null); setMobileMenuOpen(false); onSignOut?.() }}><span className="nav-icon rose"><LogOut size={17} /></span><span>Cerrar sesión</span></button><button className="profile profile-button" onClick={() => setOverlay('profile')}><Avatar name={profile.name} photo={profile.photo} /><div><strong>{profile.name || 'Invitado'}</strong><span>{profile.email || 'Acceso de invitado'}</span></div><MoreHorizontal size={17} /></button></div>
+      <div className="sidebar-bottom">{canManage && <button className="nav-item" onClick={() => { setOverlay('settings'); setMobileMenuOpen(false) }}><span className="nav-icon slate"><Settings2 size={17} /></span><span>Configuración</span></button>}<button className="nav-item signout-item" disabled={signingOut} onClick={() => { setOverlay(null); setMobileMenuOpen(false); onSignOut?.() }}><span className="nav-icon rose">{signingOut ? <Loader2 className="auth-spin" size={17} /> : <LogOut size={17} />}</span><span>{signingOut ? 'Cerrando sesión…' : 'Cerrar sesión'}</span></button><button className="profile profile-button" onClick={() => setOverlay('profile')}><Avatar name={profile.name} photo={profile.photo} /><div><strong>{profile.name || 'Invitado'}</strong><span>{profile.email || 'Acceso de invitado'}</span></div><MoreHorizontal size={17} /></button></div>
     </aside>
     <main className="main">
       <header className="topbar"><button className="mobile-menu" aria-label="Abrir menú" onClick={() => setMobileMenuOpen(true)}><Menu size={21} /></button><div className="crumb"><span className={`crumb-icon ${activeTone}`}><ActiveIcon size={14} /></span> VITIMAX <ChevronRight size={14} /> <b>{active}</b></div><div className="top-actions"><button className="icon-btn" title="Escanear código QR" aria-label="Escanear código QR" onClick={() => setQrOpen(true)}><QrCode size={18} /></button><button className="icon-btn" title="Notificaciones" aria-label="Notificaciones" onClick={() => setOverlay('notifications')}><Bell size={18} /><i /></button><button className="user-chip" onClick={() => setOverlay('profile')}><Avatar name={profile.name} photo={profile.photo} className="small" /><span>{profile.name || 'Administrador'}</span><ChevronRight size={15} /></button></div></header>
@@ -2884,7 +2940,7 @@ function App({ user, onSignOut, guest = false }) {
     <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv" hidden onChange={importExcel} />
     {notice && <div className="toast"><PackageCheck size={18} />{notice}</div>}
     {mobileMenuOpen && <button className="drawer-backdrop" aria-label="Cerrar menú" onClick={() => setMobileMenuOpen(false)} />}
-    {overlay === 'profile' && <ProfileModal profile={profile} user={user} guest={guest} onClose={() => setOverlay(null)} onSave={saveProfile} onSignOut={confirmSignOut} onResendVerification={resendVerificationEmail} onPasswordReset={sendPasswordResetToUser} />}
+    {overlay === 'profile' && <ProfileModal profile={profile} user={user} guest={guest} signingOut={signingOut} onClose={() => setOverlay(null)} onSave={saveProfile} onSignOut={confirmSignOut} onResendVerification={resendVerificationEmail} onPasswordReset={sendPasswordResetToUser} />}
     {overlay === 'settings' && <SettingsModal settings={settings} onClose={() => setOverlay(null)} onSave={saveSettings} />}
     {overlay === 'notifications' && <NotificationsModal lowStock={lowStock} missingData={missingData} onClose={() => setOverlay(null)} />}
     {importReport && <ImportReport report={importReport} onClose={() => setImportReport(null)} />}
@@ -3275,7 +3331,7 @@ function Avatar({ name, photo, className = '', alt = '' }) {
   return <div className={classes}>{profileInitials(name)}</div>
 }
 
-function ProfileModal({ profile, user, guest = false, onClose, onSave, onSignOut, onResendVerification, onPasswordReset }) {
+function ProfileModal({ profile, user, guest = false, signingOut = false, onClose, onSave, onSignOut, onResendVerification, onPasswordReset }) {
   const [form, setForm] = useState(profile)
   const [photoFile, setPhotoFile] = useState(null)
   const [photoPreview, setPhotoPreview] = useState(String(profile.photo || '').trim())
@@ -3338,16 +3394,17 @@ function ProfileModal({ profile, user, guest = false, onClose, onSave, onSignOut
   }
 
   function signOut() {
-    if (window.confirm('¿Cerrar sesión en VITIMAX? Podrás volver a entrar con tu cuenta cuando quieras.')) onSignOut()
+    if (signingOut) return
+    onSignOut?.()
   }
 
   const showPhoto = Boolean(photoPreview) && !photoBroken
   const emailVerified = Boolean(user?.emailVerified)
   const passwordAccount = hasPasswordProvider(user)
   return <ModalShell className="profile-modal" title="Mi perfil" eyebrow="CUENTA" onClose={onClose} actions={<>
-    <button className="btn secondary profile-signout" onClick={signOut}><LogOut size={16} /> Cerrar sesión</button>
-    <button className="btn secondary" onClick={onClose} disabled={saving}>Cancelar</button>
-    <button className="btn primary" onClick={save} disabled={saving}>{saving ? 'Guardando…' : 'Guardar cambios'}</button>
+    <button className="btn secondary profile-signout" onClick={signOut} disabled={signingOut}>{signingOut ? <Loader2 className="auth-spin" size={16} /> : <LogOut size={16} />} {signingOut ? 'Cerrando…' : 'Cerrar sesión'}</button>
+    <button className="btn secondary" onClick={onClose} disabled={saving || signingOut}>Cancelar</button>
+    <button className="btn primary" onClick={save} disabled={saving || signingOut}>{saving ? 'Guardando…' : 'Guardar cambios'}</button>
   </>}>
     <div className="profile-body">
       <div className="profile-hero">
@@ -3392,7 +3449,7 @@ function ProfileModal({ profile, user, guest = false, onClose, onSave, onSignOut
       {!guest && <div className="profile-account-actions">
         {!emailVerified && <button type="button" className="btn secondary" onClick={onResendVerification}><Mail size={15} /> Verificar mi correo</button>}
         {passwordAccount && <button type="button" className="btn secondary" onClick={onPasswordReset}><ShieldCheck size={15} /> Cambiar contraseña</button>}
-        <button type="button" className="btn secondary profile-signout-inline" onClick={signOut}><LogOut size={15} /> Cerrar sesión</button>
+        <button type="button" className="btn secondary profile-signout-inline" onClick={signOut} disabled={signingOut}>{signingOut ? <Loader2 className="auth-spin" size={15} /> : <LogOut size={15} />} {signingOut ? 'Cerrando…' : 'Cerrar sesión'}</button>
       </div>}
       <details className="profile-url-details">
         <summary>Usar enlace de imagen</summary>

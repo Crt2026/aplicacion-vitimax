@@ -901,3 +901,6 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 /* Sugerencias rápidas: deslizamiento táctil sin barra de scroll visible. */
 .quick-prompts{scrollbar-width:none;-ms-overflow-style:none;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}
 .quick-prompts::-webkit-scrollbar{display:none}
+
+/* Cierre de sesión: feedback visible y ningún botón queda "pegado". */
+.signout-item:disabled,.profile-signout:disabled,.profile-signout-inline:disabled{opacity:.7;cursor:progress}
